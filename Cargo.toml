@@ -1,0 +1,20 @@
+[package]
+name = "tvserver"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version = "0.6.2", features = ["headers"] }
+axum-macros = "0.3.1"
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0.59"
+tracing = "0.1.35"
+tracing-subscriber = "0.3.14"
+serde = { version = "1.0.138", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.6.2", features = ["runtime-tokio-rustls", "any", "sqlite", "migrate"] }
+tower-http = { version = "0.3.0", features = ["fs", "trace", "cors"] }
+tower = { version = "0.4.10", features = ["util"] }
+tokio-util = "0.7.4"
