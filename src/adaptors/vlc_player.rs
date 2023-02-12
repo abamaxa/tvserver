@@ -104,35 +104,6 @@ impl VLCPlayer {
     }
 }
 
-/*
-#[derive(Debug)]
-pub struct VLCProxy {
-    player: Mutex<Option<VLCPlayer>>
-}
-
-
-impl Player for VLCProxy {
-    fn send_command(&mut self, command: &str, wait_secs: i32) -> Result<String, String> {
-        if let None = self.player {
-            self.player = Mutex::new(Some(VLCPlayer::new()));
-        }
-
-        match self.player {
-            Some(player) => player.send_command(command, wait_secs),
-            None => Err("could not start vlc".to_string())
-        }
-    }
-}
-
-impl VLCProxy {
-
-    pub fn new() -> VLCProxy {
-        VLCProxy{ player: None}
-    }
-}
-*/
-
-
 #[cfg(test)]
 mod test {
 

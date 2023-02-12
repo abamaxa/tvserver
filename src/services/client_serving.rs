@@ -1,12 +1,11 @@
 use std::env;
-use axum::{
-    body::{boxed, Body, BoxBody},
-    http::{Request, Response, StatusCode, Uri},
-};
+use axum::{body::{boxed, Body, BoxBody}, http::{Request, Response, StatusCode, Uri}};
 use tower::util::ServiceExt;
 use tower_http::services::ServeDir;
 
+
 pub async fn file_handler(uri: Uri) -> Result<Response<BoxBody>, (StatusCode, String)> {
+
     let res = get_static_file(uri.clone()).await?;
 
     if res.status() == StatusCode::NOT_FOUND {

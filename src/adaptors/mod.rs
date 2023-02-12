@@ -1,3 +1,5 @@
 pub mod repository;
-pub mod player;
+pub mod vlc_player;
 pub mod filestore;
+pub mod browser_player;
+

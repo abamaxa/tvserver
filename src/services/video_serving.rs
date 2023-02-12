@@ -1,21 +1,19 @@
 use std::io::{self, SeekFrom};
-use crate::services::web::Context;
-
 use axum::{
     body::StreamBody,
     http::{header, StatusCode},
-    response::{AppendHeaders, IntoResponse},
-    extract::{State}
+    response::{AppendHeaders, IntoResponse}
 };
 use axum::http::header::HeaderName;
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 
 
-pub async fn video(State(_): State<Context>, headers: header::HeaderMap) -> impl IntoResponse {
+pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> impl IntoResponse {
+
     // `File` implements `AsyncRead`
     const BUFFER_SIZE: usize = 0x100000; // 1 megabyte
-    const VIDEO_FILE: &str = "/Users/chris2/Movies/Only Fools and Horses/Series 6/S06E01 - Yuppy Love (Uncut).mp4";
+    // "/Users/chris2/Movies/Only Fools and Horses/Series 6/S06E01 - Yuppy Love (Uncut).mp4";
 
     let mut stream_from = 0;
     let mut stream_to = 0;
@@ -30,7 +28,7 @@ pub async fn video(State(_): State<Context>, headers: header::HeaderMap) -> impl
         //println!("{} -> {:?}", k, v);
     }
 
-    let mut file = match tokio::fs::File::open(VIDEO_FILE).await {
+    let mut file = match tokio::fs::File::open(video_file).await {
         Ok(file) => file,
         Err(err) => return Err((StatusCode::NOT_FOUND, format!("File not found: {}", err))),
     };
