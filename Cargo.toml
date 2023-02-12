@@ -20,6 +20,7 @@ tokio-util = "0.7.4"
 futures = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 async-trait = "0.1.64"
+http = {path = "./private/http-0.2.8"}
 
 [profile.release]
 strip = "debuginfo"
