@@ -10,22 +10,19 @@ use tokio_util::io::ReaderStream;
 
 
 pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> impl IntoResponse {
-
-    // `File` implements `AsyncRead`
     const BUFFER_SIZE: usize = 0x100000; // 1 megabyte
-    // "/Users/chris2/Movies/Only Fools and Horses/Series 6/S06E01 - Yuppy Love (Uncut).mp4";
 
+    let file_parts: Vec<&str> = video_file.rsplitn(1, "/").collect();
+    let file_name = String::from(file_parts[0]);
     let mut stream_from = 0;
     let mut stream_to = 0;
     let mut found_range = false;
 
-    //println!("dumping headers");
     for (k, v) in headers.iter() {
         if k == "range" {
             (stream_from, stream_to) = get_offsets(v.to_str().unwrap());
             found_range = true;
         }
-        //println!("{} -> {:?}", k, v);
     }
 
     let mut file = match tokio::fs::File::open(video_file).await {
@@ -46,10 +43,10 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
     }
 
     if stream_to == 0 {
-        stream_to = file_size - 1;
+        // stream_to = file_size - 1;
+        let buf_size = BUFFER_SIZE as u64;
+        stream_to = if stream_from + buf_size < file_size {stream_from + buf_size} else {file_size - 1};
     }
-
-    //let chunk_size = stream_to - stream_from + 1;
 
     // convert the `AsyncRead` into a `Stream`
     let stream = ReaderStream::with_capacity(file, BUFFER_SIZE);
@@ -58,15 +55,15 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
 
     let content_type = HeaderName::from_static("Content-Type");
     let content_length = HeaderName::from_static("Content-Length");
-    //let content_disposition = HeaderName::from_static("Content-Disposition");
+    let content_disposition = HeaderName::from_static("Content-Disposition");
     let content_range = HeaderName::from_static("Content-Range");
     let accept_ranges = HeaderName::from_static("Accept-Ranges");
 
-    if !found_range || stream_from == 0 {
+    if !found_range || (stream_to - stream_from) >= (file_size - 1) {
         let headers = AppendHeaders([
             (content_type, "video/mp4".to_string()),
             (content_length, file_size.to_string()),
-            //(content_disposition,"attachment; filename=\"OnlyFools.mp4\"".to_string()),
+            (content_disposition,format!("attachment; filename=\"{}\"", file_name)),
             (content_range, format!("bytes {}-{}/{}", stream_from, stream_to, file_size)),
         ]);
 
@@ -77,34 +74,11 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
         (accept_ranges, "bytes".to_string()),
         (content_type, "video/mp4".to_string()),
         (content_range, format!("bytes {}-{}/{}", stream_from, stream_to, file_size)),
-        //(content_length, chunk_size.to_string()),
-        //(content_disposition,"attachment; filename=\"OnlyFools.mp4\"".to_string()),
+        (content_disposition,format!("attachment; filename=\"{}\"", file_name)),
     ]);
 
     Ok((StatusCode::PARTIAL_CONTENT, headers, body))
 }
-
-/*
-    if !found_range {
-        let headers = AppendHeaders([
-            (header::CONTENT_TYPE, "video/mp4".to_string()),
-            (header::CONTENT_LENGTH, file_size.to_string()),
-            (header::CONTENT_DISPOSITION,"attachment; filename=\"OnlyFools.mp4\"".to_string()),
-        ]);
-
-        return Ok((StatusCode::OK, headers, body));
-    }
-
-    let headers = AppendHeaders([
-        (header::ACCEPT_RANGES, "bytes".to_string()),
-        (header::CONTENT_TYPE, "video/mp4".to_string()),
-        (header::CONTENT_RANGE, format!("bytes {}-{}/{}", stream_from, stream_to, file_size)),
-        //(header::CONTENT_DISPOSITION,"attachment; filename=\"OnlyFools.mp4\"".to_string()),
-    ]);
-
-    Ok((StatusCode::PARTIAL_CONTENT, headers, body))
- */
-
 
 fn get_offsets(offsets: &str) -> (u64, u64) {
     let mut parts = offsets.splitn(2, "=");
