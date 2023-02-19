@@ -52,10 +52,8 @@ impl RemoteBrowserPlayer {
         );
 
         tokio::spawn(async move {
-            loop {
-                if let Some(msg) = out_rx.recv().await {
-                    println!("out_rx received: {:?}", msg);
-                }
+            while let Some(msg) = out_rx.recv().await {
+                println!("out_rx received: {:?}", msg);
             }
         });
 
@@ -71,9 +69,12 @@ impl RemoteBrowserPlayer {
         // Spawn a task that will push several messages to the client (does not matter what client does)
         let mut send_task = tokio::spawn(async move {
             loop {
-                let mut buffer: Option<Vec<u8>> = None;
+                let buffer: Option<Vec<u8>>;
                 if let Some(msg) = input.recv().await {
                     buffer = Some(msg);
+                } else {
+                    println!("broken pipe");
+                    break;
                 }
 
                 if let Some(msg) = buffer {
@@ -86,7 +87,6 @@ impl RemoteBrowserPlayer {
             }
         });
 
-        // This second task will receive messages from client and print them on server console
         let mut recv_task = tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
                 if let Message::Text(t) = msg {

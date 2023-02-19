@@ -1,3 +1,4 @@
+/*
 use std::process::{Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::io::{BufRead, Write, BufReader};
@@ -6,10 +7,7 @@ use std::{env, thread};
 use std::time;
 use std::sync::Mutex;
 
-
-pub trait Player: Send + Sync {
-    fn send_command(&self, command: &str, wait_secs: i32) -> Result<String, String>;
-}
+use crate::domain::traits::Player;
 
 #[derive(Debug)]
 pub struct VLCPlayer {
@@ -27,7 +25,6 @@ impl Player for VLCPlayer {
     }
 }
 
-
 impl VLCPlayer {
 
     pub fn new() -> VLCPlayer {
@@ -39,7 +36,7 @@ impl VLCPlayer {
             stdout_rx: Mutex::new(stdout_rx),
         };
 
-        let disable_player = env::var("DISABLE_PLAYER").unwrap_or(String::new());
+        let disable_player = env::var(DISABLE_VLC).unwrap_or(String::new());
         if disable_player != "true" {
             thread::spawn(move || {
                 VLCPlayer::run_vlc(&stdin_rx, stdout_tx);
@@ -109,7 +106,7 @@ mod test {
 
     use super::{VLCPlayer, Player};
 
-    // #[test]
+    //#[test]
     fn test_run_vlc() {
         let vlc = VLCPlayer::new();
 
@@ -125,6 +122,6 @@ mod test {
 
         println!("Info from VLC: {}", result.unwrap());
 
-        vlc.send_command("quit", 1);
+        let _ = vlc.send_command("quit", 1);
     }
-}
+}*/

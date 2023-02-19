@@ -1,3 +1,5 @@
+extern crate core;
+
 mod adaptors;
 mod domain;
 mod services;
@@ -6,7 +8,8 @@ use axum::routing::get;
 use tower_http::{trace::{DefaultMakeSpan, TraceLayer}, cors::CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, filter::LevelFilter, filter};
 use std::{env, net::SocketAddr, sync::Arc};
-use crate::adaptors::vlc_player::Player;
+use crate::domain::MOVIE_DIR;
+use crate::domain::traits::Player;
 
 
 pub async fn run() -> anyhow::Result<()> {
@@ -14,9 +17,11 @@ pub async fn run() -> anyhow::Result<()> {
 
     adaptors::repository::do_migrations(&pool).await.unwrap();
 
-    let player: Option<Arc<dyn Player>> = None; // Arc::new(adaptors::vlc_player::VLCPlayer::new());
+    let player: Option<Arc<dyn Player>> = None;
 
-    let movie_dir = env::var("MOVIE_DIR").expect("MOVIE_DIR environment variable is not set");
+    // player = Some(Arc::new(adaptors::vlc_player::VLCPlayer::new()));
+
+    let movie_dir = env::var(MOVIE_DIR).expect("MOVIE_DIR environment variable is not set");
 
     let store = Arc::new(adaptors::filestore::FileStore::from(&movie_dir));
 
