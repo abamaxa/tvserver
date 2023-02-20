@@ -4,24 +4,16 @@ use transmission_rpc::types::{
     Id,
     TorrentAddArgs,
 };
-pub use transmission_rpc::types::Torrent;
 use transmission_rpc::TransClient;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-
-use crate::domain::models::SearchResults;
+use crate::domain::models::{DownloadProgress, TorrentListResults, SearchResults};
 use crate::domain::{TRANSMISSION_PWD, TRANSMISSION_URL, TRANSMISSION_USER};
 
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct DownloadProgress {
-    pub name: String,
-    pub percentage_downloaded: f64,
-}
 
 #[async_trait]
-pub trait TorrentDaemon {
+pub trait TorrentDaemon: Send + Sync {
     async fn add(&self, link: &str) -> Result<String, String>;
-    async fn list(&self) -> Result<SearchResults<Torrent>, SearchResults<Torrent>>;
+    async fn list(&self) -> Result<TorrentListResults, TorrentListResults>;
     async fn delete(&self, id: i64, delete_local_data: bool) -> Result<(), String>;
 }
 
@@ -48,13 +40,22 @@ impl TorrentDaemon for TransmissionDaemon {
         }
     }
 
-    async fn list(&self) -> Result<SearchResults<Torrent>, SearchResults<Torrent>> {
+    async fn list(&self) -> Result<TorrentListResults, TorrentListResults> {
         match self.get_client().torrent_get(None, None).await {
             Err(e) => {
                 println!("{}", e);
                 Err(SearchResults::error(e.to_string().as_str()))
             },
-            Ok(res) => Ok(SearchResults::success(res.arguments.torrents))
+            Ok(res) => {
+                let results = res
+                    .arguments
+                    .torrents
+                    .iter()
+                    .map(|item| DownloadProgress::from(item))
+                    .collect();
+
+                Ok(SearchResults::success(results))
+            }
         }
     }
 
@@ -87,16 +88,56 @@ impl TransmissionDaemon {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::adaptors::PirateClient;
+    use crate::domain::models::DownloadableItem;
+    use crate::domain::traits::SearchEngine;
 
     #[tokio::test]
-    async fn test_list() {
+    async fn test_torrents_list() {
         let client = TransmissionDaemon::new();
 
         match client.list().await {
             Err(err) => panic!("{}", err.error.unwrap()),
             Ok(results) => {
                 for item in results.results.unwrap() {
-                    println!("{:?}, {:?}", item.name, item.status);
+                    println!("{:?}, {:?}", item.name, item.download_finished);
+                }
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_torrents_add_and_delete() {
+        let mut link: Option<String> = None;
+        let pc: &dyn SearchEngine<DownloadableItem> = &PirateClient::new(None);
+
+        match pc.search("top-books").await {
+            Err(err) => panic!("{:?}", err.to_string()),
+            Ok(results) => {
+                for item in results.results.unwrap() {
+                    println!("{}: {}, {}", item.link, item.title, item.description);
+                    link = Some(item.link);
+                    break;
+                }
+            },
+        }
+
+        if link.is_none() {
+            panic!("no test torrent found");
+        }
+
+        let client = TransmissionDaemon::new();
+
+        match client.add(&link.unwrap()).await {
+            Ok(result) => println!("{}", result),
+            Err(err) => panic!("{}", err),
+        }
+
+        match client.list().await {
+            Err(err) => panic!("{}", err.error.unwrap()),
+            Ok(results) => {
+                for item in results.results.unwrap() {
+                    println!("{}, {}", item.name, item.download_finished);
                 }
             },
         }

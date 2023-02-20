@@ -10,12 +10,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, filter::
 use std::{env, net::SocketAddr, sync::Arc};
 use crate::domain::MOVIE_DIR;
 use crate::domain::traits::Player;
+use crate::services::download_monitor::monitor_downloads;
 
 
 pub async fn run() -> anyhow::Result<()> {
     let pool = adaptors::repository::get_database().await?;
 
     adaptors::repository::do_migrations(&pool).await.unwrap();
+
+    let _ = monitor_downloads();
 
     let player: Option<Arc<dyn Player>> = None;
 

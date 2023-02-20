@@ -15,7 +15,14 @@ pub struct PirateClient {
 #[async_trait]
 impl SearchEngine<DownloadableItem> for PirateClient {
     async fn search(&self, query: &str) -> Result<SearchResults<DownloadableItem>, reqwest::Error> {
-        let res = reqwest::get(format!("{}/search/{}/1/99/0", self.host, query)).await?;
+        let url = match query {
+            "top-100" => format!("{}/top/all", self.host),
+            "top-videos" => format!("{}/top/200", self.host),
+            "top-books" => format!("{}/top/601", self.host),
+            _ =>  format!("{}/search/{}/1/99/0", self.host, query),
+        };
+
+        let res = reqwest::get(url).await?;
 
         let html = res.text().await?;
 
@@ -96,7 +103,7 @@ mod test {
         let pc = PirateClient::new(Some(BASE_URL));
 
         match pc.search("Dragons Den").await {
-            Err(err) => panic!("{}", err),
+            Err(err) => panic!("{:?}", err.to_string()),
             Ok(results) => {
                 for item in results.results.unwrap() {
                     println!("{}, {}", item.title, item.description);

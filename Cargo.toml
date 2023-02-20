@@ -22,7 +22,7 @@ async-trait = "0.1.64"
 reqwest = { version = "0.11.14", features = ["json"] }
 scraper = "0.14.0"
 urlencoding = "2.1.2"
-transmission-rpc = {path = "./private/transmission-rpc-0.4.0"}
+transmission-rpc = "0.4.0"
 html-escape = "0.2.13"
 
 [profile.release]
