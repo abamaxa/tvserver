@@ -2,13 +2,13 @@ use std::env;
 use transmission_rpc::types::{
     BasicAuth,
     Id,
-    TorrentAddArgs,
+    TorrentAddArgs
 };
 use transmission_rpc::TransClient;
 use async_trait::async_trait;
+
 use crate::domain::models::{DownloadProgress, TorrentListResults, SearchResults};
 use crate::domain::{TRANSMISSION_PWD, TRANSMISSION_URL, TRANSMISSION_USER};
-
 
 #[async_trait]
 pub trait TorrentDaemon: Send + Sync {
@@ -22,7 +22,6 @@ pub struct TransmissionDaemon {
 }
 
 const DEFAULT_URL: &str = "http://higo.abamaxa.com:9091/transmission/rpc";
-
 
 #[async_trait]
 impl TorrentDaemon for TransmissionDaemon {

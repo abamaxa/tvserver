@@ -4,12 +4,23 @@ use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
-pub struct Subprocess {
+pub struct StdSubprocess {
     //stdin_tx: Sender<String>,
     //stdout_rx: Receiver<String>
 }
 
-impl Subprocess {
+pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
+    let mut child = Command::new(cmd)
+        .args(args)
+        .spawn()
+        .expect("failed to spawn");
+
+    let status = child.wait().await?;
+
+    Ok(status.success())
+}
+
+impl StdSubprocess {
 
     pub async fn _run(cmd: &str, args: Vec<String>, output: Sender<String>) {
         let mut child = Command::new(cmd)

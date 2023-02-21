@@ -1,53 +1,11 @@
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io;
-use std::path::Path;
+use std::{fs, io,path::{Path, PathBuf}};
+use async_trait::async_trait;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct VideoEntry {
-    pub collection: String,
-    pub parent_collection: String,
-    pub child_collections: Vec<String>,
-    pub videos: Vec<String>,
-    pub errors: Vec<String>,
-}
+use crate::adaptors::subprocess::command;
+use crate::domain::models::VideoEntry;
+use crate::domain::traits::VideoStore;
 
-impl VideoEntry {
-    pub fn from(
-        collection: String,
-        child_collections: Vec<String>,
-        videos: Vec<String>,
-    ) -> VideoEntry {
-        let mut parent_collection = String::new();
-
-        if let Some(_) = collection.find('/') {
-            let v: Vec<&str> = collection.rsplitn(2, '/').collect();
-            parent_collection = v[1].to_string();
-        }
-
-        VideoEntry {
-            collection,
-            parent_collection,
-            child_collections,
-            videos,
-            ..Default::default()
-        }
-    }
-
-    pub fn error(error: String) -> VideoEntry {
-        VideoEntry {
-            errors: vec![error],
-            ..Default::default()
-        }
-    }
-}
-
-pub trait VideoStore: Send + Sync {
-    fn list(&self, collection: String) -> Result<VideoEntry, io::Error>;
-    fn as_path(&self, collection: String, video: String) -> String;
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FileStore {
     root: String,
 }
@@ -58,15 +16,25 @@ impl FileStore {
             root: root.to_string(),
         }
     }
+
+    fn get_new_video_path(&self, path: &Path) -> io::Result<PathBuf> {
+        let dest_dir = Path::new(&self.root).join("New");
+        if !dest_dir.exists() {
+            fs::create_dir_all(&dest_dir)?;
+        }
+
+        Ok(dest_dir.join(path.file_name().unwrap_or_default()))
+    }
 }
 
+#[async_trait]
 impl VideoStore for FileStore {
     fn list(&self, collection: String) -> Result<VideoEntry, io::Error> {
         let mut child_collections: Vec<String> = Vec::new();
         let mut videos: Vec<String> = Vec::new();
 
-        let store_path = format!("{}/{}", self.root, collection);
-        let dir = Path::new(&store_path);
+        // let store_path = format!("{}/{}", self.root, collection);
+        let dir = Path::new(&self.root).join(&collection);
 
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
@@ -98,6 +66,18 @@ impl VideoStore for FileStore {
         Ok(VideoEntry::from(collection, child_collections, videos))
     }
 
+    fn move_file(&self, path: &PathBuf) -> io::Result<()> {
+        fs::rename(path, self.get_new_video_path(path)?)
+    }
+
+    async fn convert_to_mp4(&self, path: &PathBuf) -> anyhow::Result<bool> {
+        convert_to_mp4(path, &self.get_new_video_path(path)?).await
+    }
+
+    fn delete(&self, _path: String) -> io::Result<bool> {
+        todo!()
+    }
+
     fn as_path(&self, collection: String, video: String) -> String {
         if collection == "" {
             format!("{}/{}", self.root, video)
@@ -107,9 +87,24 @@ impl VideoStore for FileStore {
     }
 }
 
+async fn convert_to_mp4(src: &PathBuf, dest: &PathBuf) -> anyhow::Result<bool> {
+    let args = vec![
+        "-i",
+        src.to_str().unwrap_or_default(),
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-y",
+        dest.to_str().unwrap_or_default()
+    ];
+    command("ffmpeg", args).await
+}
+
+
 #[cfg(test)]
 mod tests {
-    use super::{FileStore, VideoStore};
+    use super::*;
 
     #[test]
     fn test() {

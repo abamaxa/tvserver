@@ -1,29 +1,11 @@
+use anyhow::Result;
+use std::path::PathBuf;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use transmission_rpc::types::{Torrent, TorrentStatus};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct DownloadableItem {
-    pub title: String,
-    pub description: String,
-    pub link: String,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SearchResults<T> {
-    pub results: Option<Vec<T>>,
-    pub error: Option<String>,
-}
-
-
-impl<T> SearchResults<T> {
-    pub fn success(results: Vec<T>) -> Self {
-        SearchResults{results: Some(results), error: None}
-    }
-
-    pub fn error(message: &str) -> Self {
-        SearchResults{error: Some(message.to_string()), results: None}
-    }
-}
+use crate::domain::models::SearchResults;
+use crate::domain::traits::VideoStore;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +13,29 @@ pub struct FileDetails {
     length: i64,
     bytes_completed: i64,
     name: String,
+    filepath: PathBuf,
+}
+
+impl FileDetails {
+    fn is_video(&self) -> bool {
+        match self.filepath.extension() {
+            Some(extension) => match extension.to_str().unwrap_or("") {
+                "mpeg" | "mpg" | "mp4" | "avi" | "mkv" => true,
+                _ => false,
+            }
+            None => false,
+        }
+    }
+
+    fn should_convert_to_mp4(&self) -> bool {
+        match self.filepath.extension() {
+            Some(extension) => match extension.to_str().unwrap_or("") {
+                "avi" => true,
+                _ => false,
+            }
+            None => false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -69,12 +74,21 @@ impl DownloadProgress {
             _ => false,
         };
 
+        let download_dir = match t.download_dir.as_ref() {
+            Some(val) => val.clone(),
+            None => String::new(),
+        };
+
         let files = match &t.files {
             Some(files) => files.iter().map(|item| {
+                let filepath = PathBuf::from(&download_dir)
+                    .join(item.name.clone());
+
                 FileDetails{
                     length: item.length,
                     bytes_completed: item.bytes_completed,
                     name: item.name.clone(),
+                    filepath: filepath,
                 }
             }).collect(),
             None => vec![],
@@ -99,10 +113,7 @@ impl DownloadProgress {
             total_size: t.total_size.unwrap_or(0),
             size_when_done: t.size_when_done.unwrap_or(0),
             files: files,
-            download_dir: match t.download_dir.as_ref() {
-                Some(val) => val.clone(),
-                None => String::new(),
-            },
+            download_dir: download_dir,
             hash_string: match t.hash_string.as_ref() {
                 Some(val) => val.clone(),
                 None => String::new(),
@@ -118,8 +129,19 @@ impl DownloadProgress {
         self.download_finished
     }
 
-    pub fn move_files_to_movie_folder(&self) {
+    pub async fn move_videos(&self, store: &Arc<dyn VideoStore>) -> Result<()> {
+        for item in &self.files {
+            if !item.is_video() {
+                continue;
+            }
 
+            if item.should_convert_to_mp4() {
+                store.convert_to_mp4(&item.filepath).await?;
+            } else {
+                store.move_file(&item.filepath)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn delete(&self) {
@@ -128,26 +150,3 @@ impl DownloadProgress {
 }
 
 pub type TorrentListResults = SearchResults<DownloadProgress>;
-
-
-/*use serde::{Deserialize, Serialize};
-
-
-#[derive(Deserialize)]
-pub struct CreateUser {
-    pub username: String,
-}
-
-#[derive(Debug, Serialize,Deserialize, Clone, Eq, Hash, PartialEq, sqlx::FromRow)]
-pub struct User {
-    pub id: i64,
-    pub username: String,
-}
-
-
-impl User {
-    pub fn laugh(&self) -> String {
-        String::from("ha ha")
-    }
-}*/
-

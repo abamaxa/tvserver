@@ -1,17 +1,19 @@
+use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
 use tokio::time::{sleep, Duration};
 use crate::adaptors::{TorrentDaemon, TransmissionDaemon};
+use crate::domain::traits::VideoStore;
 use crate::domain::models::{DownloadProgress, TorrentListResults};
 
 
-pub fn monitor_downloads() -> JoinHandle<()> {
+pub fn monitor_downloads(store: Arc<dyn VideoStore>) -> JoinHandle<()> {
     task::spawn(async move {
         println!("starting download monitor");
         let torrent_service: &dyn TorrentDaemon  = &TransmissionDaemon::new();
 
         loop {
             match torrent_service.list().await {
-                Ok(results) => handle_results(&results),
+                Ok(results) => handle_results(&results, &store).await,
                 Err(e) => println!("download monitor could not read daemon: {:?}", e.error),
             }
 
@@ -20,22 +22,26 @@ pub fn monitor_downloads() -> JoinHandle<()> {
     })
 }
 
-fn handle_results(results: &TorrentListResults) {
+async fn handle_results(results: &TorrentListResults, store: &Arc<dyn VideoStore>) {
     if let Some(err) = &results.error {
         println!("download monitor got an error from the daemon: {}", err);
         return;
     }
 
     if let Some(items) = &results.results {
-        move_completed_downloads(items);
+        move_completed_downloads(items, store).await;
     }
 }
 
-fn move_completed_downloads(items: &Vec<DownloadProgress>) {
+async fn move_completed_downloads(items: &Vec<DownloadProgress>, store: &Arc<dyn VideoStore>) {
     for item in items {
-        if item.has_finished_downloading() {
-            item.move_files_to_movie_folder();
-            item.delete();
+        if !item.has_finished_downloading() {
+            continue;
+        }
+
+        match item.move_videos(store).await {
+            Ok(_) => item.delete(),
+            Err(e) => println!("could not move videos: {}", e.to_string()),
         }
     }
 }

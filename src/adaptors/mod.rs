@@ -8,7 +8,7 @@ pub mod torrents;
 pub mod subprocess;
 
 pub use browser_player::{RemotePlayer, RemoteBrowserPlayer};
-pub use filestore::{VideoEntry, VideoStore};
+pub use filestore::FileStore;
 pub use pirate_bay::{PirateClient};
 pub use torrents::{TorrentDaemon, TransmissionDaemon};
 #[cfg(feature = "vlc")]

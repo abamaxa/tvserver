@@ -15,7 +15,7 @@ use axum::{
     Router
 };
 
-use crate::adaptors::{VideoEntry, VideoStore, PirateClient, RemotePlayer, RemoteBrowserPlayer, TransmissionDaemon, TorrentDaemon};
+use crate::adaptors::{PirateClient, RemotePlayer, RemoteBrowserPlayer, TransmissionDaemon, TorrentDaemon};
 use crate::adaptors::youtube::YoutubeClient;
 use crate::domain::events::{
     DownloadRequest,
@@ -27,8 +27,8 @@ use crate::domain::events::{
     Command
 };
 use crate::domain::GOOGLE_KEY;
-use crate::domain::models::{DownloadableItem, SearchResults};
-use crate::domain::traits::{Player, SearchEngine};
+use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry};
+use crate::domain::traits::{Player, SearchEngine, VideoStore};
 use crate::services::video_serving::stream_video;
 
 #[derive(Clone)]
@@ -268,7 +268,7 @@ async fn execute_remote(state: &SharedState, command: Command) -> (StatusCode, J
             return (StatusCode::BAD_REQUEST, Json(Response::error("missing remote_address".to_string())));
         }
 
-        let key = command.remote_address.unwrap_or_else(|| String::from(""));
+        let key = command.remote_address.unwrap_or_default();
 
         match context.client_map.get(&key) {
             Some(client) => remote_client = client.clone(),
