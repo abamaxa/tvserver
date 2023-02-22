@@ -67,11 +67,25 @@ impl VideoStore for FileStore {
     }
 
     fn move_file(&self, path: &PathBuf) -> io::Result<()> {
-        fs::rename(path, self.get_new_video_path(path)?)
+        let new_path = self.get_new_video_path(path)?;
+
+        println!("moving file {} to {}",
+                 path.to_str().unwrap_or_default(),
+                 new_path.to_str().unwrap_or_default());
+
+        fs::rename(path, new_path)
     }
 
     async fn convert_to_mp4(&self, path: &PathBuf) -> anyhow::Result<bool> {
-        convert_to_mp4(path, &self.get_new_video_path(path)?).await
+        let mut new_path = self.get_new_video_path(path)?;
+
+        new_path.set_extension("mp4");
+
+        println!("converting {} to mp4 {}",
+                 path.to_str().unwrap_or_default(),
+                 new_path.to_str().unwrap_or_default());
+
+        convert_to_mp4(path, &new_path).await
     }
 
     fn delete(&self, _path: String) -> io::Result<bool> {
