@@ -76,7 +76,7 @@ impl DownloadProgress {
         };
 
         let download_dir = match t.download_dir.as_ref() {
-            Some(val) => format!("{}{}", get_torrents_dir(), val),
+            Some(val) => val.clone(),
             None => String::new(),
         };
 
