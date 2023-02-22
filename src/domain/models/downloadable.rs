@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use transmission_rpc::types::{Torrent, TorrentStatus};
+use crate::domain::config::get_torrents_dir;
 
 use crate::domain::models::SearchResults;
 use crate::domain::traits::VideoStore;
@@ -19,7 +20,7 @@ pub struct FileDetails {
 impl FileDetails {
     fn is_video(&self) -> bool {
         match self.filepath.extension() {
-            Some(extension) => match extension.to_str().unwrap_or("") {
+            Some(extension) => match extension.to_str().unwrap_or_default() {
                 "mpeg" | "mpg" | "mp4" | "avi" | "mkv" => true,
                 _ => false,
             }
@@ -29,7 +30,7 @@ impl FileDetails {
 
     fn should_convert_to_mp4(&self) -> bool {
         match self.filepath.extension() {
-            Some(extension) => match extension.to_str().unwrap_or("") {
+            Some(extension) => match extension.to_str().unwrap_or_default() {
                 "avi" => true,
                 _ => false,
             }
@@ -47,13 +48,13 @@ pub struct DownloadProgress {
     edit_date: i64,
     eta: i64,
     error: i64,
-    id: i64,
     peers_connected: i64,
     size_when_done: i64,
     download_dir: String,
     hash_string: String,
     files: Vec<FileDetails>,
 
+    pub id: i64,
     pub name: String,
     pub total_size: i64,
     pub percent_done: f32,
@@ -75,7 +76,7 @@ impl DownloadProgress {
         };
 
         let download_dir = match t.download_dir.as_ref() {
-            Some(val) => val.clone(),
+            Some(val) => format!("{}{}", get_torrents_dir(), val),
             None => String::new(),
         };
 
@@ -144,9 +145,6 @@ impl DownloadProgress {
         Ok(())
     }
 
-    pub fn delete(&self) {
-
-    }
 }
 
 pub type TorrentListResults = SearchResults<DownloadProgress>;

@@ -36,7 +36,7 @@ impl VLCPlayer {
             stdout_rx: Mutex::new(stdout_rx),
         };
 
-        let disable_player = env::var(DISABLE_VLC).unwrap_or(String::new());
+        let disable_player = env::var(DISABLE_VLC).unwrap_or_default();
         if disable_player != "true" {
             thread::spawn(move || {
                 VLCPlayer::run_vlc(&stdin_rx, stdout_tx);

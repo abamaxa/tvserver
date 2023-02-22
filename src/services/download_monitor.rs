@@ -34,13 +34,18 @@ async fn handle_results(results: &TorrentListResults, store: &Arc<dyn VideoStore
 }
 
 async fn move_completed_downloads(items: &Vec<DownloadProgress>, store: &Arc<dyn VideoStore>) {
+    let torrent_daemon: &dyn TorrentDaemon = &TransmissionDaemon::new();
     for item in items {
         if !item.has_finished_downloading() {
             continue;
         }
 
         match item.move_videos(store).await {
-            Ok(_) => item.delete(),
+            Ok(_) => {
+                if let Err(e) = torrent_daemon.delete(item.id, true).await {
+                    println!("could not delete torrent {}, error: {}", item.name, e);
+                }
+            },
             Err(e) => println!("could not move videos: {}", e.to_string()),
         }
     }

@@ -10,14 +10,21 @@ pub struct StdSubprocess {
 }
 
 pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
-    let mut child = Command::new(cmd)
-        .args(args)
-        .spawn()
-        .expect("failed to spawn");
+    let child = Command::new(cmd)
+        .args(&args)
+        .output();
 
-    let status = child.wait().await?;
+    let output = child.await?;
 
-    Ok(status.success())
+    print!("execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
+        cmd,
+        args,
+        output.status.success(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    );
+
+    Ok(output.status.success())
 }
 
 impl StdSubprocess {
@@ -72,5 +79,15 @@ impl StdSubprocess {
                 stdin_task.abort();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_execute_command() {
+        assert!(command("ls", vec!["-l"]).await.unwrap());
     }
 }

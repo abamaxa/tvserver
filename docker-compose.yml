@@ -17,6 +17,8 @@ services:
     stop_grace_period: 1s
     ports:
       - 81:80
+    profiles:
+      - tests
 
   transmission:
     image: lscr.io/linuxserver/transmission:latest
@@ -34,7 +36,18 @@ services:
       - .transmission/downloads:/downloads
       - .transmission/watch:/watch
     ports:
-      - 9091:9091
-      - 51413:51413
-      - 51413:51413/udp
+#      - 9091:9091
+#      - 51413:51413
+#      - 51413:51413/udp
+      - target: 9091
+        published: 9091
+      - target: 51413
+        published: 51413
+        mode: host
     restart: unless-stopped
+
+#
+#networks:
+#  hostnet:
+#    external: true
+#    name: host

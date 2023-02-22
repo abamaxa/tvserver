@@ -2,7 +2,8 @@ use std::env;
 use transmission_rpc::types::{
     BasicAuth,
     Id,
-    TorrentAddArgs
+    TorrentAddArgs,
+    TorrentGetField
 };
 use transmission_rpc::TransClient;
 use async_trait::async_trait;
@@ -23,6 +24,33 @@ pub struct TransmissionDaemon {
 
 const DEFAULT_URL: &str = "http://higo.abamaxa.com:9091/transmission/rpc";
 
+const FIELDS: [TorrentGetField; 23] = [
+    TorrentGetField::ActivityDate,
+    TorrentGetField::AddedDate,
+    TorrentGetField::DoneDate,
+    TorrentGetField::EditDate,
+    TorrentGetField::Id,
+    TorrentGetField::Name,
+    TorrentGetField::Status,
+    TorrentGetField::Files,
+    TorrentGetField::DownloadDir,
+    TorrentGetField::Eta,
+    TorrentGetField::Error,
+    TorrentGetField::ErrorString,
+    TorrentGetField::IsFinished,
+    TorrentGetField::LeftUntilDone,
+    TorrentGetField::PercentDone,
+    TorrentGetField::PeersConnected,
+    TorrentGetField::PeersGettingFromUs,
+    TorrentGetField::PeersSendingToUs,
+    TorrentGetField::RateDownload,
+    TorrentGetField::RateUpload,
+    TorrentGetField::SizeWhenDone,
+    TorrentGetField::TotalSize,
+    TorrentGetField::HashString,
+];
+
+
 #[async_trait]
 impl TorrentDaemon for TransmissionDaemon {
 
@@ -40,7 +68,7 @@ impl TorrentDaemon for TransmissionDaemon {
     }
 
     async fn list(&self) -> Result<TorrentListResults, TorrentListResults> {
-        match self.get_client().torrent_get(None, None).await {
+        match self.get_client().torrent_get(Some(FIELDS.to_vec()), None).await {
             Err(e) => {
                 println!("{}", e);
                 Err(SearchResults::error(e.to_string().as_str()))
