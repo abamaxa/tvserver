@@ -26,6 +26,9 @@ transmission-rpc = "0.4.0"
 html-escape = "0.2.13"
 bytesize = {version = "1.1.0", features = ["serde"]}
 
+[patch.crates-io]
+http = {path = "./private/http-0.2.8"}
+
 [profile.release]
 strip = "debuginfo"
 
