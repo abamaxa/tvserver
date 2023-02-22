@@ -53,6 +53,7 @@ pub struct DownloadProgress {
     files: Vec<FileDetails>,
 
     pub download_finished: bool,
+    pub downloaded_size: String,
     pub error_string: String,
     pub eta: i64,
     pub id: i64,
@@ -96,8 +97,11 @@ impl DownloadProgress {
             None => vec![],
         };
 
+        let downloaded_size = t.total_size.unwrap_or(0) - t.left_until_done.unwrap_or(0);
+
         Self {
             download_finished: download_finished,
+            downloaded_size: DownloadProgress::make_byte_size(Some(downloaded_size)),
             activity_date: t.activity_date.unwrap_or(0),
             added_date: t.added_date.unwrap_or(0),
             done_date: t.done_date.unwrap_or(0),
