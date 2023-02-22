@@ -1,6 +1,8 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use transmission_rpc::types::{Torrent, TorrentStatus};
 
@@ -45,24 +47,24 @@ pub struct DownloadProgress {
     added_date: i64,
     done_date: i64,
     edit_date: i64,
-    eta: i64,
     error: i64,
-    peers_connected: i64,
-    size_when_done: i64,
     download_dir: String,
     hash_string: String,
     files: Vec<FileDetails>,
 
+    pub download_finished: bool,
+    pub error_string: String,
+    pub eta: i64,
     pub id: i64,
+    pub left_until_done: String,
     pub name: String,
-    pub total_size: i64,
-    pub percent_done: f32,
-    pub left_until_done: i64,
+    pub peers_connected: i64,
     pub peers_sending_to_us: i64,
     pub peers_getting_from_us: i64,
-    pub rate_download: i64,
-    pub rate_upload: i64,
-    pub download_finished: bool,
+    pub percent_done: f32,
+    pub rate_download: String,
+    pub rate_upload: String,
+    pub total_size: String,
 }
 
 impl DownloadProgress {
@@ -103,15 +105,14 @@ impl DownloadProgress {
             eta: t.eta.unwrap_or(0),
             error: t.error.unwrap_or(0),
             id: t.id.unwrap_or(0),
-            left_until_done: t.left_until_done.unwrap_or(0),
+            left_until_done: DownloadProgress::make_byte_size(t.left_until_done),
             percent_done: t.percent_done.unwrap_or(0f32),
             peers_connected: t.peers_connected.unwrap_or(0),
             peers_getting_from_us: t.peers_getting_from_us.unwrap_or(0),
             peers_sending_to_us: t.peers_sending_to_us.unwrap_or(0),
-            rate_download: t.rate_download.unwrap_or(0),
-            rate_upload: t.rate_upload.unwrap_or(0),
-            total_size: t.total_size.unwrap_or(0),
-            size_when_done: t.size_when_done.unwrap_or(0),
+            rate_download: DownloadProgress::make_byte_size(t.rate_download),
+            rate_upload: DownloadProgress::make_byte_size(t.rate_upload),
+            total_size: DownloadProgress::make_byte_size(t.total_size),
             files: files,
             download_dir: download_dir,
             hash_string: match t.hash_string.as_ref() {
@@ -119,6 +120,10 @@ impl DownloadProgress {
                 None => String::new(),
             },
             name: match t.name.as_ref() {
+                Some(val) => val.clone(),
+                None => String::new(),
+            },
+            error_string: match t.error_string.as_ref() {
                 Some(val) => val.clone(),
                 None => String::new(),
             },
@@ -143,6 +148,16 @@ impl DownloadProgress {
             }
         }
         Ok(())
+    }
+
+    fn make_byte_size(value: Option<i64>) -> String {
+        let mut uval: u64 = 0;
+        if let Some(v) = value {
+            if let Ok(v) = v.try_into() {
+                uval = v;
+            }
+        }
+        ByteSize(uval).to_string()
     }
 
 }
