@@ -1,0 +1,53 @@
+version: '3.7'
+
+services:
+  tvserver:
+    build:
+      context: .
+      network: host
+      args:
+        - PYPI_USER=$PYPI_USER
+        - PYPI_PASSWORD=$PYPI_PASSWORD
+    volumes:
+      - .:/opt/tvserver
+      - ${HOME}/Movies:/movies
+    env_file:
+      - .env
+    restart: on-failure
+    stop_grace_period: 1s
+    ports:
+      - 81:80
+    profiles:
+      - tests
+
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - USER=chris
+      - PASS=abcd1234
+    env_file:
+      - .env
+    volumes:
+      - .transmission/config:/config
+      - .transmission/downloads:/downloads
+      - .transmission/watch:/watch
+    ports:
+#      - 9091:9091
+#      - 51413:51413
+#      - 51413:51413/udp
+      - target: 9091
+        published: 9091
+      - target: 51413
+        published: 51413
+        mode: host
+    restart: unless-stopped
+
+#
+#networks:
+#  hostnet:
+#    external: true
+#    name: host

@@ -1,3 +1,5 @@
+extern crate core;
+
 mod adaptors;
 mod domain;
 mod services;
@@ -5,21 +7,27 @@ mod services;
 use axum::routing::get;
 use tower_http::{trace::{DefaultMakeSpan, TraceLayer}, cors::CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, filter::LevelFilter, filter};
-use std::{env, net::SocketAddr, sync::Arc};
-use crate::adaptors::vlc_player::Player;
+use std::{net::SocketAddr, sync::Arc};
+use crate::domain::config::get_movie_dir;
+use crate::domain::traits::{Player, VideoStore};
+use crate::services::download_monitor::monitor_downloads;
 
 
 pub async fn run() -> anyhow::Result<()> {
+
     let pool = adaptors::repository::get_database().await?;
 
     adaptors::repository::do_migrations(&pool).await.unwrap();
 
-    let player: Option<Arc<dyn Player>> = None; // Arc::new(adaptors::vlc_player::VLCPlayer::new());
+    let store: Arc<dyn VideoStore> = Arc::new(
+        adaptors::filestore::FileStore::from(&get_movie_dir())
+    );
 
-    let movie_dir = env::var("MOVIE_DIR").expect("MOVIE_DIR environment variable is not set");
+    let _ = monitor_downloads(store.clone());
 
-    let store = Arc::new(adaptors::filestore::FileStore::from(&movie_dir));
+    let player: Option<Arc<dyn Player>> = None;
 
+    // player = Some(Arc::new(adaptors::vlc_player::VLCPlayer::new()));
     let filter = filter::Targets::new()
         .with_target("tower_http::trace::on_response", LevelFilter::DEBUG)
         .with_target("tower_http::trace::on_request", LevelFilter::INFO)

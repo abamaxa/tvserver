@@ -1,28 +1,35 @@
 use std::collections::HashMap;
-use crate::adaptors::{filestore::{VideoEntry, VideoStore}, vlc_player::Player};
-use crate::domain::events::{
-    LocalCommand,
-    PlayRequest,
-    Response, ClientLogMessage, RemoteMessage, Command};
-
+use std::env;
 use std::sync::{Arc, RwLock};
 use std::net::SocketAddr;
 
 use axum::{
     debug_handler,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     extract::ws::WebSocketUpgrade,
     headers::HeaderMap,
-    routing::{get, post},
+    routing::{delete, get, post},
     http::StatusCode,
     response::IntoResponse,
     Json,
     Router
 };
-use crate::adaptors::browser_player::{RemotePlayer, RemoteBrowserPlayer};
+
+use crate::adaptors::{PirateClient, RemotePlayer, RemoteBrowserPlayer, TransmissionDaemon, TorrentDaemon};
+use crate::adaptors::youtube::YoutubeClient;
+use crate::domain::events::{
+    DownloadRequest,
+    LocalCommand,
+    PlayRequest,
+    Response,
+    ClientLogMessage,
+    RemoteMessage,
+    Command
+};
+use crate::domain::GOOGLE_KEY;
+use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry};
+use crate::domain::traits::{Player, SearchEngine, VideoStore};
 use crate::services::video_serving::stream_video;
-
-
 
 #[derive(Clone)]
 pub struct Context {
@@ -31,7 +38,6 @@ pub struct Context {
     client_map: HashMap<String, Arc<dyn RemotePlayer>>,
     remote_player: Option<Arc<dyn RemotePlayer>>,
 }
-
 
 impl Context {
     pub fn from(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> Context {
@@ -46,7 +52,6 @@ impl Context {
 
 type SharedState = Arc<RwLock<Context>>;
 
-
 pub fn register(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> Router {
     let shared_state: SharedState = Arc::new(RwLock::new(Context::from(player, store)));
 
@@ -58,11 +63,74 @@ pub fn register(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> 
         .route("/remote", post(handle_command))
         .route("/remote-control", post(remote_command))
         .route("/stream/*path", get(video))
+        .route("/search/pirate", get(pirate_search))
+        .route("/search/youtube", get(youtube_search))
+        .route("/downloads/add", post(downloads_add))
+        .route("/downloads/list", get(downloads_list))
+        .route("/downloads/*path", delete(downloads_delete))
         .route("/log", post(log_client_message))
         .route("/ws", get(ws_handler))
         .with_state(shared_state)
 }
 
+#[debug_handler]
+async fn downloads_add(Json(payload): Json<DownloadRequest>) -> (StatusCode, Json<Response>) {
+    let daemon = TransmissionDaemon::new();
+    match daemon.add(payload.link.as_str()).await {
+        Ok(r) =>(StatusCode::OK, Json(Response::success(r))),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(err)))
+    }
+}
+
+#[debug_handler]
+async fn downloads_delete(Path(id): Path<i64>) -> (StatusCode, Json<Response>) {
+    let daemon = TransmissionDaemon::new();
+    match daemon.delete(id, false).await {
+        Ok(_) =>(StatusCode::OK, Json(Response::success(String::from("success")))),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(err)))
+    }
+}
+
+#[debug_handler]
+async fn downloads_list() -> impl IntoResponse {
+    let daemon = TransmissionDaemon::new();
+    match daemon.list().await {
+        Ok(r) =>(StatusCode::OK, Json(r)),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
+    }
+}
+
+#[debug_handler]
+async fn pirate_search(Query(params): Query<HashMap<String, String>>) -> (StatusCode, Json<SearchResults<DownloadableItem>>) {
+    let client = PirateClient::new(None);
+    do_search::<PirateClient, DownloadableItem>(&client, &params).await
+}
+
+#[debug_handler]
+async fn youtube_search(Query(params): Query<HashMap<String, String>>) -> (StatusCode,Json<SearchResults<DownloadableItem>>) {
+    match env::var(GOOGLE_KEY) {
+        Ok(key) => {
+            let client = YoutubeClient::new(&key);
+            do_search::<YoutubeClient, DownloadableItem>(&client, &params).await
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(SearchResults::error("google api key is not configured"))
+        )
+    }
+}
+
+async fn do_search<T, F>(client: &dyn SearchEngine<F>, params: &HashMap<String, String>) ->  (StatusCode, Json<SearchResults<F>>) {
+    match params.get("q") {
+        Some(query) => {
+            match client.search(query).await {
+                Ok(results) => (StatusCode::OK, Json(results)),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(SearchResults::error(&e.to_string())))
+            }
+        }
+        _ => (StatusCode::OK, Json(SearchResults::error("missing q parameter")))
+    }
+}
 
 #[debug_handler]
 async fn handle_command(State(state): State<SharedState>, Json(payload): Json<LocalCommand>) -> (StatusCode, Json<Response>) {
@@ -145,30 +213,21 @@ pub async fn ws_handler(
 
     println!("opened websocket from: {}", key);
 
-    /*
-    if let Some(existing) = context.client_map.get(&key) {
-        if existing.execute(RemoteMessage::Stop).await.is_err() {
-            println!("could not close existing socket to {}", addr);
-        }
-    }*/
-
     let (client, response) = RemoteBrowserPlayer::from(ws, addr);
-
     let client_arc = Arc::new(client);
-
     if let Err(e) = client_arc.clone().execute(RemoteMessage::Stop).await {
         println!("failed to talk to new socket {}", e);
     }
 
     if let Ok(mut context) = state.write() {
         context.client_map.insert(key, client_arc.clone());
-
         context.remote_player = Some(client_arc);
     }
 
     response
 }
 
+#[debug_handler]
 async fn video(State(state): State<SharedState>,  Path(video_path): Path<String>,  headers: HeaderMap) -> impl IntoResponse {
 
     let video_file = state.read().unwrap().store.as_path("".to_string(), video_path);
@@ -209,7 +268,7 @@ async fn execute_remote(state: &SharedState, command: Command) -> (StatusCode, J
             return (StatusCode::BAD_REQUEST, Json(Response::error("missing remote_address".to_string())));
         }
 
-        let key = command.remote_address.unwrap_or_else(|| String::from(""));
+        let key = command.remote_address.unwrap_or_default();
 
         match context.client_map.get(&key) {
             Some(client) => remote_client = client.clone(),
