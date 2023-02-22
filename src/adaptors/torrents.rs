@@ -58,7 +58,7 @@ impl TorrentDaemon for TransmissionDaemon {
         let mut client = self.get_client();
         let add: TorrentAddArgs = TorrentAddArgs {
             filename: Some(link.to_string()),
-            paused: false,
+            paused: Some(false),
             ..TorrentAddArgs::default()
         };
 

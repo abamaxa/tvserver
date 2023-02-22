@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use transmission_rpc::types::{Torrent, TorrentStatus};
-use crate::domain::config::get_torrents_dir;
 
 use crate::domain::models::SearchResults;
 use crate::domain::traits::VideoStore;
