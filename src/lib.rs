@@ -37,14 +37,15 @@ pub async fn run() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "example_websockets=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "websockets=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .with(filter)
         .init();
 
     let app = services::web::register(player, store)
-        .nest_service("/", get(services::client_serving::file_handler))
+        .nest_service("/", get(services::client_serving::app_handler))
+        .nest_service("/player", get(services::client_serving::player_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(true)));
 

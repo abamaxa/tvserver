@@ -1,3 +1,4 @@
+use std::env;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use transmission_rpc::types::{Torrent, TorrentStatus};
 
 use crate::domain::models::SearchResults;
+use crate::domain::TORRENT_DIR;
 use crate::domain::traits::VideoStore;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -77,9 +79,12 @@ impl DownloadProgress {
             _ => false,
         };
 
-        let download_dir = match t.download_dir.as_ref() {
-            Some(val) => val.clone(),
-            None => String::new(),
+        let download_dir = match env::var(TORRENT_DIR) {
+            Ok(val) => val,
+            Err(_) => match t.download_dir.as_ref() {
+                Some(val) => val.clone(),
+                None => String::new(),
+            }
         };
 
         let files = match &t.files {
@@ -100,7 +105,9 @@ impl DownloadProgress {
         let downloaded_size = t.total_size.unwrap_or(0) - t.left_until_done.unwrap_or(0);
 
         Self {
-            download_finished: download_finished,
+            download_finished,
+            download_dir,
+            files,
             downloaded_size: DownloadProgress::make_byte_size(Some(downloaded_size)),
             activity_date: t.activity_date.unwrap_or(0),
             added_date: t.added_date.unwrap_or(0),
@@ -117,8 +124,6 @@ impl DownloadProgress {
             rate_download: DownloadProgress::make_byte_size(t.rate_download),
             rate_upload: DownloadProgress::make_byte_size(t.rate_upload),
             total_size: DownloadProgress::make_byte_size(t.total_size),
-            files: files,
-            download_dir: download_dir,
             hash_string: match t.hash_string.as_ref() {
                 Some(val) => val.clone(),
                 None => String::new(),
