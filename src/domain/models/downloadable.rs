@@ -171,4 +171,4 @@ impl DownloadProgress {
 
 }
 
-pub type TorrentListResults = SearchResults<DownloadProgress>;
+pub type DownloadListResults = SearchResults<DownloadProgress>;

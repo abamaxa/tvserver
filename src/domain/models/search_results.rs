@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
+use crate::domain::SearchEngineType;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DownloadableItem {
     pub title: String,
     pub description: String,
     pub link: String,
+    pub engine: SearchEngineType,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

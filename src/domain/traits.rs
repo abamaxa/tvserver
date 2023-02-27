@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use axum::http::StatusCode;
 use async_trait::async_trait;
-use crate::domain::models::{SearchResults, VideoEntry};
+use crate::domain::models::{DownloadListResults, SearchResults, VideoEntry};
 
 #[async_trait]
 pub trait RemotePlayer: Send + Sync {
@@ -28,4 +28,11 @@ pub trait VideoStore: Send + Sync {
     fn as_path(&self, collection: String, video: String) -> String;
 
     async fn convert_to_mp4(&self, path: &PathBuf) -> anyhow::Result<bool>;
+}
+
+#[async_trait]
+pub trait DownloadClient: Send + Sync {
+    async fn add(&self, link: &str) -> Result<String, String>;
+    async fn list(&self) -> Result<DownloadListResults, DownloadListResults>;
+    async fn delete(&self, id: i64, delete_local_data: bool) -> Result<(), String>;
 }

@@ -9,3 +9,9 @@ CREATE TABLE IF NOT EXISTS videos (
     count_views INT DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS downloads (
+    link TEXT PRIMARY KEY NOT NULL,
+    engine INT NOT NULL,
+    added DATETIME NOT NULL,
+    process_id INT
+);
