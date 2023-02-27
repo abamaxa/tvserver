@@ -35,6 +35,9 @@ pub struct AsyncCommand {
 
 impl AsyncCommand {
     pub fn execute(cmd: &str, args: Vec<&str>) {
+
+        println!("executing: {} {:?}", cmd, args);
+
         let string_args = args.iter().map(|s| String::from(*s)).collect();
 
         let async_command = Self{
@@ -47,8 +50,8 @@ impl AsyncCommand {
         tokio::spawn(async move {
             let str_args = ptr.args.iter().map(|s| s.as_str()).collect();
             match command(ptr.command.as_str(), str_args).await {
-                Ok(_) => println!("succeeded"),
-                Err(e) => println!("failed {}", e.to_string()),
+                Ok(_) => println!("download succeeded - {} {:?}", ptr.command, ptr.args),
+                Err(e) => println!("download failed {} - {} {:?}", e.to_string(), ptr.command, ptr.args),
             };
         });
     }
