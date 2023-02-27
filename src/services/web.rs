@@ -15,7 +15,7 @@ use axum::{
     Router
 };
 
-use crate::adaptors::{PirateClient, RemotePlayer, RemoteBrowserPlayer, TransmissionDaemon, TorrentDaemon};
+use crate::adaptors::{PirateClient, RemotePlayer, RemoteBrowserPlayer, TransmissionDaemon};
 use crate::adaptors::youtube::YoutubeClient;
 use crate::domain::events::{
     DownloadRequest,
@@ -26,9 +26,9 @@ use crate::domain::events::{
     RemoteMessage,
     Command
 };
-use crate::domain::GOOGLE_KEY;
+use crate::domain::{GOOGLE_KEY, SearchEngineType};
 use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry};
-use crate::domain::traits::{Player, SearchEngine, VideoStore};
+use crate::domain::traits::{DownloadClient, Player, SearchEngine, VideoStore};
 use crate::services::video_serving::stream_video;
 
 #[derive(Clone)]
@@ -75,8 +75,18 @@ pub fn register(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> 
 
 #[debug_handler]
 async fn downloads_add(Json(payload): Json<DownloadRequest>) -> (StatusCode, Json<Response>) {
-    let daemon = TransmissionDaemon::new();
-    match daemon.add(payload.link.as_str()).await {
+    let link = payload.link.as_str();
+    match payload.engine {
+        SearchEngineType::YOUTUBE => {
+            let key = env::var(GOOGLE_KEY).unwrap_or_default();
+            download(&YoutubeClient::new(&key), link).await
+        },
+        _ => download(&TransmissionDaemon::new(), link).await
+    }
+}
+
+async fn download(client: &dyn DownloadClient, link: &str) -> (StatusCode, Json<Response>) {
+    match client.add(link).await {
         Ok(r) =>(StatusCode::OK, Json(Response::success(r))),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(err)))
     }
@@ -93,7 +103,7 @@ async fn downloads_delete(Path(id): Path<i64>) -> (StatusCode, Json<Response>) {
 
 #[debug_handler]
 async fn downloads_list() -> impl IntoResponse {
-    let daemon = TransmissionDaemon::new();
+    let daemon: &dyn DownloadClient = &TransmissionDaemon::new();
     match daemon.list().await {
         Ok(r) =>(StatusCode::OK, Json(r)),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(err))

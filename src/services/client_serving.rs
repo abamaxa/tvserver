@@ -4,25 +4,20 @@ use tower::util::ServiceExt;
 use tower_http::services::ServeDir;
 use crate::domain::CLIENT_DIR;
 
-
-pub async fn file_handler(uri: Uri) -> Result<Response<BoxBody>, (StatusCode, String)> {
-
-    let res = get_static_file(uri.clone()).await?;
-
-    if res.status() == StatusCode::NOT_FOUND {
-        match format!("{}.html", uri).parse() {
-            Ok(uri_html) => get_static_file(uri_html).await,
-            Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Invalid URI".to_string())),
-        }
-    } else {
-        Ok(res)
-    }
+pub async fn app_handler(uri: Uri) -> Result<Response<BoxBody>, (StatusCode, String)> {
+    let mut client_dir = env::var(CLIENT_DIR).unwrap_or(String::from("client"));
+    client_dir.push_str("/app");
+    file_handler(client_dir, uri).await
 }
 
-async fn get_static_file(uri: Uri) -> Result<Response<BoxBody>, (StatusCode, String)> {
-    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+pub async fn player_handler(uri: Uri) -> Result<Response<BoxBody>, (StatusCode, String)> {
+    let mut client_dir = env::var(CLIENT_DIR).unwrap_or(String::from("client"));
+    client_dir.push_str("/player");
+    file_handler(client_dir, uri).await
+}
 
-    let client_dir = env::var(CLIENT_DIR).unwrap_or(String::from("client"));
+async fn file_handler(client_dir: String, uri: Uri) -> Result<Response<BoxBody>, (StatusCode, String)> {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
 
     let serve_dir = ServeDir::new(client_dir);
     // `ServeDir` implements `tower::Service` so we can call it with `tower::ServiceExt::oneshot`

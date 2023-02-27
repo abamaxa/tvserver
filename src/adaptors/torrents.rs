@@ -8,15 +8,10 @@ use transmission_rpc::types::{
 use transmission_rpc::TransClient;
 use async_trait::async_trait;
 
-use crate::domain::models::{DownloadProgress, TorrentListResults, SearchResults};
+use crate::domain::models::{DownloadProgress, DownloadListResults, SearchResults};
 use crate::domain::{TRANSMISSION_PWD, TRANSMISSION_URL, TRANSMISSION_USER};
+use crate::domain::traits::DownloadClient;
 
-#[async_trait]
-pub trait TorrentDaemon: Send + Sync {
-    async fn add(&self, link: &str) -> Result<String, String>;
-    async fn list(&self) -> Result<TorrentListResults, TorrentListResults>;
-    async fn delete(&self, id: i64, delete_local_data: bool) -> Result<(), String>;
-}
 
 pub struct TransmissionDaemon {
     url: String,
@@ -52,7 +47,7 @@ const FIELDS: [TorrentGetField; 23] = [
 
 
 #[async_trait]
-impl TorrentDaemon for TransmissionDaemon {
+impl DownloadClient for TransmissionDaemon {
 
     async fn add(&self, link: &str) -> Result<String, String> {
         let mut client = self.get_client();
@@ -68,7 +63,7 @@ impl TorrentDaemon for TransmissionDaemon {
         }
     }
 
-    async fn list(&self) -> Result<TorrentListResults, TorrentListResults> {
+    async fn list(&self) -> Result<DownloadListResults, DownloadListResults> {
         match self.get_client().torrent_get(Some(FIELDS.to_vec()), None).await {
             Err(e) => {
                 println!("{}", e);

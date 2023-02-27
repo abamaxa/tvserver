@@ -102,14 +102,14 @@ impl RemoteBrowserPlayer {
         tokio::select! {
             rv_a = (&mut send_task) => {
                 match rv_a {
-                    Ok(a) => println!("{:?} messages sent to {}", a, who),
+                    Ok(a)  => println!("{:?} messages sent to {}", a, who),
                     Err(a) => println!("Error sending messages {:?}", a)
                 }
                 recv_task.abort();
             },
             rv_b = (&mut recv_task) => {
                 match rv_b {
-                    Ok(b) => println!("Received {:?} messages", b),
+                    Ok(b)  => println!("Received {:?} messages", b),
                     Err(b) => println!("Error receiving messages {:?}", b)
                 }
                 send_task.abort();

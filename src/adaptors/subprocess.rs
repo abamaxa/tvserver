@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
@@ -26,6 +27,36 @@ pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
 
     Ok(output.status.success())
 }
+
+pub struct AsyncCommand {
+    command: String,
+    args: Vec<String>,
+}
+
+impl AsyncCommand {
+    pub fn execute(cmd: &str, args: Vec<&str>) {
+
+        println!("executing: {} {:?}", cmd, args);
+
+        let string_args = args.iter().map(|s| String::from(*s)).collect();
+
+        let async_command = Self{
+            command: String::from(cmd),
+            args: string_args,
+        };
+
+        let ptr = Arc::new(async_command);
+
+        tokio::spawn(async move {
+            let str_args = ptr.args.iter().map(|s| s.as_str()).collect();
+            match command(ptr.command.as_str(), str_args).await {
+                Ok(_) => println!("download succeeded - {} {:?}", ptr.command, ptr.args),
+                Err(e) => println!("download failed {} - {} {:?}", e.to_string(), ptr.command, ptr.args),
+            };
+        });
+    }
+}
+
 
 impl StdSubprocess {
 

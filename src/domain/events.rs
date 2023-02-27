@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+use crate::domain::SearchEngineType;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RemoteMessage {
@@ -51,7 +52,8 @@ pub struct ClientLogMessage {
     pub messages: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub link: String,
+    pub engine: SearchEngineType,
 }

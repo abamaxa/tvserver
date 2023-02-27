@@ -2,9 +2,11 @@ use async_trait::async_trait;
 use reqwest::{header::{CONTENT_TYPE, ACCEPT}, StatusCode};
 use serde::{Deserialize, Serialize};
 use html_escape::decode_html_entities;
-
-use crate::domain::models::{SearchResults, DownloadableItem};
-use crate::domain::traits::SearchEngine;
+use crate::adaptors::subprocess::AsyncCommand;
+use crate::domain::config::get_movie_dir;
+use crate::domain::SearchEngineType::YOUTUBE;
+use crate::domain::models::{SearchResults, DownloadableItem, DownloadListResults};
+use crate::domain::traits::{DownloadClient, SearchEngine};
 
 const SEARCH_URL: &str = "https://www.googleapis.com/youtube/v3/search";
 
@@ -125,10 +127,34 @@ impl YoutubeClient {
                         title: decode_html_entities(&r.snippet.title).to_string(),
                         description: r.snippet.description.clone(),
                         link: r.id.video_id.to_string(),
+                        engine: YOUTUBE,
                     }
                 })
                 .collect::<Vec<DownloadableItem>>()
         )
+    }
+}
+
+#[async_trait]
+impl DownloadClient for YoutubeClient {
+    async fn add(&self, link: &str) -> Result<String, String> {
+        let output_dir = format!("home:{}/New", get_movie_dir());
+        AsyncCommand::execute("yt-dlp", vec![
+            "--no-update",
+            "--sponsorblock-remove", "all",
+            "--paths",
+            output_dir.as_str(),
+            link]);
+
+        Ok(String::from("queued"))
+    }
+
+    async fn list(&self) -> Result<DownloadListResults, DownloadListResults> {
+        todo!()
+    }
+
+    async fn delete(&self, _id: i64, _delete_local_data: bool) -> Result<(), String> {
+        todo!()
     }
 }
 

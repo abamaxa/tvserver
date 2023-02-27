@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
 use urlencoding::decode;
+use crate::domain::SearchEngineType::TORRENT;
 use crate::domain::models::{SearchResults, DownloadableItem};
 use crate::domain::traits::SearchEngine;
 
@@ -51,7 +52,7 @@ impl PirateClient {
         let table = document.select(&selector).next()?;
 
         for row in table.select(&tr_selector) {
-            let mut record = DownloadableItem {..Default::default()};
+            let mut record = DownloadableItem {engine: TORRENT, ..Default::default()};
             let mut seeders: i32 = 0;
 
             for (idx, cell) in row.select(&td_selector).enumerate() {
