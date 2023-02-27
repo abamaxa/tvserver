@@ -47,7 +47,7 @@ pub async fn run() -> anyhow::Result<()> {
         .nest_service("/", get(services::client_serving::app_handler))
         .nest_service("/player", get(services::client_serving::player_handler))
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(true)));
+        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(false)));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     tracing::info!("listening on {}", addr);
