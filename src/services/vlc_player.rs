@@ -1,9 +1,8 @@
-/*
 use std::process::{Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::io::{BufRead, Write, BufReader};
 use std::process::Stdio;
-use std::{env, thread};
+use std::thread;
 use std::time;
 use std::sync::Mutex;
 
@@ -36,14 +35,11 @@ impl VLCPlayer {
             stdout_rx: Mutex::new(stdout_rx),
         };
 
-        let disable_player = env::var(DISABLE_VLC).unwrap_or_default();
-        if disable_player != "true" {
-            thread::spawn(move || {
-                VLCPlayer::run_vlc(&stdin_rx, stdout_tx);
-            });
+        thread::spawn(move || {
+            VLCPlayer::run_vlc(&stdin_rx, stdout_tx);
+        });
 
-            println!("{}", runner.read_result(1));
-        }
+        println!("{}", runner.read_result(1));
 
         runner
     }
@@ -73,7 +69,7 @@ impl VLCPlayer {
 
         loop {
             if let Ok(msg) = input.recv() {
-                child_stdin.write(msg.as_bytes()).expect("lost stdin to vlc");
+                child_stdin.write_all(msg.as_bytes()).expect("lost stdin to vlc");
             }
         }
     }
@@ -106,7 +102,8 @@ mod test {
 
     use super::{VLCPlayer, Player};
 
-    //#[test]
+    #[test]
+    #[ignore]
     fn test_run_vlc() {
         let vlc = VLCPlayer::new();
 
@@ -124,4 +121,4 @@ mod test {
 
         let _ = vlc.send_command("quit", 1);
     }
-}*/
+}

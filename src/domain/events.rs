@@ -39,7 +39,7 @@ pub struct Response {
 
 impl Response {
     pub fn success(message: String) -> Response {
-        Response{message: message, ..Default::default()}
+        Response{message, ..Default::default()}
     }
     pub fn error(error: String) -> Response {
         Response{errors: vec![error], ..Default::default()}

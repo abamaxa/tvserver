@@ -74,7 +74,7 @@ impl DownloadClient for TransmissionDaemon {
                     .arguments
                     .torrents
                     .iter()
-                    .map(|item| DownloadProgress::from(item))
+                    .map(DownloadProgress::from)
                     .collect();
 
                 Ok(SearchResults::success(results))
@@ -94,7 +94,7 @@ impl TransmissionDaemon {
 
     pub fn new() -> Self {
         let url = env::var(TRANSMISSION_URL).unwrap_or(String::from(DEFAULT_URL));
-        TransmissionDaemon{url: url }
+        TransmissionDaemon{url}
     }
 
     fn get_client(&self) -> TransClient {
@@ -111,7 +111,7 @@ impl TransmissionDaemon {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::adaptors::PirateClient;
+    use crate::services::pirate_bay::PirateClient;
     use crate::domain::models::DownloadableItem;
     use crate::domain::traits::SearchEngine;
 

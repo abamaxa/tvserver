@@ -4,30 +4,39 @@ mod adaptors;
 mod domain;
 mod services;
 
+use std::{env, net::SocketAddr, sync::Arc};
+
 use axum::routing::get;
 use tower_http::{trace::{DefaultMakeSpan, TraceLayer}, cors::CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, filter::LevelFilter, filter};
-use std::{net::SocketAddr, sync::Arc};
-use crate::domain::config::get_movie_dir;
-use crate::domain::traits::{Player, VideoStore};
-use crate::services::download_monitor::monitor_downloads;
+
+use crate::domain::{config::get_movie_dir, ENABLE_VLC,traits::{Player, MediaStorer}};
+use crate::services::{
+    api,
+    client_apps,
+    media_store::MediaStore,
+    monitor::monitor_downloads,
+    vlc_player::VLCPlayer,
+};
 
 
 pub async fn run() -> anyhow::Result<()> {
 
     let pool = adaptors::repository::get_database().await?;
 
-    adaptors::repository::do_migrations(&pool).await.unwrap();
+    adaptors::repository::do_migrations(&pool).await?;
 
-    let store: Arc<dyn VideoStore> = Arc::new(
-        adaptors::filestore::FileStore::from(&get_movie_dir())
-    );
+    let store: Arc<dyn MediaStorer> = Arc::new(MediaStore::from(&get_movie_dir()));
 
-    let _ = monitor_downloads(store.clone());
+    let monitor_handle = monitor_downloads(store.clone());
 
-    let player: Option<Arc<dyn Player>> = None;
+    let enable_vlc = env::var(ENABLE_VLC).unwrap_or_default();
 
-    // player = Some(Arc::new(adaptors::vlc_player::VLCPlayer::new()));
+    let player: Option<Arc<dyn Player>> = match enable_vlc.as_str() {
+        "1" | "true" => Some(Arc::new(VLCPlayer::new())),
+        _ => None,
+    };
+
     let filter = filter::Targets::new()
         .with_target("tower_http::trace::on_response", LevelFilter::DEBUG)
         .with_target("tower_http::trace::on_request", LevelFilter::INFO)
@@ -43,9 +52,9 @@ pub async fn run() -> anyhow::Result<()> {
         .with(filter)
         .init();
 
-    let app = services::web::register(player, store)
-        .nest_service("/", get(services::client_serving::app_handler))
-        .nest_service("/player", get(services::client_serving::player_handler))
+    let app = api::register(player, store)
+        .nest_service("/", get(client_apps::app_handler))
+        .nest_service("/player", get(client_apps::player_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(false)));
 
@@ -56,14 +65,7 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .unwrap();
 
-    Ok(())
-}
+    monitor_handle.abort();
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+    Ok(())
 }

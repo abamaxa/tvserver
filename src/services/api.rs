@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::net::SocketAddr;
 
 use axum::{
@@ -14,9 +14,15 @@ use axum::{
     Json,
     Router
 };
+use tokio::sync::{RwLock, RwLockReadGuard};
 
-use crate::adaptors::{PirateClient, RemotePlayer, RemoteBrowserPlayer, TransmissionDaemon};
-use crate::adaptors::youtube::YoutubeClient;
+use crate::adaptors::{RemotePlayer, RemoteBrowserPlayer, HTTPClient};
+use super::{
+    media_stream::stream_video,
+    pirate_bay::PirateClient,
+    torrents::TransmissionDaemon,
+    youtube::YoutubeClient,
+};
 use crate::domain::events::{
     DownloadRequest,
     LocalCommand,
@@ -27,33 +33,38 @@ use crate::domain::events::{
     Command
 };
 use crate::domain::{GOOGLE_KEY, SearchEngineType};
-use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry};
-use crate::domain::traits::{DownloadClient, Player, SearchEngine, VideoStore};
-use crate::services::video_serving::stream_video;
+use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry, YoutubeResponse};
+use crate::domain::traits::{DownloadClient, Player, SearchEngine, MediaStorer, JsonFetcher};
+
 
 #[derive(Clone)]
 pub struct Context {
+    // TODO: wrap Player in Mutex, remove RWLock from Context
     player: Option<Arc<dyn Player>>,
-    store: Arc<dyn VideoStore>,
-    client_map: HashMap<String, Arc<dyn RemotePlayer>>,
-    remote_player: Option<Arc<dyn RemotePlayer>>,
+    store: Arc<dyn MediaStorer>,
+    client_map: Arc<RwLock<HashMap<String, Arc<dyn RemotePlayer>>>>,
+    remote_player: Arc<RwLock<Option<Arc<dyn RemotePlayer>>>>,
+    youtube_fetcher: Arc<dyn JsonFetcher<YoutubeResponse>>,
 }
 
 impl Context {
-    pub fn from(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> Context {
+    pub fn from(player: Option<Arc<dyn Player>>, store: Arc<dyn MediaStorer>) -> Context {
         Context{
             player,
             store,
-            client_map: HashMap::<String, Arc<dyn RemotePlayer>>::new(),
-            remote_player: None,
+            client_map: Arc::new(RwLock::new(HashMap::<String, Arc<dyn RemotePlayer>>::new())),
+            remote_player: Arc::new(RwLock::new(None)),
+            youtube_fetcher: Arc::new(HTTPClient::new()),
         }
     }
 }
 
-type SharedState = Arc<RwLock<Context>>;
+// type SharedState = Arc<RwLock<Context>>;
+type SharedState = Arc<Context>;
 
-pub fn register(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> Router {
-    let shared_state: SharedState = Arc::new(RwLock::new(Context::from(player, store)));
+pub fn register(player: Option<Arc<dyn Player>>, store: Arc<dyn MediaStorer>) -> Router {
+    // let shared_state: SharedState = Arc::new(RwLock::new(Context::from(player, store)));
+    let shared_state: SharedState = Arc::new(Context::from(player, store));
 
     Router::new()
         .route("/collections", get(list_collections))
@@ -74,12 +85,12 @@ pub fn register(player: Option<Arc<dyn Player>>, store: Arc<dyn VideoStore>) -> 
 }
 
 #[debug_handler]
-async fn downloads_add(Json(payload): Json<DownloadRequest>) -> (StatusCode, Json<Response>) {
+async fn downloads_add(State(state): State<SharedState>, Json(payload): Json<DownloadRequest>) -> (StatusCode, Json<Response>) {
     let link = payload.link.as_str();
     match payload.engine {
-        SearchEngineType::YOUTUBE => {
+        SearchEngineType::YouTube => {
             let key = env::var(GOOGLE_KEY).unwrap_or_default();
-            download(&YoutubeClient::new(&key), link).await
+            download(&YoutubeClient::new(&key, state.youtube_fetcher.as_ref()), link).await
         },
         _ => download(&TransmissionDaemon::new(), link).await
     }
@@ -117,10 +128,10 @@ async fn pirate_search(Query(params): Query<HashMap<String, String>>) -> (Status
 }
 
 #[debug_handler]
-async fn youtube_search(Query(params): Query<HashMap<String, String>>) -> (StatusCode,Json<SearchResults<DownloadableItem>>) {
+async fn youtube_search(State(state): State<SharedState>, Query(params): Query<HashMap<String, String>>) -> (StatusCode,Json<SearchResults<DownloadableItem>>) {
     match env::var(GOOGLE_KEY) {
         Ok(key) => {
-            let client = YoutubeClient::new(&key);
+            let client = YoutubeClient::new(&key, state.youtube_fetcher.as_ref());
             do_search::<YoutubeClient, DownloadableItem>(&client, &params).await
         }
         _ => (
@@ -174,21 +185,17 @@ async fn play(State(state): State<SharedState>, Json(payload): Json<PlayRequest>
 async fn call_local_player<F>(state: &SharedState, f: F) -> (StatusCode, Json<Response>)
     where F: FnOnce(&Context, &Arc<dyn Player>) -> (StatusCode, Json<Response>)
 {
-    if let Ok(context) = state.read() {
-        return if let Some(player) = &context.player {
-            f(&context, player)
-        } else {
-            (StatusCode::OK, Json(Response::success("no local player".to_string())))
-        }
+    if let Some(player) = &state.player {
+        f(&state, player)
+    } else {
+        (StatusCode::OK, Json(Response::success("no local player".to_string())))
     }
-
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error("cannot lock state".to_string())))
 }
 
 #[debug_handler]
 async fn list_collections(State(state): State<SharedState>) -> impl IntoResponse {
 
-    match state.read().unwrap().store.list("".to_string()) {
+    match state.store.list("".to_string()) {
         Ok(result) => (StatusCode::OK, Json(result)),
         Err(e) => (StatusCode::NOT_FOUND, Json(VideoEntry::error(e.to_string())))
     }
@@ -197,7 +204,7 @@ async fn list_collections(State(state): State<SharedState>) -> impl IntoResponse
 #[debug_handler]
 async fn list_videos(State(state): State<SharedState>, Path(collection): Path<String>) -> (StatusCode, Json<VideoEntry>) {
 
-    match state.read().unwrap().store.list(collection) {
+    match state.store.list(collection) {
         Ok(result) => (StatusCode::OK, Json(result)),
         Err(e) => (StatusCode::NOT_FOUND, Json(VideoEntry::error(e.to_string())))
     }
@@ -225,13 +232,18 @@ pub async fn ws_handler(
 
     let (client, response) = RemoteBrowserPlayer::from(ws, addr);
     let client_arc = Arc::new(client);
-    if let Err(e) = client_arc.clone().execute(RemoteMessage::Stop).await {
+    if let Err(e) = client_arc.clone().send(RemoteMessage::Stop).await {
         println!("failed to talk to new socket {}", e);
     }
 
-    if let Ok(mut context) = state.write() {
-        context.client_map.insert(key, client_arc.clone());
-        context.remote_player = Some(client_arc);
+    {
+        let mut client_map = state.client_map.write().await;
+        client_map.insert(key, client_arc.clone());
+    }
+
+    {
+        let mut remote_player = state.remote_player.write().await;
+        *remote_player = Some(client_arc);
     }
 
     response
@@ -240,20 +252,18 @@ pub async fn ws_handler(
 #[debug_handler]
 async fn video(State(state): State<SharedState>,  Path(video_path): Path<String>,  headers: HeaderMap) -> impl IntoResponse {
 
-    let video_file = state.read().unwrap().store.as_path("".to_string(), video_path);
+    let video_file = state.store.as_path("".to_string(), video_path);
 
     stream_video(video_file, headers).await
 }
 
 #[debug_handler]
 async fn remote_play(State(state): State<SharedState>, Json(payload): Json<PlayRequest>) -> (StatusCode, Json<Response>) {
-    let url: String;
-
-    if payload.collection == "" {
-        url = format!("/stream/{}  ", payload.video);
+    let url: String = if payload.collection.is_empty() {
+        format!("/stream/{}  ", payload.video)
     } else {
-        url = format!("/stream/{}/{}", payload.collection, payload.video);
-    }
+        format!("/stream/{}/{}", payload.collection, payload.video)
+    };
 
     let command = Command {
         remote_address: payload.remote_address,
@@ -270,28 +280,29 @@ async fn remote_command(State(state): State<SharedState>, Json(payload): Json<Co
 }
 
 async fn execute_remote(state: &SharedState, command: Command) -> (StatusCode, Json<Response>) {
-
     let remote_client: Arc<dyn RemotePlayer>;
 
-    if let Ok(context) = state.read() {
-        if command.remote_address.is_none() && context.remote_player.is_none() {
-            return (StatusCode::BAD_REQUEST, Json(Response::error("missing remote_address".to_string())));
-        }
-
-        let key = command.remote_address.unwrap_or_default();
-
-        match context.client_map.get(&key) {
-            Some(client) => remote_client = client.clone(),
-            None => match &context.remote_player {
-                Some(client) => remote_client = client.clone(),
-                None => return (StatusCode::BAD_REQUEST, Json(Response::error("no connection to remote_address".to_string())))
-            }
-        }
-    } else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error("could not lock state".to_string())));
+    if command.remote_address.is_none() && state.remote_player.read().await.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(Response::error("missing remote_address".to_string())));
     }
 
-    match remote_client.execute(command.message).await {
+    let key = command.remote_address.unwrap_or_default();
+
+    if let Some(client)= state.client_map.read().await.get(&key) {
+        remote_client = client.clone();
+    } else {
+        /*
+       let mut remote_player = state.remote_player.write().await;
+        *remote_player = Some(client_arc);
+         */
+        let remote_player: RwLockReadGuard<Option<Arc<dyn RemotePlayer>>> = state.remote_player.read().await;
+        match remote_player.clone() {
+            Some(client) => remote_client = client,
+            None => return (StatusCode::BAD_REQUEST, Json(Response::error("missing remote_address".to_string())))
+        }
+    };
+
+    match remote_client.send(command.message).await {
         Ok(result) => (result, Json(Response::success("todo".to_string()))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e)))
     }

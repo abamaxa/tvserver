@@ -12,18 +12,9 @@ use tokio_util::io::ReaderStream;
 pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> impl IntoResponse {
     const BUFFER_SIZE: usize = 0x100000; // 1 megabyte
 
-    let file_parts: Vec<&str> = video_file.rsplitn(1, "/").collect();
+    let file_parts: Vec<&str> = video_file.rsplitn(2, '/').collect();
     let file_name = String::from(file_parts[0]);
-    let mut stream_from = 0;
-    let mut stream_to = 0;
-    let mut found_range = false;
-
-    for (k, v) in headers.iter() {
-        if k == "range" {
-            (stream_from, stream_to) = get_offsets(v.to_str().unwrap());
-            found_range = true;
-        }
-    }
+    let (found_range, stream_from, mut stream_to) = get_range(headers);
 
     let mut file = match tokio::fs::File::open(video_file).await {
         Ok(file) => file,
@@ -53,6 +44,12 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
     // convert the `Stream` into an `axum::body::HttpBody`
     let body = StreamBody::new(stream);
 
+    // Sadly we can't use the builtin in header names as they are all lower case, which is the
+    // standard for HTTP2. However, this HTTP/1.1 server has a Samsung TV as a client with a built
+    // in web browser that expects the headers to be capitalized, as below. Trying to use lower case
+    // headers breaks the video control, which entirely defeats the purpose. Regrettably, there is
+    // no way to force axum/http not to convert the headers to lowercase, so we currently need to
+    // compile using a hacked version of the http lib, which is found in the `private` directory.
     let content_type = HeaderName::from_static("Content-Type");
     let content_length = HeaderName::from_static("Content-Length");
     let content_disposition = HeaderName::from_static("Content-Disposition");
@@ -80,17 +77,37 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
     Ok((StatusCode::PARTIAL_CONTENT, headers, body))
 }
 
-fn get_offsets(offsets: &str) -> (u64, u64) {
-    let mut parts = offsets.splitn(2, "=");
-    let mut range = parts.nth(1).unwrap().splitn(2, "-");
 
-    let start = match range.nth(0) {
-        Some(start) => start.parse::<u64>().unwrap(),
+fn get_range(headers: header::HeaderMap) -> (bool, u64, u64) {
+    let mut stream_from = 0;
+    let mut stream_to = 0;
+    let mut found_range = false;
+
+    for (k, v) in headers.iter() {
+        if k != "range" {
+            continue;
+        }
+
+        if let Ok(value) = v.to_str() {
+            (stream_from, stream_to) = get_offsets(value);
+            found_range = true;
+        }
+    }
+
+    (found_range, stream_from, stream_to)
+}
+
+fn get_offsets(offsets: &str) -> (u64, u64) {
+    let mut parts = offsets.splitn(2, '=');
+    let mut range = parts.nth(1).unwrap().splitn(2, '-');
+
+    let start = match range.next() {
+        Some(start) => start.parse::<u64>().unwrap_or(0),
         None => 0,
     };
 
-    let end = match range.nth(1) {
-        Some(end) => end.parse::<u64>().unwrap(),
+    let end = match range.next() {
+        Some(end) => end.parse::<u64>().unwrap_or(0),
         None => 0,
     };
     (start, end)

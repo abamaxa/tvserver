@@ -51,7 +51,7 @@ impl AsyncCommand {
             let str_args = ptr.args.iter().map(|s| s.as_str()).collect();
             match command(ptr.command.as_str(), str_args).await {
                 Ok(_) => println!("download succeeded - {} {:?}", ptr.command, ptr.args),
-                Err(e) => println!("download failed {} - {} {:?}", e.to_string(), ptr.command, ptr.args),
+                Err(e) => println!("download failed {} - {} {:?}", e, ptr.command, ptr.args),
             };
         });
     }
@@ -83,7 +83,7 @@ impl StdSubprocess {
                         }
                     }
                     Err(e) => {
-                        println!("read stdout returned failed: {}", e.to_string());
+                        println!("read stdout returned failed: {}", e);
                         break;
                     }
                 }
@@ -91,7 +91,7 @@ impl StdSubprocess {
                 match output.send(buffer.clone()).await {
                     Ok(_) => buffer.clear(),
                     Err(e) => {
-                        println!("could not copy stdout to channel: {}", e.to_string());
+                        println!("could not copy stdout to channel: {}", e);
                         break;
                     }
                 }

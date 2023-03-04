@@ -1,7 +1,8 @@
 use async_trait::async_trait;
+use anyhow;
 use scraper::{Html, Selector};
 use urlencoding::decode;
-use crate::domain::SearchEngineType::TORRENT;
+use crate::domain::SearchEngineType::Torrent;
 use crate::domain::models::{SearchResults, DownloadableItem};
 use crate::domain::traits::SearchEngine;
 
@@ -15,7 +16,7 @@ pub struct PirateClient {
 
 #[async_trait]
 impl SearchEngine<DownloadableItem> for PirateClient {
-    async fn search(&self, query: &str) -> Result<SearchResults<DownloadableItem>, reqwest::Error> {
+    async fn search(&self, query: &str) -> anyhow::Result<SearchResults<DownloadableItem>> {
         let url = match query {
             "top-100" => format!("{}/top/all", self.host),
             "top-videos" => format!("{}/top/200", self.host),
@@ -52,7 +53,7 @@ impl PirateClient {
         let table = document.select(&selector).next()?;
 
         for row in table.select(&tr_selector) {
-            let mut record = DownloadableItem {engine: TORRENT, ..Default::default()};
+            let mut record = DownloadableItem {engine: Torrent, ..Default::default()};
             let mut seeders: i32 = 0;
 
             for (idx, cell) in row.select(&td_selector).enumerate() {
@@ -63,8 +64,8 @@ impl PirateClient {
                         let link = decode(itr.next().unwrap().value().attr("href")?);
                         let desc = PirateClient::get_element_text(&cell.select(&desc_selector).next()?);
 
-                        record.title = (*title.iter().nth(0)?).to_string();
-                        record.description = desc.to_string();
+                        record.title = (*title.first()?).to_string();
+                        record.description = desc.to_owned();
                         record.link = link.unwrap_or_else(|_| String::new().into()).to_string();
                     }
                     2 => seeders = PirateClient::get_element_i32(&cell)?,

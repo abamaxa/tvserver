@@ -3,16 +3,16 @@ use async_trait::async_trait;
 
 use crate::adaptors::subprocess::command;
 use crate::domain::models::VideoEntry;
-use crate::domain::traits::VideoStore;
+use crate::domain::traits::MediaStorer;
 
 #[derive(Clone, Debug)]
-pub struct FileStore {
+pub struct MediaStore {
     root: String,
 }
 
-impl FileStore {
-    pub fn from(root: &str) -> FileStore {
-        FileStore {
+impl MediaStore {
+    pub fn from(root: &str) -> MediaStore {
+        MediaStore {
             root: root.to_string(),
         }
     }
@@ -28,19 +28,18 @@ impl FileStore {
 }
 
 #[async_trait]
-impl VideoStore for FileStore {
+impl MediaStorer for MediaStore {
+
     fn list(&self, collection: String) -> Result<VideoEntry, io::Error> {
         let mut child_collections: Vec<String> = Vec::new();
         let mut videos: Vec<String> = Vec::new();
-
-        // let store_path = format!("{}/{}", self.root, collection);
         let dir = Path::new(&self.root).join(&collection);
 
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let mut name = entry.file_name().to_str().unwrap().to_string();
-                if name.starts_with(".")
+                if name.starts_with('.')
                     || name == "TV"
                     || name.ends_with(".py")
                     || name.ends_with(".jpg")
@@ -50,7 +49,7 @@ impl VideoStore for FileStore {
                 }
 
                 if entry.path().is_dir() {
-                    if collection != "" {
+                    if !collection.is_empty() {
                         name = format!("{}/{}", collection, name);
                     }
                     child_collections.push(name);
@@ -66,7 +65,7 @@ impl VideoStore for FileStore {
         Ok(VideoEntry::from(collection, child_collections, videos))
     }
 
-    fn move_file(&self, path: &PathBuf) -> io::Result<()> {
+    fn move_file(&self, path: &Path) -> io::Result<()> {
         let new_path = self.get_new_video_path(path)?;
 
         println!("moving file {} to {}",
@@ -76,7 +75,19 @@ impl VideoStore for FileStore {
         fs::rename(path, new_path)
     }
 
-    async fn convert_to_mp4(&self, path: &PathBuf) -> anyhow::Result<bool> {
+    fn delete(&self, _path: String) -> io::Result<bool> {
+        todo!()
+    }
+
+    fn as_path(&self, collection: String, video: String) -> String {
+        if collection.is_empty() {
+            format!("{}/{}", self.root, video)
+        } else {
+            format!("{}/{}/{}", self.root, collection, video)
+        }
+    }
+
+    async fn convert_to_mp4(&self, path: &Path) -> anyhow::Result<bool> {
         let mut new_path = self.get_new_video_path(path)?;
 
         new_path.set_extension("mp4");
@@ -87,21 +98,9 @@ impl VideoStore for FileStore {
 
         convert_to_mp4(path, &new_path).await
     }
-
-    fn delete(&self, _path: String) -> io::Result<bool> {
-        todo!()
-    }
-
-    fn as_path(&self, collection: String, video: String) -> String {
-        if collection == "" {
-            format!("{}/{}", self.root, video)
-        } else {
-            format!("{}/{}/{}", self.root, collection, video)
-        }
-    }
 }
 
-async fn convert_to_mp4(src: &PathBuf, dest: &PathBuf) -> anyhow::Result<bool> {
+async fn convert_to_mp4(src: &Path, dest: &Path) -> anyhow::Result<bool> {
     let args = vec![
         "-i",
         src.to_str().unwrap_or_default(),
@@ -122,7 +121,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let store = FileStore::from("/Users/chris2/Movies");
+        let store = MediaStore::from("/Users/chris2/Movies");
 
         let results = store.list("".to_string()).unwrap();
 

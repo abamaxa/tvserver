@@ -1,15 +1,11 @@
 pub mod repository;
-pub mod vlc_player;
-pub mod filestore;
-pub mod browser_player;
-pub mod youtube;
-pub mod pirate_bay;
-pub mod torrents;
+pub mod websocket_connection;
 pub mod subprocess;
+pub mod http_fetcher;
+pub mod object_store;
 
-pub use browser_player::{RemotePlayer, RemoteBrowserPlayer};
-pub use filestore::FileStore;
-pub use pirate_bay::{PirateClient};
-pub use torrents::TransmissionDaemon;
+pub use http_fetcher::HTTPClient;
+pub use websocket_connection::{RemotePlayer, RemoteBrowserPlayer};
+
 #[cfg(feature = "vlc")]
 pub use vlc_player::{Player, VLCPlayer};
