@@ -38,6 +38,8 @@ impl StoreReaderWriter for FileSystemStore {
     async fn ensure_path_exists(&self, path: &Path) -> Result<()> {
         if !path.exists() {
             fs::create_dir_all(path).await?;
+        } else if !path.is_dir() {
+            return Err(anyhow!("a file already exists with that name: {}", path.to_string_lossy()));
         }
         Ok(())
     }
@@ -50,6 +52,7 @@ impl StoreReaderWriter for FileSystemStore {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use anyhow::Result;
     use super::*;
 
@@ -80,19 +83,56 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_directory_exists() -> Result<()> {
-        let store: &dyn StoreReaderWriter = &FileSystemStore {} ;
+        let store: &dyn StoreReaderWriter = &FileSystemStore {};
+
+        let mut path = PathBuf::from(TEST_DIR);
+
+        path.push("TV");
+        path.push("does not exists");
+
+        assert!(!path.exists());
+
+        store.ensure_path_exists(&path).await?;
+
+        assert!(path.exists());
+
+        fs::remove_dir_all(&path).await?;
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_rename() -> Result<()> {
-        let store: &dyn StoreReaderWriter = &FileSystemStore {} ;
-        Ok(())
-    }
+        let store: &dyn StoreReaderWriter = &FileSystemStore{};
 
-    #[tokio::test]
-    async fn test_rename_fails_with_directory_that_does_not_exist() -> Result<()> {
-        let store: &dyn StoreReaderWriter = &FileSystemStore {} ;
+        let mut path = PathBuf::from(TEST_DIR);
+
+        path.push("collection1");
+
+        let results = store.list_directory(&path).await?;
+
+        assert!(results.1.len() > 0);
+
+        let existing = results.1.first().unwrap();
+
+        let new_name = String::from("new file name.mp4");
+
+        assert!(!results.1.contains(&new_name));
+
+        let mut source_path = path.clone();
+        source_path.push(existing);
+
+        let mut dest_path = path.clone();
+        dest_path.push(&new_name);
+
+        store.rename(&source_path, &dest_path).await?;
+
+        let results = store.list_directory(&path).await?;
+
+        assert!(results.1.contains(&new_name));
+
+        store.rename(&dest_path, &source_path).await?;
+
         Ok(())
     }
 }
