@@ -2,7 +2,7 @@
 pub const CLIENT_DIR: &str = "CLIENT_DIR";
 pub const DATABASE_URL: &str = "DATABASE_URL";
 pub const DATABASE_MIGRATION_DIR: &str = "DATABASE_MIGRATION_DIR";
-// pub const DISABLE_VLC: &str = "DISABLE_VLC";
+pub const ENABLE_VLC: &str = "ENABLE_VLC";
 pub const GOOGLE_KEY: &str = "GOOGLE_KEY";
 pub const MOVIE_DIR: &str = "MOVIE_DIR";
 pub const TORRENT_DIR: &str = "TORRENT_DIR";

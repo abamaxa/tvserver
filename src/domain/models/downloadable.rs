@@ -9,7 +9,7 @@ use transmission_rpc::types::{Torrent, TorrentStatus};
 
 use crate::domain::models::SearchResults;
 use crate::domain::TORRENT_DIR;
-use crate::domain::traits::VideoStore;
+use crate::domain::traits::MediaStorer;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -21,22 +21,19 @@ pub struct FileDetails {
 }
 
 impl FileDetails {
-    fn is_video(&self) -> bool {
+    fn is_media(&self) -> bool {
         match self.filepath.extension() {
-            Some(extension) => match extension.to_str().unwrap_or_default() {
-                "mpeg" | "mpg" | "mp4" | "avi" | "mkv" => true,
-                _ => false,
-            }
+            Some(extension) => matches!(
+                extension.to_str().unwrap_or_default(),
+                "mpeg" | "mpg" | "mp4" | "avi" | "mkv" | "mp3" | "webm"
+            ),
             None => false,
         }
     }
 
     fn should_convert_to_mp4(&self) -> bool {
         match self.filepath.extension() {
-            Some(extension) => match extension.to_str().unwrap_or_default() {
-                "avi" => true,
-                _ => false,
-            }
+            Some(extension) => matches!(extension.to_str().unwrap_or_default(), "avi"),
             None => false,
         }
     }
@@ -74,10 +71,9 @@ impl DownloadProgress {
 
     pub fn from(t: &Torrent) -> Self {
 
-        let download_finished = match t.status {
-            Some(TorrentStatus::QueuedToSeed) | Some(TorrentStatus::Seeding) => true,
-            _ => false,
-        };
+        let download_finished = matches!(
+            t.status, Some(TorrentStatus::QueuedToSeed) | Some(TorrentStatus::Seeding)
+        );
 
         let download_dir = match env::var(TORRENT_DIR) {
             Ok(val) => val,
@@ -96,7 +92,7 @@ impl DownloadProgress {
                     length: item.length,
                     bytes_completed: item.bytes_completed,
                     name: item.name.clone(),
-                    filepath: filepath,
+                    filepath,
                 }
             }).collect(),
             None => vec![],
@@ -143,9 +139,9 @@ impl DownloadProgress {
         self.download_finished
     }
 
-    pub async fn move_videos(&self, store: &Arc<dyn VideoStore>) -> Result<()> {
+    pub async fn move_videos(&self, store: &Arc<dyn MediaStorer>) -> Result<()> {
         for item in &self.files {
-            if !item.is_video() {
+            if !item.is_media() {
                 println!("not moving {} as it it not a video file", item.name);
                 continue;
             }
@@ -153,7 +149,7 @@ impl DownloadProgress {
             if item.should_convert_to_mp4() {
                 store.convert_to_mp4(&item.filepath).await?;
             } else {
-                store.move_file(&item.filepath)?;
+                store.move_file(&item.filepath).await?;
             }
         }
         Ok(())

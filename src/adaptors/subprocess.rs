@@ -10,24 +10,6 @@ pub struct StdSubprocess {
     //stdout_rx: Receiver<String>
 }
 
-pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
-    let child = Command::new(cmd)
-        .args(&args)
-        .output();
-
-    let output = child.await?;
-
-    print!("execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
-        cmd,
-        args,
-        output.status.success(),
-        String::from_utf8(output.stdout).unwrap(),
-        String::from_utf8(output.stderr).unwrap(),
-    );
-
-    Ok(output.status.success())
-}
-
 pub struct AsyncCommand {
     command: String,
     args: Vec<String>,
@@ -49,11 +31,29 @@ impl AsyncCommand {
 
         tokio::spawn(async move {
             let str_args = ptr.args.iter().map(|s| s.as_str()).collect();
-            match command(ptr.command.as_str(), str_args).await {
+            match Self::command(ptr.command.as_str(), str_args).await {
                 Ok(_) => println!("download succeeded - {} {:?}", ptr.command, ptr.args),
-                Err(e) => println!("download failed {} - {} {:?}", e.to_string(), ptr.command, ptr.args),
+                Err(e) => println!("download failed {} - {} {:?}", e, ptr.command, ptr.args),
             };
         });
+    }
+
+    pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
+        let child = Command::new(cmd)
+            .args(&args)
+            .output();
+
+        let output = child.await?;
+
+        print!("execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
+               cmd,
+               args,
+               output.status.success(),
+               String::from_utf8(output.stdout).unwrap(),
+               String::from_utf8(output.stderr).unwrap(),
+        );
+
+        Ok(output.status.success())
     }
 }
 
@@ -83,7 +83,7 @@ impl StdSubprocess {
                         }
                     }
                     Err(e) => {
-                        println!("read stdout returned failed: {}", e.to_string());
+                        println!("read stdout returned failed: {}", e);
                         break;
                     }
                 }
@@ -91,7 +91,7 @@ impl StdSubprocess {
                 match output.send(buffer.clone()).await {
                     Ok(_) => buffer.clear(),
                     Err(e) => {
-                        println!("could not copy stdout to channel: {}", e.to_string());
+                        println!("could not copy stdout to channel: {}", e);
                         break;
                     }
                 }
@@ -119,6 +119,6 @@ mod test {
 
     #[tokio::test]
     async fn test_execute_command() {
-        assert!(command("ls", vec!["-l"]).await.unwrap());
+        assert!(AsyncCommand::command("ls", vec!["-l"]).await.unwrap());
     }
 }

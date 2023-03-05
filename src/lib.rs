@@ -4,50 +4,47 @@ mod adaptors;
 mod domain;
 mod services;
 
-use axum::routing::get;
-use tower_http::{trace::{DefaultMakeSpan, TraceLayer}, cors::CorsLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, filter::LevelFilter, filter};
-use std::{net::SocketAddr, sync::Arc};
-use crate::domain::config::get_movie_dir;
-use crate::domain::traits::{Player, VideoStore};
-use crate::services::download_monitor::monitor_downloads;
+use std::{env, net::SocketAddr, sync::Arc};
+use std::path::PathBuf;
 
+use tower_http::{trace::{DefaultMakeSpan, TraceLayer}, cors::CorsLayer, services::ServeDir};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::domain::{CLIENT_DIR, config::get_movie_dir, ENABLE_VLC, traits::Player};
+use crate::services::{
+    api,
+    media_store::MediaStore,
+    monitor::monitor_downloads,
+    vlc_player::VLCPlayer,
+};
 
 pub async fn run() -> anyhow::Result<()> {
 
     let pool = adaptors::repository::get_database().await?;
 
-    adaptors::repository::do_migrations(&pool).await.unwrap();
+    adaptors::repository::do_migrations(&pool).await?;
 
-    let store: Arc<dyn VideoStore> = Arc::new(
-        adaptors::filestore::FileStore::from(&get_movie_dir())
+    let enable_vlc = env::var(ENABLE_VLC).unwrap_or_default();
+    let player: Option<Arc<dyn Player>> = match enable_vlc.as_str() {
+        "1" | "true" => Some(Arc::new(VLCPlayer::new())),
+        _ => None,
+    };
+
+    let context = api::Context::from(
+        Arc::new(MediaStore::from(&get_movie_dir())),
+        Arc::new(adaptors::HTTPClient::new()),
+        player
     );
 
-    let _ = monitor_downloads(store.clone());
+    let monitor_handle = monitor_downloads(context.store.clone());
 
-    let player: Option<Arc<dyn Player>> = None;
+    setup_logging();
 
-    // player = Some(Arc::new(adaptors::vlc_player::VLCPlayer::new()));
-    let filter = filter::Targets::new()
-        .with_target("tower_http::trace::on_response", LevelFilter::DEBUG)
-        .with_target("tower_http::trace::on_request", LevelFilter::INFO)
-        .with_target("tower_http::trace::make_span", LevelFilter::DEBUG)
-        .with_default(LevelFilter::INFO);
-
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "websockets=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_ansi(false))
-        .with(filter)
-        .init();
-
-    let app = services::web::register(player, store)
-        .nest_service("/", get(services::client_serving::app_handler))
-        .nest_service("/player", get(services::client_serving::player_handler))
+    let app = api::register(Arc::new(context))
+        .nest_service("/", ServeDir::new(get_client_path("app")))
+        .nest_service("/player", ServeDir::new(get_client_path("player")))
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default().include_headers(false)));
+        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     tracing::info!("listening on {}", addr);
@@ -56,14 +53,29 @@ pub async fn run() -> anyhow::Result<()> {
         .await
         .unwrap();
 
+    monitor_handle.abort();
+
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+fn setup_logging() {
+    let format = fmt::format()
+        .with_ansi(false)
+        .without_time()
+        .with_level(true)
+        .with_target(false)
+        .compact();
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "tvserver=debug,tower_http=debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer().event_format(format))
+        .init();
+}
+
+fn get_client_path(subdir: &str) -> PathBuf {
+    let root_dir = env::var(CLIENT_DIR).unwrap_or(String::from("client"));
+    PathBuf::from(root_dir.as_str()).join(subdir)
 }

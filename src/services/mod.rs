@@ -1,4 +1,8 @@
-pub mod web;
-pub mod client_serving;
-pub mod video_serving;
-pub mod download_monitor;
+pub mod api;
+pub mod media_stream;
+pub mod monitor;
+pub mod vlc_player;
+pub mod youtube;
+pub mod pirate_bay;
+pub mod torrents;
+pub mod media_store;

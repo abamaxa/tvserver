@@ -18,7 +18,7 @@ impl VideoEntry {
     ) -> VideoEntry {
         let mut parent_collection = String::new();
 
-        if let Some(_) = collection.find('/') {
+        if collection.find('/').is_some() {
             let v: Vec<&str> = collection.rsplitn(2, '/').collect();
             parent_collection = v[1].to_string();
         }
