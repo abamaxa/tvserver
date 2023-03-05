@@ -116,6 +116,7 @@ mod test {
     use crate::domain::traits::SearchEngine;
 
     #[tokio::test]
+    #[ignore]
     async fn test_torrents_list() {
         let client = TransmissionDaemon::new();
 
@@ -130,6 +131,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_torrents_add_and_delete() {
         let mut link: Option<String> = None;
         let pc: &dyn SearchEngine<DownloadableItem> = &PirateClient::new(None);

@@ -185,10 +185,9 @@ async fn play(State(state): State<SharedState>, Json(payload): Json<PlayRequest>
 async fn call_local_player<F>(state: &SharedState, f: F) -> (StatusCode, Json<Response>)
     where F: FnOnce(&Context, &Arc<dyn Player>) -> (StatusCode, Json<Response>)
 {
-    if let Some(player) = &state.player {
-        f(&state, player)
-    } else {
-        (StatusCode::OK, Json(Response::success("no local player".to_string())))
+    match &state.player {
+        Some(player) => f(state, player),
+        _ => (StatusCode::OK, Json(Response::success("no local player".to_string())))
     }
 }
 
