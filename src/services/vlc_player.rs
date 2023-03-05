@@ -1,23 +1,27 @@
-use std::process::{Command};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::io::{BufRead, Write, BufReader};
+use std::io::{BufRead, BufReader, Write};
+use std::process::Command;
 use std::process::Stdio;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
 use std::thread;
 use std::time;
-use std::sync::Mutex;
 
 use crate::domain::traits::Player;
 
 #[derive(Debug)]
 pub struct VLCPlayer {
     stdin_tx: Mutex<Sender<String>>,
-    stdout_rx: Mutex<Receiver<String>>
+    stdout_rx: Mutex<Receiver<String>>,
 }
-
 
 impl Player for VLCPlayer {
     fn send_command(&self, command: &str, wait_secs: i32) -> Result<String, String> {
-        match self.stdin_tx.lock().unwrap().send(command.to_string() + "\n") {
+        match self
+            .stdin_tx
+            .lock()
+            .unwrap()
+            .send(command.to_string() + "\n")
+        {
             Ok(_) => Ok(self.read_result(wait_secs)),
             Err(err) => Err(err.0),
         }
@@ -25,7 +29,6 @@ impl Player for VLCPlayer {
 }
 
 impl VLCPlayer {
-
     pub fn new() -> VLCPlayer {
         let (stdin_tx, stdin_rx) = channel();
         let (stdout_tx, stdout_rx) = channel();
@@ -69,7 +72,9 @@ impl VLCPlayer {
 
         loop {
             if let Ok(msg) = input.recv() {
-                child_stdin.write_all(msg.as_bytes()).expect("lost stdin to vlc");
+                child_stdin
+                    .write_all(msg.as_bytes())
+                    .expect("lost stdin to vlc");
             }
         }
     }
@@ -79,14 +84,12 @@ impl VLCPlayer {
         let mut counter = 0;
 
         while counter * 10 <= wait_secs {
-
             if let Ok(buffer) = self.stdout_rx.lock().unwrap().try_recv() {
                 result += &buffer;
                 counter = 0;
                 if buffer.starts_with("+----") {
                     break;
                 }
-
             } else {
                 thread::sleep(time::Duration::from_millis(100));
                 counter += 1;
@@ -100,7 +103,7 @@ impl VLCPlayer {
 #[cfg(test)]
 mod test {
 
-    use super::{VLCPlayer, Player};
+    use super::{Player, VLCPlayer};
 
     #[test]
     #[ignore]

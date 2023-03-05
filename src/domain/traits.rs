@@ -1,11 +1,11 @@
 use std::io;
 use std::path::Path;
 
-use axum::http::StatusCode;
-use async_trait::async_trait;
-use anyhow;
-use serde::de::DeserializeOwned;
 use crate::domain::models::{DownloadListResults, SearchResults, VideoEntry};
+use anyhow;
+use async_trait::async_trait;
+use axum::http::StatusCode;
+use serde::de::DeserializeOwned;
 
 #[async_trait]
 pub trait RemotePlayer: Send + Sync {

@@ -1,34 +1,31 @@
-use serde::{Serialize, Deserialize};
 use crate::domain::SearchEngineType;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RemoteMessage {
-    Command {command: String},
-    Play {url: String},
-    Seek {interval: i32},
+    Command { command: String },
+    Play { url: String },
+    Seek { interval: i32 },
     Stop,
     TogglePause(String),
 }
-
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LocalCommand {
     pub command: String,
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Command {
     pub remote_address: Option<String>,
-    pub message: RemoteMessage
+    pub message: RemoteMessage,
 }
-
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlayRequest {
     pub collection: String,
     pub video: String,
-    pub remote_address: Option<String>
+    pub remote_address: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -39,10 +36,16 @@ pub struct Response {
 
 impl Response {
     pub fn success(message: String) -> Response {
-        Response{message, ..Default::default()}
+        Response {
+            message,
+            ..Default::default()
+        }
     }
     pub fn error(error: String) -> Response {
-        Response{errors: vec![error], ..Default::default()}
+        Response {
+            errors: vec![error],
+            ..Default::default()
+        }
     }
 }
 

@@ -1,41 +1,31 @@
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::{
     debug_handler,
-    extract::{ConnectInfo, Path, Query, State},
     extract::ws::WebSocketUpgrade,
+    extract::{ConnectInfo, Path, Query, State},
     headers::HeaderMap,
-    routing::{delete, get, post},
     http::StatusCode,
     response::IntoResponse,
-    Json,
-    Router,
+    routing::{delete, get, post},
+    Json, Router,
 };
 use tokio::sync::{RwLock, RwLockReadGuard};
 
-use crate::adaptors::{RemotePlayer, RemoteBrowserPlayer};
 use super::{
-    media_stream::stream_video,
-    pirate_bay::PirateClient,
-    torrents::TransmissionDaemon,
+    media_stream::stream_video, pirate_bay::PirateClient, torrents::TransmissionDaemon,
     youtube::YoutubeClient,
 };
+use crate::adaptors::{RemoteBrowserPlayer, RemotePlayer};
 use crate::domain::events::{
-    DownloadRequest,
-    LocalCommand,
-    PlayRequest,
-    Response,
-    ClientLogMessage,
-    RemoteMessage,
-    Command,
+    ClientLogMessage, Command, DownloadRequest, LocalCommand, PlayRequest, RemoteMessage, Response,
 };
-use crate::domain::{GOOGLE_KEY, SearchEngineType};
 use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry, YoutubeResponse};
-use crate::domain::traits::{DownloadClient, Player, SearchEngine, MediaStorer, JsonFetcher};
-
+use crate::domain::traits::{DownloadClient, JsonFetcher, MediaStorer, Player, SearchEngine};
+use crate::domain::{SearchEngineType, GOOGLE_KEY};
 
 #[derive(Clone)]
 pub struct Context {
@@ -51,7 +41,7 @@ impl Context {
     pub fn from(
         store: Arc<dyn MediaStorer>,
         youtube_fetcher: Arc<dyn JsonFetcher<YoutubeResponse>>,
-        player: Option<Arc<dyn Player>>
+        player: Option<Arc<dyn Player>>,
     ) -> Context {
         Context {
             player,
@@ -89,21 +79,31 @@ pub fn register(shared_state: SharedState) -> Router {
 }
 
 #[debug_handler]
-async fn downloads_add(State(state): State<SharedState>, Json(payload): Json<DownloadRequest>) -> (StatusCode, Json<Response>) {
+async fn downloads_add(
+    State(state): State<SharedState>,
+    Json(payload): Json<DownloadRequest>,
+) -> (StatusCode, Json<Response>) {
     let link = payload.link.as_str();
     match payload.engine {
         SearchEngineType::YouTube => {
             let key = env::var(GOOGLE_KEY).unwrap_or_default();
-            download(&YoutubeClient::new(&key, state.youtube_fetcher.as_ref()), link).await
+            download(
+                &YoutubeClient::new(&key, state.youtube_fetcher.as_ref()),
+                link,
+            )
+            .await
         }
-        _ => download(&TransmissionDaemon::new(), link).await
+        _ => download(&TransmissionDaemon::new(), link).await,
     }
 }
 
 async fn download(client: &dyn DownloadClient, link: &str) -> (StatusCode, Json<Response>) {
     match client.add(link).await {
         Ok(r) => (StatusCode::OK, Json(Response::success(r))),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(err)))
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Response::error(err)),
+        ),
     }
 }
 
@@ -111,8 +111,14 @@ async fn download(client: &dyn DownloadClient, link: &str) -> (StatusCode, Json<
 async fn downloads_delete(Path(id): Path<i64>) -> (StatusCode, Json<Response>) {
     let daemon = TransmissionDaemon::new();
     match daemon.delete(id, false).await {
-        Ok(_) => (StatusCode::OK, Json(Response::success(String::from("success")))),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(err)))
+        Ok(_) => (
+            StatusCode::OK,
+            Json(Response::success(String::from("success"))),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Response::error(err)),
+        ),
     }
 }
 
@@ -121,20 +127,23 @@ async fn downloads_list() -> impl IntoResponse {
     let daemon: &dyn DownloadClient = &TransmissionDaemon::new();
     match daemon.list().await {
         Ok(r) => (StatusCode::OK, Json(r)),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(err)),
     }
 }
 
 #[debug_handler]
-async fn pirate_search(Query(params): Query<HashMap<String, String>>) -> (StatusCode, Json<SearchResults<DownloadableItem>>) {
+async fn pirate_search(
+    Query(params): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<SearchResults<DownloadableItem>>) {
     let client = PirateClient::new(None);
     do_search::<PirateClient, DownloadableItem>(&client, &params).await
 }
 
 #[debug_handler]
-async fn youtube_search(State(state): State<SharedState>, Query(params): Query<HashMap<String, String>>)
-                        -> (StatusCode, Json<SearchResults<DownloadableItem>>)
-{
+async fn youtube_search(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<SearchResults<DownloadableItem>>) {
     match env::var(GOOGLE_KEY) {
         Ok(key) => {
             let client = YoutubeClient::new(&key, state.youtube_fetcher.as_ref());
@@ -142,38 +151,53 @@ async fn youtube_search(State(state): State<SharedState>, Query(params): Query<H
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(SearchResults::error("google api key is not configured"))
-        )
+            Json(SearchResults::error("google api key is not configured")),
+        ),
     }
 }
 
-async fn do_search<T, F>(client: &dyn SearchEngine<F>, params: &HashMap<String, String>) -> (StatusCode, Json<SearchResults<F>>) {
+async fn do_search<T, F>(
+    client: &dyn SearchEngine<F>,
+    params: &HashMap<String, String>,
+) -> (StatusCode, Json<SearchResults<F>>) {
     match params.get("q") {
-        Some(query) => {
-            match client.search(query).await {
-                Ok(results) => (StatusCode::OK, Json(results)),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(SearchResults::error(&e.to_string())))
-            }
-        }
-        _ => (StatusCode::OK, Json(SearchResults::error("missing q parameter")))
+        Some(query) => match client.search(query).await {
+            Ok(results) => (StatusCode::OK, Json(results)),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SearchResults::error(&e.to_string())),
+            ),
+        },
+        _ => (
+            StatusCode::OK,
+            Json(SearchResults::error("missing q parameter")),
+        ),
     }
 }
 
 #[debug_handler]
-async fn handle_command(State(state): State<SharedState>, Json(payload): Json<LocalCommand>) -> (StatusCode, Json<Response>) {
+async fn handle_command(
+    State(state): State<SharedState>,
+    Json(payload): Json<LocalCommand>,
+) -> (StatusCode, Json<Response>) {
     call_local_player(&state, |_, player| -> (StatusCode, Json<Response>) {
         match player.send_command(&payload.command, 0) {
             Ok(result) => (StatusCode::OK, Json(Response::success(result))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e)))
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e))),
         }
-    }).await
+    })
+    .await
 }
 
 #[debug_handler]
-async fn play(State(state): State<SharedState>, Json(payload): Json<PlayRequest>) -> (StatusCode, Json<Response>) {
+async fn play(
+    State(state): State<SharedState>,
+    Json(payload): Json<PlayRequest>,
+) -> (StatusCode, Json<Response>) {
     call_local_player(&state, |context, player| -> (StatusCode, Json<Response>) {
         let command = format!(
-            "add file://{}", context.store.as_path(payload.collection, payload.video)
+            "add file://{}",
+            context.store.as_path(payload.collection, payload.video)
         );
 
         if let Err(err) = player.send_command("clear", 1) {
@@ -182,18 +206,22 @@ async fn play(State(state): State<SharedState>, Json(payload): Json<PlayRequest>
 
         match player.send_command(&command, 0) {
             Ok(result) => (StatusCode::OK, Json(Response::success(result))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e)))
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e))),
         }
-    }).await
+    })
+    .await
 }
 
-
 async fn call_local_player<F>(state: &SharedState, f: F) -> (StatusCode, Json<Response>)
-    where F: FnOnce(&Context, &Arc<dyn Player>) -> (StatusCode, Json<Response>)
+where
+    F: FnOnce(&Context, &Arc<dyn Player>) -> (StatusCode, Json<Response>),
 {
     match &state.player {
         Some(player) => f(state, player),
-        _ => (StatusCode::OK, Json(Response::success("no local player".to_string())))
+        _ => (
+            StatusCode::OK,
+            Json(Response::success("no local player".to_string())),
+        ),
     }
 }
 
@@ -201,15 +229,24 @@ async fn call_local_player<F>(state: &SharedState, f: F) -> (StatusCode, Json<Re
 async fn list_collections(State(state): State<SharedState>) -> impl IntoResponse {
     match state.store.list("".to_string()).await {
         Ok(result) => (StatusCode::OK, Json(result)),
-        Err(e) => (StatusCode::NOT_FOUND, Json(VideoEntry::error(e.to_string())))
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(VideoEntry::error(e.to_string())),
+        ),
     }
 }
 
 #[debug_handler]
-async fn list_videos(State(state): State<SharedState>, Path(collection): Path<String>) -> (StatusCode, Json<VideoEntry>) {
+async fn list_videos(
+    State(state): State<SharedState>,
+    Path(collection): Path<String>,
+) -> (StatusCode, Json<VideoEntry>) {
     match state.store.list(collection).await {
         Ok(result) => (StatusCode::OK, Json(result)),
-        Err(e) => (StatusCode::NOT_FOUND, Json(VideoEntry::error(e.to_string())))
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(VideoEntry::error(e.to_string())),
+        ),
     }
 }
 
@@ -252,14 +289,21 @@ pub async fn ws_handler(
 }
 
 #[debug_handler]
-async fn video(State(state): State<SharedState>, Path(video_path): Path<String>, headers: HeaderMap) -> impl IntoResponse {
+async fn video(
+    State(state): State<SharedState>,
+    Path(video_path): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let video_file = state.store.as_path("".to_string(), video_path);
 
     stream_video(video_file, headers).await
 }
 
 #[debug_handler]
-async fn remote_play(State(state): State<SharedState>, Json(payload): Json<PlayRequest>) -> (StatusCode, Json<Response>) {
+async fn remote_play(
+    State(state): State<SharedState>,
+    Json(payload): Json<PlayRequest>,
+) -> (StatusCode, Json<Response>) {
     let url: String = if payload.collection.is_empty() {
         format!("/stream/{}  ", payload.video)
     } else {
@@ -275,26 +319,34 @@ async fn remote_play(State(state): State<SharedState>, Json(payload): Json<PlayR
 }
 
 #[debug_handler]
-async fn remote_command(State(state): State<SharedState>, Json(payload): Json<Command>) -> (StatusCode, Json<Response>) {
+async fn remote_command(
+    State(state): State<SharedState>,
+    Json(payload): Json<Command>,
+) -> (StatusCode, Json<Response>) {
     execute_remote(&state, payload).await
 }
 
 async fn execute_remote(state: &SharedState, command: Command) -> (StatusCode, Json<Response>) {
-
     let key = command.remote_address.unwrap_or_default();
     let remote_client: Arc<dyn RemotePlayer> = match state.client_map.read().await.get(&key) {
         Some(client) => client.clone(),
         _ => {
-            let remote_player: RwLockReadGuard<Option<Arc<dyn RemotePlayer>>> = state.remote_player.read().await;
+            let remote_player: RwLockReadGuard<Option<Arc<dyn RemotePlayer>>> =
+                state.remote_player.read().await;
             match remote_player.clone() {
                 Some(client) => client,
-                None => return (StatusCode::BAD_REQUEST, Json(Response::error("missing remote_address".to_string())))
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(Response::error("missing remote_address".to_string())),
+                    )
+                }
             }
         }
     };
 
     match remote_client.send(command.message).await {
         Ok(result) => (result, Json(Response::success("todo".to_string()))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e)))
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e))),
     }
 }

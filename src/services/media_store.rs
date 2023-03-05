@@ -1,6 +1,6 @@
+use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::{fs, io};
-use async_trait::async_trait;
 
 use crate::adaptors::subprocess::AsyncCommand;
 use crate::domain::models::VideoEntry;
@@ -13,7 +13,9 @@ pub struct MediaStore {
 
 impl MediaStore {
     pub fn from(root: &str) -> MediaStore {
-        MediaStore {root: root.to_string()}
+        MediaStore {
+            root: root.to_string(),
+        }
     }
 
     async fn get_new_video_path(&self, path: &Path) -> io::Result<PathBuf> {
@@ -36,7 +38,6 @@ impl MediaStore {
 
 #[async_trait]
 impl MediaStorer for MediaStore {
-
     async fn list(&self, collection: String) -> Result<VideoEntry, io::Error> {
         let mut child_collections: Vec<String> = Vec::new();
         let mut videos: Vec<String> = Vec::new();
@@ -68,9 +69,11 @@ impl MediaStorer for MediaStore {
     async fn move_file(&self, path: &Path) -> io::Result<()> {
         let new_path = self.get_new_video_path(path).await?;
 
-        println!("moving file {} to {}",
-                 path.to_str().unwrap_or_default(),
-                 new_path.to_str().unwrap_or_default());
+        println!(
+            "moving file {} to {}",
+            path.to_str().unwrap_or_default(),
+            new_path.to_str().unwrap_or_default()
+        );
 
         fs::rename(path, new_path).await
     }
@@ -92,9 +95,11 @@ impl MediaStorer for MediaStore {
 
         new_path.set_extension("mp4");
 
-        println!("converting {} to mp4 {}",
-                 path.to_str().unwrap_or_default(),
-                 new_path.to_str().unwrap_or_default());
+        println!(
+            "converting {} to mp4 {}",
+            path.to_str().unwrap_or_default(),
+            new_path.to_str().unwrap_or_default()
+        );
 
         convert_to_mp4(path, &new_path).await
     }
@@ -109,15 +114,15 @@ async fn convert_to_mp4(src: &Path, dest: &Path) -> anyhow::Result<bool> {
         "-c:a",
         "copy",
         "-y",
-        dest.to_str().unwrap_or_default()
+        dest.to_str().unwrap_or_default(),
     ];
     AsyncCommand::command("ffmpeg", args).await
 }
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
     use super::*;
+    use anyhow::Result;
 
     #[tokio::test]
     async fn test_video_entry_creation() -> Result<()> {
@@ -125,7 +130,10 @@ mod tests {
 
         let results = store.list("".to_string()).await?;
 
-        assert_eq!(results.child_collections, vec!["collection1", "collection2"]);
+        assert_eq!(
+            results.child_collections,
+            vec!["collection1", "collection2"]
+        );
         assert_eq!(results.videos, vec!["test.mp4"]);
 
         Ok(())
