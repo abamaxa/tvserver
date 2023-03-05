@@ -24,8 +24,8 @@ pub trait SearchEngine<T>: Send + Sync {
 
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
-    fn list(&self, collection: String) -> Result<VideoEntry, io::Error>;
-    fn move_file(&self, path: &Path) -> io::Result<()>;
+    async fn list(&self, collection: String) -> Result<VideoEntry, io::Error>;
+    async fn move_file(&self, path: &Path) -> io::Result<()>;
     fn delete(&self, path: String) -> io::Result<bool>;
     fn as_path(&self, collection: String, video: String) -> String;
 
@@ -47,4 +47,11 @@ pub trait TextFetcher: Send + Sync {
 #[async_trait]
 pub trait JsonFetcher<T: DeserializeOwned>: Send + Sync {
     async fn get_json(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<T>;
+}
+
+#[async_trait]
+pub trait StoreReaderWriter {
+    async fn list_directory(&self, path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)>;
+    async fn ensure_path_exists(&self, path: &Path) -> anyhow::Result<()>;
+    async fn rename(&self, old_path: &Path, new_path: &Path) -> anyhow::Result<()>;
 }

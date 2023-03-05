@@ -123,7 +123,7 @@ mod test {
         match client.list().await {
             Err(err) => panic!("{}", err.error.unwrap()),
             Ok(results) => {
-                for item in results.results.unwrap() {
+                for item in &results.results.unwrap() {
                     println!("{:?}, {:?}", item.name, item.download_finished);
                 }
             },
@@ -137,7 +137,7 @@ mod test {
         let pc: &dyn SearchEngine<DownloadableItem> = &PirateClient::new(None);
 
         match pc.search("top-books").await {
-            Err(err) => panic!("{:?}", err.to_string()),
+            Err(err) => panic!("{}", err.to_string()),
             Ok(results) => {
                 for item in results.results.unwrap() {
                     println!("{}: {}, {}", item.link, item.title, item.description);
@@ -161,7 +161,7 @@ mod test {
         match client.list().await {
             Err(err) => panic!("{}", err.error.unwrap()),
             Ok(results) => {
-                for item in results.results.unwrap() {
+                for item in &results.results.unwrap() {
                     println!("{}, {}", item.name, item.download_finished);
                 }
             },

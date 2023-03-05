@@ -149,7 +149,7 @@ impl DownloadProgress {
             if item.should_convert_to_mp4() {
                 store.convert_to_mp4(&item.filepath).await?;
             } else {
-                store.move_file(&item.filepath)?;
+                store.move_file(&item.filepath).await?;
             }
         }
         Ok(())

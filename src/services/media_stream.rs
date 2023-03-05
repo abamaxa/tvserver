@@ -49,12 +49,12 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
     // in web browser that expects the headers to be capitalized, as below. Trying to use lower case
     // headers breaks the video control, which entirely defeats the purpose. Regrettably, there is
     // no way to force axum/http not to convert the headers to lowercase, so we currently need to
-    // compile using a hacked version of the http lib, which is found in the `private` directory.
-    let content_type = HeaderName::from_static("Content-Type");
-    let content_length = HeaderName::from_static("Content-Length");
-    let content_disposition = HeaderName::from_static("Content-Disposition");
-    let content_range = HeaderName::from_static("Content-Range");
-    let accept_ranges = HeaderName::from_static("Accept-Ranges");
+    // compile using a hacked version of the http lib, which is hosted on my github.
+    let content_type = HeaderName::from_static_for_http_1x("Content-Type");
+    let content_length = HeaderName::from_static_for_http_1x("Content-Length");
+    let content_disposition = HeaderName::from_static_for_http_1x("Content-Disposition");
+    let content_range = HeaderName::from_static_for_http_1x("Content-Range");
+    let accept_ranges = HeaderName::from_static_for_http_1x("Accept-Ranges");
 
     if !found_range || (stream_to - stream_from) >= (file_size - 1) {
         let headers = AppendHeaders([

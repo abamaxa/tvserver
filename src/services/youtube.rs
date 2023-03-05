@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use anyhow;
-use html_escape::decode_html_entities;
 use crate::adaptors::subprocess::AsyncCommand;
 use crate::domain::config::get_movie_dir;
-use crate::domain::SearchEngineType::YouTube;
 use crate::domain::models::{SearchResults, DownloadableItem, DownloadListResults, YoutubeResponse};
 use crate::domain::traits::{DownloadClient, JsonFetcher, SearchEngine};
 
@@ -11,7 +9,6 @@ const SEARCH_URL: &str = "https://www.googleapis.com/youtube/v3/search";
 const SEARCH_PART: &str = "snippet";
 const SEARCH_MAX_RESULTS: &str = "50";
 const SEARCH_TYPE: &str = "video";
-
 
 type YoutubeResult = SearchResults<DownloadableItem>;
 type Fetcher = dyn JsonFetcher<YoutubeResponse>;
@@ -48,14 +45,7 @@ impl<'a> YoutubeClient<'a> {
         SearchResults::success(
             yt_response.items
                 .iter()
-                .map(|r| {
-                    DownloadableItem{
-                        title: decode_html_entities(&r.snippet.title).to_string(),
-                        description: r.snippet.description.clone(),
-                        link: r.id.video_id.to_string(),
-                        engine: YouTube,
-                    }
-                })
+                .map(DownloadableItem::from)
                 .collect::<Vec<DownloadableItem>>()
         )
     }
@@ -109,21 +99,24 @@ mod test {
                     None => {
                         let items = query
                             .iter()
-                            .map(|(k, v)| Item{
-                                snippet: Snippet{
-                                    title: k.to_string(),
-                                    description: v.to_string(),
-                                    ..Default::default()
-                                },
-                                id: Id{ video_id: url.to_string(), ..Default::default()},
-                                ..Default::default()
-                            })
+                            .map(|(k, v)| store_query_parameter_in_an_item(k, v, url))
                             .collect();
-
                         Ok(YoutubeResponse{ items, ..Default::default() })
                     }
                 }
             }
+        }
+    }
+
+    fn store_query_parameter_in_an_item(key: &str, value: &str, url: &str) -> Item {
+        Item{
+            snippet: Snippet{
+                title: key.to_string(),
+                description: value.to_string(),
+                ..Default::default()
+            },
+            id: Id{ video_id: url.to_string(), ..Default::default()},
+            ..Default::default()
         }
     }
 
@@ -143,7 +136,7 @@ mod test {
 
         assert_eq!(results.len(), 5);
 
-        for item in results {
+        for item in &results {
             assert_eq!(item.description, match item.title.as_str() {
                 "q" =>THE_QUERY,
                 "key" => THE_KEY,
@@ -155,6 +148,25 @@ mod test {
 
             assert_eq!(item.link, SEARCH_URL);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_youtube_error_handling() -> anyhow::Result<()> {
+        const ERROR_MESSAGE: &str = "test error message";
+
+        let fetcher = MockFetcher{error: Some(ERROR_MESSAGE.to_string()), ..Default::default()};
+
+        let client: &dyn SearchEngine<DownloadableItem> = &YoutubeClient::new("", &fetcher);
+
+        let response = client.search("").await;
+
+        assert!(response.is_ok());
+
+        let results = response.unwrap();
+
+        assert_eq!(&results.error.unwrap().to_string(), ERROR_MESSAGE);
 
         Ok(())
     }
@@ -180,6 +192,4 @@ mod test {
             Err(e) => panic!("error: {}", e.to_string()),
         };
     }
-
-
 }
