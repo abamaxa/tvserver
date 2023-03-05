@@ -17,12 +17,11 @@ pub struct AsyncCommand {
 
 impl AsyncCommand {
     pub fn execute(cmd: &str, args: Vec<&str>) {
-
         println!("executing: {} {:?}", cmd, args);
 
         let string_args = args.iter().map(|s| String::from(*s)).collect();
 
-        let async_command = Self{
+        let async_command = Self {
             command: String::from(cmd),
             args: string_args,
         };
@@ -39,27 +38,24 @@ impl AsyncCommand {
     }
 
     pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
-        let child = Command::new(cmd)
-            .args(&args)
-            .output();
+        let child = Command::new(cmd).args(&args).output();
 
         let output = child.await?;
 
-        print!("execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
-               cmd,
-               args,
-               output.status.success(),
-               String::from_utf8(output.stdout).unwrap(),
-               String::from_utf8(output.stderr).unwrap(),
+        print!(
+            "execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
+            cmd,
+            args,
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
         );
 
         Ok(output.status.success())
     }
 }
 
-
 impl StdSubprocess {
-
     pub async fn _run(cmd: &str, args: Vec<String>, output: Sender<String>) {
         let mut child = Command::new(cmd)
             .stdin(Stdio::piped())
@@ -98,9 +94,7 @@ impl StdSubprocess {
             }
         });
 
-        let mut stdin_task = tokio::spawn(async move {
-
-        });
+        let mut stdin_task = tokio::spawn(async move {});
 
         tokio::select! {
             _ = (&mut stdin_task) => {

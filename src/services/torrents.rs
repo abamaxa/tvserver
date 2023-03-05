@@ -1,17 +1,11 @@
-use std::env;
-use transmission_rpc::types::{
-    BasicAuth,
-    Id,
-    TorrentAddArgs,
-    TorrentGetField
-};
-use transmission_rpc::TransClient;
 use async_trait::async_trait;
+use std::env;
+use transmission_rpc::types::{BasicAuth, Id, TorrentAddArgs, TorrentGetField};
+use transmission_rpc::TransClient;
 
-use crate::domain::models::{DownloadProgress, DownloadListResults, SearchResults};
-use crate::domain::{TRANSMISSION_PWD, TRANSMISSION_URL, TRANSMISSION_USER};
+use crate::domain::models::{DownloadListResults, DownloadProgress, SearchResults};
 use crate::domain::traits::DownloadClient;
-
+use crate::domain::{TRANSMISSION_PWD, TRANSMISSION_URL, TRANSMISSION_USER};
 
 pub struct TransmissionDaemon {
     url: String,
@@ -45,10 +39,8 @@ const FIELDS: [TorrentGetField; 23] = [
     TorrentGetField::HashString,
 ];
 
-
 #[async_trait]
 impl DownloadClient for TransmissionDaemon {
-
     async fn add(&self, link: &str) -> Result<String, String> {
         let mut client = self.get_client();
         let add: TorrentAddArgs = TorrentAddArgs {
@@ -60,15 +52,19 @@ impl DownloadClient for TransmissionDaemon {
         return match client.torrent_add(add).await {
             Ok(res) => Ok(format!("response: {:?}", &res)),
             Err(e) => Err(e.to_string()),
-        }
+        };
     }
 
     async fn list(&self) -> Result<DownloadListResults, DownloadListResults> {
-        match self.get_client().torrent_get(Some(FIELDS.to_vec()), None).await {
+        match self
+            .get_client()
+            .torrent_get(Some(FIELDS.to_vec()), None)
+            .await
+        {
             Err(e) => {
                 println!("{}", e);
                 Err(SearchResults::error(e.to_string().as_str()))
-            },
+            }
             Ok(res) => {
                 let results = res
                     .arguments
@@ -83,23 +79,27 @@ impl DownloadClient for TransmissionDaemon {
     }
 
     async fn delete(&self, id: i64, delete_local_data: bool) -> Result<(), String> {
-        match self.get_client().torrent_remove(vec![Id::Id(id)], delete_local_data).await {
+        match self
+            .get_client()
+            .torrent_remove(vec![Id::Id(id)], delete_local_data)
+            .await
+        {
             Err(e) => Err(e.to_string()),
-            Ok(_) => Ok(())
+            Ok(_) => Ok(()),
         }
     }
 }
 
 impl TransmissionDaemon {
-
     pub fn new() -> Self {
         let url = env::var(TRANSMISSION_URL).unwrap_or(String::from(DEFAULT_URL));
-        TransmissionDaemon{url}
+        TransmissionDaemon { url }
     }
 
     fn get_client(&self) -> TransClient {
         let url = self.url.parse().unwrap();
-        if let (Ok(user), Ok(password)) = (env::var(TRANSMISSION_USER), env::var(TRANSMISSION_PWD)) {
+        if let (Ok(user), Ok(password)) = (env::var(TRANSMISSION_USER), env::var(TRANSMISSION_PWD))
+        {
             TransClient::with_auth(url, BasicAuth { user, password })
         } else {
             TransClient::new(url)
@@ -107,13 +107,12 @@ impl TransmissionDaemon {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::services::pirate_bay::PirateClient;
     use crate::domain::models::DownloadableItem;
     use crate::domain::traits::SearchEngine;
+    use crate::services::pirate_bay::PirateClient;
 
     #[tokio::test]
     #[ignore]
@@ -126,7 +125,7 @@ mod test {
                 for item in &results.results.unwrap() {
                     println!("{:?}, {:?}", item.name, item.download_finished);
                 }
-            },
+            }
         }
     }
 
@@ -144,7 +143,7 @@ mod test {
                     link = Some(item.link);
                     break;
                 }
-            },
+            }
         }
 
         if link.is_none() {
@@ -164,7 +163,7 @@ mod test {
                 for item in &results.results.unwrap() {
                     println!("{}, {}", item.name, item.download_finished);
                 }
-            },
+            }
         }
     }
 }

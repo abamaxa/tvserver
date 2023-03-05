@@ -1,5 +1,5 @@
-use std::env;
 use anyhow::Result;
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use transmission_rpc::types::{Torrent, TorrentStatus};
 
 use crate::domain::models::SearchResults;
-use crate::domain::TORRENT_DIR;
 use crate::domain::traits::MediaStorer;
+use crate::domain::TORRENT_DIR;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -68,11 +68,10 @@ pub struct DownloadProgress {
 }
 
 impl DownloadProgress {
-
     pub fn from(t: &Torrent) -> Self {
-
         let download_finished = matches!(
-            t.status, Some(TorrentStatus::QueuedToSeed) | Some(TorrentStatus::Seeding)
+            t.status,
+            Some(TorrentStatus::QueuedToSeed) | Some(TorrentStatus::Seeding)
         );
 
         let download_dir = match env::var(TORRENT_DIR) {
@@ -80,21 +79,23 @@ impl DownloadProgress {
             Err(_) => match t.download_dir.as_ref() {
                 Some(val) => val.clone(),
                 None => String::new(),
-            }
+            },
         };
 
         let files = match &t.files {
-            Some(files) => files.iter().map(|item| {
-                let filepath = PathBuf::from(&download_dir)
-                    .join(item.name.clone());
+            Some(files) => files
+                .iter()
+                .map(|item| {
+                    let filepath = PathBuf::from(&download_dir).join(item.name.clone());
 
-                FileDetails{
-                    length: item.length,
-                    bytes_completed: item.bytes_completed,
-                    name: item.name.clone(),
-                    filepath,
-                }
-            }).collect(),
+                    FileDetails {
+                        length: item.length,
+                        bytes_completed: item.bytes_completed,
+                        name: item.name.clone(),
+                        filepath,
+                    }
+                })
+                .collect(),
             None => vec![],
         };
 
@@ -164,7 +165,6 @@ impl DownloadProgress {
         }
         ByteSize(uval).to_string()
     }
-
 }
 
 pub type DownloadListResults = SearchResults<DownloadProgress>;

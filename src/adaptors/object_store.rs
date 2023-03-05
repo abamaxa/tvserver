@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use crate::domain::traits::StoreReaderWriter;
 
-pub struct FileSystemStore{}
+pub struct FileSystemStore {}
 
 #[async_trait]
 impl StoreReaderWriter for FileSystemStore {
@@ -39,7 +39,10 @@ impl StoreReaderWriter for FileSystemStore {
         if !path.exists() {
             fs::create_dir_all(path).await?;
         } else if !path.is_dir() {
-            return Err(anyhow!("a file already exists with that name: {}", path.to_string_lossy()));
+            return Err(anyhow!(
+                "a file already exists with that name: {}",
+                path.to_string_lossy()
+            ));
         }
         Ok(())
     }
@@ -52,27 +55,30 @@ impl StoreReaderWriter for FileSystemStore {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use anyhow::Result;
     use super::*;
+    use anyhow::Result;
+    use std::path::PathBuf;
 
     const TEST_DIR: &str = "tests/fixtures/media_dir";
 
     #[tokio::test]
     async fn test_list_directory() -> Result<()> {
-        let store: &dyn StoreReaderWriter = &FileSystemStore {} ;
+        let store: &dyn StoreReaderWriter = &FileSystemStore {};
 
         let results = store.list_directory(Path::new(TEST_DIR)).await?;
 
         assert_eq!(results.0, vec!["TV", "collection1", "collection2"]);
-        assert_eq!(results.1, vec!["test.jpg", "test.mp4", "test.png", "test.py"]);
+        assert_eq!(
+            results.1,
+            vec!["test.jpg", "test.mp4", "test.png", "test.py"]
+        );
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_list_directory_that_does_not_exists() -> Result<()> {
-        let store: &dyn StoreReaderWriter = &FileSystemStore {} ;
+        let store: &dyn StoreReaderWriter = &FileSystemStore {};
 
         if let Ok(_) = store.list_directory(Path::new("not here")).await {
             panic!("{}", "expected call to fail");
@@ -103,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rename() -> Result<()> {
-        let store: &dyn StoreReaderWriter = &FileSystemStore{};
+        let store: &dyn StoreReaderWriter = &FileSystemStore {};
 
         let mut path = PathBuf::from(TEST_DIR);
 
@@ -135,4 +141,8 @@ mod tests {
 
         Ok(())
     }
+
+    // TODO,rename ensure_path_exists -> ensure_directory_exists and test when there is a file
+    // with the same name as the desired directory. Test rename with non-existent destination
+    // directory (should be created) and non-existent source, which should fail.
 }

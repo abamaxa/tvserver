@@ -4,22 +4,22 @@ mod adaptors;
 mod domain;
 mod services;
 
-use std::{env, net::SocketAddr, sync::Arc};
 use std::path::PathBuf;
+use std::{env, net::SocketAddr, sync::Arc};
 
-use tower_http::{trace::{DefaultMakeSpan, TraceLayer}, cors::CorsLayer, services::ServeDir};
+use tower_http::{
+    cors::CorsLayer,
+    services::ServeDir,
+    trace::{DefaultMakeSpan, TraceLayer},
+};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::domain::{CLIENT_DIR, config::get_movie_dir, ENABLE_VLC, traits::Player};
+use crate::domain::{config::get_movie_dir, traits::Player, CLIENT_DIR, ENABLE_VLC};
 use crate::services::{
-    api,
-    media_store::MediaStore,
-    monitor::monitor_downloads,
-    vlc_player::VLCPlayer,
+    api, media_store::MediaStore, monitor::monitor_downloads, vlc_player::VLCPlayer,
 };
 
 pub async fn run() -> anyhow::Result<()> {
-
     let pool = adaptors::repository::get_database().await?;
 
     adaptors::repository::do_migrations(&pool).await?;
@@ -33,7 +33,7 @@ pub async fn run() -> anyhow::Result<()> {
     let context = api::Context::from(
         Arc::new(MediaStore::from(&get_movie_dir())),
         Arc::new(adaptors::HTTPClient::new()),
-        player
+        player,
     );
 
     let monitor_handle = monitor_downloads(context.store.clone());

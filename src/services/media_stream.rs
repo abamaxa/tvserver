@@ -1,13 +1,12 @@
-use std::io::{self, SeekFrom};
+use axum::http::header::HeaderName;
 use axum::{
     body::StreamBody,
     http::{header, StatusCode},
-    response::{AppendHeaders, IntoResponse}
+    response::{AppendHeaders, IntoResponse},
 };
-use axum::http::header::HeaderName;
+use std::io::{self, SeekFrom};
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
-
 
 pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> impl IntoResponse {
     const BUFFER_SIZE: usize = 0x100000; // 1 megabyte
@@ -23,7 +22,12 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
 
     let file_size = match get_file_size(&mut file).await {
         Ok(file_size) => file_size,
-        Err(err) => return Err((StatusCode::NOT_FOUND, format!("Could not determine file size: {}", err))),
+        Err(err) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("Could not determine file size: {}", err),
+            ))
+        }
     };
 
     if stream_from > 0 {
@@ -36,7 +40,11 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
     if stream_to == 0 {
         // stream_to = file_size - 1;
         let buf_size = BUFFER_SIZE as u64;
-        stream_to = if stream_from + buf_size < file_size {stream_from + buf_size} else {file_size - 1};
+        stream_to = if stream_from + buf_size < file_size {
+            stream_from + buf_size
+        } else {
+            file_size - 1
+        };
     }
 
     // convert the `AsyncRead` into a `Stream`
@@ -60,8 +68,14 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
         let headers = AppendHeaders([
             (content_type, "video/mp4".to_string()),
             (content_length, file_size.to_string()),
-            (content_disposition,format!("attachment; filename=\"{}\"", file_name)),
-            (content_range, format!("bytes {}-{}/{}", stream_from, stream_to, file_size)),
+            (
+                content_disposition,
+                format!("attachment; filename=\"{}\"", file_name),
+            ),
+            (
+                content_range,
+                format!("bytes {}-{}/{}", stream_from, stream_to, file_size),
+            ),
         ]);
 
         return Ok((StatusCode::OK, headers, body));
@@ -70,13 +84,18 @@ pub async fn stream_video(video_file: String, headers: header::HeaderMap) -> imp
     let headers = AppendHeaders([
         (accept_ranges, "bytes".to_string()),
         (content_type, "video/mp4".to_string()),
-        (content_range, format!("bytes {}-{}/{}", stream_from, stream_to, file_size)),
-        (content_disposition,format!("attachment; filename=\"{}\"", file_name)),
+        (
+            content_range,
+            format!("bytes {}-{}/{}", stream_from, stream_to, file_size),
+        ),
+        (
+            content_disposition,
+            format!("attachment; filename=\"{}\"", file_name),
+        ),
     ]);
 
     Ok((StatusCode::PARTIAL_CONTENT, headers, body))
 }
-
 
 fn get_range(headers: header::HeaderMap) -> (bool, u64, u64) {
     let mut stream_from = 0;

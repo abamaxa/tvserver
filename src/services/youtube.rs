@@ -1,9 +1,11 @@
-use async_trait::async_trait;
-use anyhow;
 use crate::adaptors::subprocess::AsyncCommand;
 use crate::domain::config::get_movie_dir;
-use crate::domain::models::{SearchResults, DownloadableItem, DownloadListResults, YoutubeResponse};
+use crate::domain::models::{
+    DownloadListResults, DownloadableItem, SearchResults, YoutubeResponse,
+};
 use crate::domain::traits::{DownloadClient, JsonFetcher, SearchEngine};
+use anyhow;
+use async_trait::async_trait;
 
 const SEARCH_URL: &str = "https://www.googleapis.com/youtube/v3/search";
 const SEARCH_PART: &str = "snippet";
@@ -26,7 +28,7 @@ impl<'a> SearchEngine<DownloadableItem> for YoutubeClient<'a> {
             ("key", &self.key),
             ("part", SEARCH_PART),
             ("maxResults", SEARCH_MAX_RESULTS),
-            ("type", SEARCH_TYPE)
+            ("type", SEARCH_TYPE),
         ];
 
         match self.client.get_json(SEARCH_URL, &query).await {
@@ -38,15 +40,19 @@ impl<'a> SearchEngine<DownloadableItem> for YoutubeClient<'a> {
 
 impl<'a> YoutubeClient<'a> {
     pub fn new(key: &str, client: &'a Fetcher) -> Self {
-        Self{ key: String::from(key), client }
+        Self {
+            key: String::from(key),
+            client,
+        }
     }
 
     fn make_success_response(&self, yt_response: YoutubeResponse) -> YoutubeResult {
         SearchResults::success(
-            yt_response.items
+            yt_response
+                .items
                 .iter()
                 .map(DownloadableItem::from)
-                .collect::<Vec<DownloadableItem>>()
+                .collect::<Vec<DownloadableItem>>(),
         )
     }
 }
@@ -55,12 +61,17 @@ impl<'a> YoutubeClient<'a> {
 impl<'a> DownloadClient for YoutubeClient<'a> {
     async fn add(&self, link: &str) -> Result<String, String> {
         let output_dir = format!("home:{}/New", get_movie_dir());
-        AsyncCommand::execute("yt-dlp", vec![
-            "--no-update",
-            "--sponsorblock-remove", "all",
-            "--paths",
-            output_dir.as_str(),
-            link]);
+        AsyncCommand::execute(
+            "yt-dlp",
+            vec![
+                "--no-update",
+                "--sponsorblock-remove",
+                "all",
+                "--paths",
+                output_dir.as_str(),
+                link,
+            ],
+        );
 
         Ok(String::from("queued"))
     }
@@ -76,22 +87,26 @@ impl<'a> DownloadClient for YoutubeClient<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::env;
-    use anyhow::anyhow;
-    use crate::adaptors::HTTPClient;
-    use crate::domain::GOOGLE_KEY;
-    use crate::domain::models::youtube::{Id, Item, Snippet};
     use super::*;
+    use crate::adaptors::HTTPClient;
+    use crate::domain::models::youtube::{Id, Item, Snippet};
+    use crate::domain::GOOGLE_KEY;
+    use anyhow::anyhow;
+    use std::env;
 
     #[derive(Default, Debug, Clone)]
-    struct MockFetcher{
+    struct MockFetcher {
         response: Option<YoutubeResponse>,
-        error: Option<String>
+        error: Option<String>,
     }
 
     #[async_trait]
     impl JsonFetcher<YoutubeResponse> for MockFetcher {
-        async fn get_json(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<YoutubeResponse> {
+        async fn get_json(
+            &self,
+            url: &str,
+            query: &[(&str, &str)],
+        ) -> anyhow::Result<YoutubeResponse> {
             match &self.response {
                 Some(response) => Ok(response.clone()),
                 None => match &self.error {
@@ -101,32 +116,39 @@ mod test {
                             .iter()
                             .map(|(k, v)| store_query_parameter_in_an_item(k, v, url))
                             .collect();
-                        Ok(YoutubeResponse{ items, ..Default::default() })
+                        Ok(YoutubeResponse {
+                            items,
+                            ..Default::default()
+                        })
                     }
-                }
+                },
             }
         }
     }
 
     fn store_query_parameter_in_an_item(key: &str, value: &str, url: &str) -> Item {
-        Item{
-            snippet: Snippet{
+        Item {
+            snippet: Snippet {
                 title: key.to_string(),
                 description: value.to_string(),
                 ..Default::default()
             },
-            id: Id{ video_id: url.to_string(), ..Default::default()},
+            id: Id {
+                video_id: url.to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
 
     #[tokio::test]
     async fn test_conversion_of_response() -> anyhow::Result<()> {
-
         const THE_QUERY: &str = "find this";
         const THE_KEY: &str = "the key";
 
-        let fetcher = MockFetcher{..Default::default()};
+        let fetcher = MockFetcher {
+            ..Default::default()
+        };
 
         let client: &dyn SearchEngine<DownloadableItem> = &YoutubeClient::new(THE_KEY, &fetcher);
 
@@ -137,14 +159,20 @@ mod test {
         assert_eq!(results.len(), 5);
 
         for item in &results {
-            assert_eq!(item.description, match item.title.as_str() {
-                "q" =>THE_QUERY,
-                "key" => THE_KEY,
-                "part" => SEARCH_PART,
-                "maxResults" => SEARCH_MAX_RESULTS,
-                "type" => SEARCH_TYPE,
-                _ => panic!("unexpected query parameter: {}: {}", item.title, item.description)
-            });
+            assert_eq!(
+                item.description,
+                match item.title.as_str() {
+                    "q" => THE_QUERY,
+                    "key" => THE_KEY,
+                    "part" => SEARCH_PART,
+                    "maxResults" => SEARCH_MAX_RESULTS,
+                    "type" => SEARCH_TYPE,
+                    _ => panic!(
+                        "unexpected query parameter: {}: {}",
+                        item.title, item.description
+                    ),
+                }
+            );
 
             assert_eq!(item.link, SEARCH_URL);
         }
@@ -156,7 +184,10 @@ mod test {
     async fn test_youtube_error_handling() -> anyhow::Result<()> {
         const ERROR_MESSAGE: &str = "test error message";
 
-        let fetcher = MockFetcher{error: Some(ERROR_MESSAGE.to_string()), ..Default::default()};
+        let fetcher = MockFetcher {
+            error: Some(ERROR_MESSAGE.to_string()),
+            ..Default::default()
+        };
 
         let client: &dyn SearchEngine<DownloadableItem> = &YoutubeClient::new("", &fetcher);
 
@@ -185,10 +216,13 @@ mod test {
 
                 if let Some(results) = response.results {
                     for result in &results {
-                        println!("({}):{} - {}", result.link, result.title, result.description);
+                        println!(
+                            "({}):{} - {}",
+                            result.link, result.title, result.description
+                        );
                     }
                 }
-            },
+            }
             Err(e) => panic!("error: {}", e.to_string()),
         };
     }

@@ -1,16 +1,16 @@
-use std::{net::SocketAddr};
-use std::option::Option;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
-use axum::{
-    http::StatusCode,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-};
-use axum::response::Response;
-use futures::{sink::SinkExt, stream::StreamExt};
-use async_trait::async_trait;
-use futures::stream::{SplitSink, SplitStream};
-use tokio::task::JoinHandle;
 use crate::domain::events::RemoteMessage;
+use async_trait::async_trait;
+use axum::response::Response;
+use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    http::StatusCode,
+};
+use futures::stream::{SplitSink, SplitStream};
+use futures::{sink::SinkExt, stream::StreamExt};
+use std::net::SocketAddr;
+use std::option::Option;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::task::JoinHandle;
 
 #[async_trait]
 pub trait RemotePlayer: Send + Sync {
@@ -19,12 +19,11 @@ pub trait RemotePlayer: Send + Sync {
 
 #[derive(Debug)]
 pub struct RemoteBrowserPlayer {
-    in_tx: Sender<Vec<u8>>
+    in_tx: Sender<Vec<u8>>,
 }
 
 #[async_trait]
 impl RemotePlayer for RemoteBrowserPlayer {
-
     async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String> {
         let as_bytes: Vec<u8> = match serde_json::to_vec(&message) {
             Ok(result) => result,
@@ -45,9 +44,7 @@ impl RemoteBrowserPlayer {
 
         let runner = RemoteBrowserPlayer { in_tx };
 
-        let response = ws.on_upgrade(
-            move |socket| handle_socket(socket, who, in_rx, out_tx)
-        );
+        let response = ws.on_upgrade(move |socket| handle_socket(socket, who, in_rx, out_tx));
 
         tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
@@ -59,17 +56,17 @@ impl RemoteBrowserPlayer {
     }
 }
 
-async fn handle_socket(socket: WebSocket, who: SocketAddr, input: Receiver<Vec<u8>>, output: Sender<String>) {
-
+async fn handle_socket(
+    socket: WebSocket,
+    who: SocketAddr,
+    input: Receiver<Vec<u8>>,
+    output: Sender<String>,
+) {
     let (sender, receiver) = socket.split();
 
-    let send_task = tokio::spawn(async move {
-        handle_sending(input, sender).await
-    });
+    let send_task = tokio::spawn(async move { handle_sending(input, sender).await });
 
-    let recv_task = tokio::spawn(async move {
-        handle_receiving(output, receiver).await
-    });
+    let recv_task = tokio::spawn(async move { handle_receiving(output, receiver).await });
 
     wait_for_socket_to_close(who, send_task, recv_task).await
 }
@@ -104,7 +101,9 @@ async fn handle_receiving(output: Sender<String>, mut receiver: SplitStream<WebS
 }
 
 async fn wait_for_socket_to_close(
-    who: SocketAddr, mut send_task: JoinHandle<()>, mut recv_task: JoinHandle<()>
+    who: SocketAddr,
+    mut send_task: JoinHandle<()>,
+    mut recv_task: JoinHandle<()>,
 ) {
     // If any one of the tasks exit, abort the other.
     tokio::select! {

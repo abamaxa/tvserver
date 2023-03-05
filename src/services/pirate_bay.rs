@@ -1,14 +1,12 @@
-use async_trait::async_trait;
+use crate::domain::models::{DownloadableItem, SearchResults};
+use crate::domain::traits::SearchEngine;
+use crate::domain::SearchEngineType::Torrent;
 use anyhow;
+use async_trait::async_trait;
 use scraper::{Html, Selector};
 use urlencoding::decode;
-use crate::domain::SearchEngineType::Torrent;
-use crate::domain::models::{SearchResults, DownloadableItem};
-use crate::domain::traits::SearchEngine;
-
 
 const BASE_URL: &str = "https://thehiddenbay.com";
-
 
 pub struct PirateClient {
     host: String,
@@ -21,7 +19,7 @@ impl SearchEngine<DownloadableItem> for PirateClient {
             "top-100" => format!("{}/top/all", self.host),
             "top-videos" => format!("{}/top/200", self.host),
             "top-books" => format!("{}/top/601", self.host),
-            _ =>  format!("{}/search/{}/1/99/0", self.host, query),
+            _ => format!("{}/search/{}/1/99/0", self.host, query),
         };
 
         let res = reqwest::get(url).await?;
@@ -37,7 +35,9 @@ impl SearchEngine<DownloadableItem> for PirateClient {
 
 impl PirateClient {
     pub fn new(host: Option<&str>) -> Self {
-        Self{ host: String::from(host.unwrap_or(BASE_URL))}
+        Self {
+            host: String::from(host.unwrap_or(BASE_URL)),
+        }
     }
 
     fn parse_search(&self, html: String) -> Option<Vec<DownloadableItem>> {
@@ -53,7 +53,10 @@ impl PirateClient {
         let table = document.select(&selector).next()?;
 
         for row in table.select(&tr_selector) {
-            let mut record = DownloadableItem {engine: Torrent, ..Default::default()};
+            let mut record = DownloadableItem {
+                engine: Torrent,
+                ..Default::default()
+            };
             let mut seeders: i32 = 0;
 
             for (idx, cell) in row.select(&td_selector).enumerate() {
@@ -62,7 +65,8 @@ impl PirateClient {
                         let mut itr = cell.select(&link_selector);
                         let title = itr.next()?.text().collect::<Vec<_>>();
                         let link = decode(itr.next().unwrap().value().attr("href")?);
-                        let desc = PirateClient::get_element_text(&cell.select(&desc_selector).next()?);
+                        let desc =
+                            PirateClient::get_element_text(&cell.select(&desc_selector).next()?);
 
                         record.title = (*title.first()?).to_string();
                         record.description = desc.to_owned();
@@ -110,7 +114,7 @@ mod test {
                 for item in results.results.unwrap() {
                     println!("{}, {}", item.title, item.description);
                 }
-            },
+            }
         }
     }
 }

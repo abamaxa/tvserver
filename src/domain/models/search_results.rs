@@ -1,8 +1,8 @@
-use html_escape::decode_html_entities;
-use serde::{Deserialize, Serialize};
 use crate::domain::models::youtube::Item;
 use crate::domain::SearchEngineType;
 use crate::domain::SearchEngineType::YouTube;
+use html_escape::decode_html_entities;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct DownloadableItem {
@@ -18,20 +18,25 @@ pub struct SearchResults<T> {
     pub error: Option<String>,
 }
 
-
 impl<T> SearchResults<T> {
     pub fn success(results: Vec<T>) -> Self {
-        SearchResults{results: Some(results), error: None}
+        SearchResults {
+            results: Some(results),
+            error: None,
+        }
     }
 
     pub fn error(message: &str) -> Self {
-        SearchResults{error: Some(message.to_string()), results: None}
+        SearchResults {
+            error: Some(message.to_string()),
+            results: None,
+        }
     }
 }
 
 impl DownloadableItem {
     pub fn from(item: &Item) -> Self {
-        Self{
+        Self {
             title: decode_html_entities(&item.snippet.title).to_string(),
             description: item.snippet.description.clone(),
             link: item.id.video_id.to_string(),
@@ -60,4 +65,3 @@ impl User {
         String::from("ha ha")
     }
 }*/
-

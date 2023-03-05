@@ -1,9 +1,11 @@
+use crate::domain::{
+    models::YoutubeResponse,
+    traits::{JsonFetcher, TextFetcher},
+};
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::StatusCode;
-use async_trait::async_trait;
-use crate::domain::{models::YoutubeResponse, traits::{JsonFetcher, TextFetcher}};
-
 
 const ACCESS_DENIED_MSG: &str = "Access denied, ensure access tokens have been set";
 
@@ -13,14 +15,18 @@ pub struct HTTPClient {
 
 impl HTTPClient {
     pub fn new() -> Self {
-        Self{client: reqwest::Client::new()}
+        Self {
+            client: reqwest::Client::new(),
+        }
     }
 }
 
 #[async_trait]
 impl JsonFetcher<YoutubeResponse> for HTTPClient {
     async fn get_json(&self, url: &str, query: &[(&str, &str)]) -> Result<YoutubeResponse> {
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
             .query(query)
@@ -44,13 +50,13 @@ impl TextFetcher for HTTPClient {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use super::*;
     use axum::extract::Query;
-    use axum::{Json, Router};
     use axum::routing::get;
+    use axum::{Json, Router};
+    use std::collections::HashMap;
     use tokio::task::JoinHandle;
     use tokio::time;
-    use super::*;
 
     #[tokio::test]
     async fn test_get_text() -> Result<()> {
@@ -81,7 +87,7 @@ mod tests {
         let app = Router::new().route(
             "/",
             get(|Query(params): Query<HashMap<String, String>>| async move {
-                Json(YoutubeResponse{
+                Json(YoutubeResponse {
                     kind: params.get("KIND_PARAM").unwrap().to_owned(),
                     etag: params.get("ETAG_PARAM").unwrap().to_owned(),
                     next_page_token: "".to_string(),
@@ -89,17 +95,23 @@ mod tests {
                     page_info: Default::default(),
                     items: vec![],
                 })
-            })
+            }),
         );
 
         let http_server = setup_http_server(app, HOST_ADDR).await;
 
         let client: &dyn JsonFetcher<YoutubeResponse> = &HTTPClient::new();
 
-        let result = client.get_json(
-            &format!("http://{}/", HOST_ADDR),
-            &[("ETAG_PARAM", ETAG_PARAM), ("KIND_PARAM", KIND_PARAM), ("REGION_PARAM", REGION_PARAM)]
-        ).await?;
+        let result = client
+            .get_json(
+                &format!("http://{}/", HOST_ADDR),
+                &[
+                    ("ETAG_PARAM", ETAG_PARAM),
+                    ("KIND_PARAM", KIND_PARAM),
+                    ("REGION_PARAM", REGION_PARAM),
+                ],
+            )
+            .await?;
 
         http_server.abort();
 
@@ -119,7 +131,9 @@ mod tests {
 
         let client: &dyn JsonFetcher<YoutubeResponse> = &HTTPClient::new();
 
-        let result = client.get_json(&format!("http://{}/", HOST_ADDR),&[]).await;
+        let result = client
+            .get_json(&format!("http://{}/", HOST_ADDR), &[])
+            .await;
 
         http_server.abort();
 
@@ -140,19 +154,23 @@ mod tests {
 
         let client: &dyn JsonFetcher<YoutubeResponse> = &HTTPClient::new();
 
-        let result = client.get_json(&format!("http://{}/", HOST_ADDR),&[]).await;
+        let result = client
+            .get_json(&format!("http://{}/", HOST_ADDR), &[])
+            .await;
 
         http_server.abort();
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().to_string(), format!("Error code {}", ERROR_CODE));
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            format!("Error code {}", ERROR_CODE)
+        );
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_server_down() -> Result<()> {
-
         let client: &dyn TextFetcher = &HTTPClient::new();
 
         let result = client.get_text("http://localhost:60232/").await;
