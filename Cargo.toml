@@ -25,9 +25,9 @@ tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 transmission-rpc = "0.4.0"
 urlencoding = "2.1.2"
+mockall = "0.11.3"
 
 [patch.crates-io]
-# http = {path = "./private/http-0.2.8"}
 http = {git = "https://github.com/abamaxa/http"}
 
 [profile.release]

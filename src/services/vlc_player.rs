@@ -42,7 +42,7 @@ impl VLCPlayer {
             VLCPlayer::run_vlc(&stdin_rx, stdout_tx);
         });
 
-        println!("{}", runner.read_result(1));
+        tracing::debug!("{}", runner.read_result(1));
 
         runner
     }

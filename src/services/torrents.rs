@@ -17,31 +17,31 @@ const FIELDS: [TorrentGetField; 23] = [
     TorrentGetField::ActivityDate,
     TorrentGetField::AddedDate,
     TorrentGetField::DoneDate,
-    TorrentGetField::EditDate,
-    TorrentGetField::Id,
-    TorrentGetField::Name,
-    TorrentGetField::Status,
-    TorrentGetField::Files,
     TorrentGetField::DownloadDir,
+    TorrentGetField::EditDate,
     TorrentGetField::Eta,
     TorrentGetField::Error,
     TorrentGetField::ErrorString,
+    TorrentGetField::Files,
+    TorrentGetField::HashString,
+    TorrentGetField::Id,
     TorrentGetField::IsFinished,
     TorrentGetField::LeftUntilDone,
-    TorrentGetField::PercentDone,
+    TorrentGetField::Name,
     TorrentGetField::PeersConnected,
     TorrentGetField::PeersGettingFromUs,
     TorrentGetField::PeersSendingToUs,
+    TorrentGetField::PercentDone,
     TorrentGetField::RateDownload,
     TorrentGetField::RateUpload,
     TorrentGetField::SizeWhenDone,
+    TorrentGetField::Status,
     TorrentGetField::TotalSize,
-    TorrentGetField::HashString,
 ];
 
 #[async_trait]
 impl DownloadClient for TransmissionDaemon {
-    async fn add(&self, link: &str) -> Result<String, String> {
+    async fn fetch(&self, link: &str) -> Result<String, String> {
         let mut client = self.get_client();
         let add: TorrentAddArgs = TorrentAddArgs {
             filename: Some(link.to_string()),
@@ -55,15 +55,15 @@ impl DownloadClient for TransmissionDaemon {
         };
     }
 
-    async fn list(&self) -> Result<DownloadListResults, DownloadListResults> {
+    async fn list_in_progress(&self) -> DownloadListResults {
         match self
             .get_client()
             .torrent_get(Some(FIELDS.to_vec()), None)
             .await
         {
             Err(e) => {
-                println!("{}", e);
-                Err(SearchResults::error(e.to_string().as_str()))
+                tracing::error!("{}", e);
+                SearchResults::error(e.to_string().as_str())
             }
             Ok(res) => {
                 let results = res
@@ -73,12 +73,12 @@ impl DownloadClient for TransmissionDaemon {
                     .map(DownloadProgress::from)
                     .collect();
 
-                Ok(SearchResults::success(results))
+                SearchResults::success(results)
             }
         }
     }
 
-    async fn delete(&self, id: i64, delete_local_data: bool) -> Result<(), String> {
+    async fn remove(&self, id: i64, delete_local_data: bool) -> Result<(), String> {
         match self
             .get_client()
             .torrent_remove(vec![Id::Id(id)], delete_local_data)
@@ -115,17 +115,14 @@ mod test {
     use crate::services::pirate_bay::PirateClient;
 
     #[tokio::test]
-    #[ignore]
+    // #[ignore]
     async fn test_torrents_list() {
         let client = TransmissionDaemon::new();
 
-        match client.list().await {
-            Err(err) => panic!("{}", err.error.unwrap()),
-            Ok(results) => {
-                for item in &results.results.unwrap() {
-                    println!("{:?}, {:?}", item.name, item.download_finished);
-                }
-            }
+        let results = client.list_in_progress().await;
+
+        for item in &results.results.unwrap() {
+            println!("{:?}, {:?}", item.name, item.download_finished);
         }
     }
 
@@ -152,18 +149,14 @@ mod test {
 
         let client = TransmissionDaemon::new();
 
-        match client.add(&link.unwrap()).await {
+        match client.fetch(&link.unwrap()).await {
             Ok(result) => println!("{}", result),
             Err(err) => panic!("{}", err),
         }
 
-        match client.list().await {
-            Err(err) => panic!("{}", err.error.unwrap()),
-            Ok(results) => {
-                for item in &results.results.unwrap() {
-                    println!("{}, {}", item.name, item.download_finished);
-                }
-            }
+        let results = client.list_in_progress().await;
+        for item in &results.results.unwrap() {
+            println!("{}, {}", item.name, item.download_finished);
         }
     }
 }

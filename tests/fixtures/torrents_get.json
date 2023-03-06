@@ -1,0 +1,102 @@
+{
+  "torrents": [
+      {
+        "activityDate": 1678125262,
+        "addedDate": 1677075867,
+        "doneDate": 0,
+        "downloadDir": "/downloads/complete",
+        "editDate": 0,
+        "error": 0,
+        "errorString": "",
+        "eta": -1,
+        "files": [
+          {
+            "bytesCompleted": 29933442,
+            "length": 551059330,
+            "name": "Dragons.Den.UK.S20E07.1080p.HEVC.x265-MeGusta[eztv.re].mkv"
+          }
+        ],
+        "hashString": "0752d8ca91661177240dcfdb73c8463fc663a4f7",
+        "id": 3,
+        "isFinished": false,
+        "leftUntilDone": 521089024,
+        "name": "Dragons.Den.UK.S20E07.1080p.HEVC.x265-MeGusta[eztv.re].mkv",
+        "peersConnected": 0,
+        "peersGettingFromUs": 0,
+        "peersSendingToUs": 0,
+        "percentDone": 0.0544,
+        "rateDownload": 0,
+        "rateUpload": 0,
+        "sizeWhenDone": 551059330,
+        "status": 4,
+        "totalSize": 551059330
+      },
+      {
+        "activityDate": 1678126439,
+        "addedDate": 1678124245,
+        "doneDate": 1678126439,
+        "downloadDir": "/downloads/complete",
+        "editDate": 1678126439,
+        "error": 0,
+        "errorString": "",
+        "eta": -1,
+        "files": [
+          {
+            "bytesCompleted": 8078103833,
+            "length": 8078103833,
+            "name": "The Dark Knight (2008) [2160p] [4K] [BluRay] [5.1] [YTS.MX]/The.Dark.Knight.2008.2160p.4K.BluRay.x265.10bit.AAC5.1-[YTS.MX].mkv"
+          },
+          {
+            "bytesCompleted": 53226,
+            "length": 53226,
+            "name": "The Dark Knight (2008) [2160p] [4K] [BluRay] [5.1] [YTS.MX]/www.YTS.MX.jpg"
+          }
+        ],
+        "hashString": "61be42fb337b1b84f844b88fd904982a0a2330e3",
+        "id": 2,
+        "isFinished": false,
+        "leftUntilDone": 0,
+        "name": "The Dark Knight (2008) [2160p] [4K] [BluRay] [5.1] [YTS.MX]",
+        "peersConnected": 0,
+        "peersGettingFromUs": 0,
+        "peersSendingToUs": 0,
+        "percentDone": 1,
+        "rateDownload": 0,
+        "rateUpload": 0,
+        "sizeWhenDone": 8078157059,
+        "status": 6,
+        "totalSize": 8078157059
+      },
+      {
+        "activityDate": 1678127124,
+        "addedDate": 1677434566,
+        "doneDate": 0,
+        "downloadDir": "/downloads/complete",
+        "editDate": 0,
+        "error": 0,
+        "errorString": "",
+        "eta": 1105689,
+        "files": [
+          {
+            "bytesCompleted": 4293541,
+            "length": 1662927781,
+            "name": "Dragons.Den.UK.S20E08.1080p.HDTV.H264-FTP[eztv.re].mkv"
+          }
+        ],
+        "hashString": "ac02241b9af0e5fa52973f513a4c0bc49a740eee",
+        "id": 1,
+        "isFinished": false,
+        "leftUntilDone": 1658533888,
+        "name": "Dragons.Den.UK.S20E08.1080p.HDTV.H264-FTP[eztv.re].mkv",
+        "peersConnected": 2,
+        "peersGettingFromUs": 0,
+        "peersSendingToUs": 1,
+        "percentDone": 0.0026,
+        "rateDownload": 1000,
+        "rateUpload": 0,
+        "sizeWhenDone": 1662927781,
+        "status": 4,
+        "totalSize": 1662927781
+      }
+    ]
+}

@@ -69,7 +69,7 @@ impl MediaStorer for MediaStore {
     async fn move_file(&self, path: &Path) -> io::Result<()> {
         let new_path = self.get_new_video_path(path).await?;
 
-        println!(
+        tracing::debug!(
             "moving file {} to {}",
             path.to_str().unwrap_or_default(),
             new_path.to_str().unwrap_or_default()
@@ -95,7 +95,7 @@ impl MediaStorer for MediaStore {
 
         new_path.set_extension("mp4");
 
-        println!(
+        tracing::debug!(
             "converting {} to mp4 {}",
             path.to_str().unwrap_or_default(),
             new_path.to_str().unwrap_or_default()
@@ -134,7 +134,7 @@ mod tests {
             results.child_collections,
             vec!["collection1", "collection2"]
         );
-        assert_eq!(results.videos, vec!["test.mp4"]);
+        assert_eq!(results.videos, vec!["empty.mp4", "test.mp4"]);
 
         Ok(())
     }

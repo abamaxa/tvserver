@@ -21,7 +21,8 @@ services:
       - tests
 
   transmission:
-    image: lscr.io/linuxserver/transmission:latest
+    image: linuxserver/transmission:3.00-r8-ls150
+    # image: lscr.io/linuxserver/transmission:latest
     container_name: transmission
     environment:
       - PUID=1000

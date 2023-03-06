@@ -112,7 +112,7 @@ mod test {
             Err(err) => panic!("{:?}", err.to_string()),
             Ok(results) => {
                 for item in results.results.unwrap() {
-                    println!("{}, {}", item.title, item.description);
+                    tracing::info!("{}, {}", item.title, item.description);
                 }
             }
         }

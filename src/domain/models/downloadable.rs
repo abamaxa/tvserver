@@ -143,7 +143,7 @@ impl DownloadProgress {
     pub async fn move_videos(&self, store: &Arc<dyn MediaStorer>) -> Result<()> {
         for item in &self.files {
             if !item.is_media() {
-                println!("not moving {} as it it not a video file", item.name);
+                tracing::debug!("not moving {} as it it not a video file", item.name);
                 continue;
             }
 
