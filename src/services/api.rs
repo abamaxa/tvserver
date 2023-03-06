@@ -98,7 +98,7 @@ async fn downloads_add(
 }
 
 async fn download(client: &dyn DownloadClient, link: &str) -> (StatusCode, Json<Response>) {
-    match client.add(link).await {
+    match client.fetch(link).await {
         Ok(r) => (StatusCode::OK, Json(Response::success(r))),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -110,7 +110,7 @@ async fn download(client: &dyn DownloadClient, link: &str) -> (StatusCode, Json<
 #[debug_handler]
 async fn downloads_delete(Path(id): Path<i64>) -> (StatusCode, Json<Response>) {
     let daemon = TransmissionDaemon::new();
-    match daemon.delete(id, false).await {
+    match daemon.remove(id, false).await {
         Ok(_) => (
             StatusCode::OK,
             Json(Response::success(String::from("success"))),
@@ -125,10 +125,7 @@ async fn downloads_delete(Path(id): Path<i64>) -> (StatusCode, Json<Response>) {
 #[debug_handler]
 async fn downloads_list() -> impl IntoResponse {
     let daemon: &dyn DownloadClient = &TransmissionDaemon::new();
-    match daemon.list().await {
-        Ok(r) => (StatusCode::OK, Json(r)),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(err)),
-    }
+    Json(daemon.list_in_progress().await)
 }
 
 #[debug_handler]
@@ -201,7 +198,7 @@ async fn play(
         );
 
         if let Err(err) = player.send_command("clear", 1) {
-            println!("{:?}", err);
+            tracing::warn!("{:?}", err);
         }
 
         match player.send_command(&command, 0) {
@@ -253,7 +250,7 @@ async fn list_videos(
 #[debug_handler]
 async fn log_client_message(Json(payload): Json<ClientLogMessage>) -> impl IntoResponse {
     for message in &payload.messages {
-        println!("Client Log: {} - {}", payload.level, message);
+        tracing::info!("Client Log: {} - {}", payload.level, message);
     }
 
     StatusCode::OK
@@ -267,12 +264,12 @@ pub async fn ws_handler(
 ) -> impl IntoResponse {
     let key = addr.to_string();
 
-    println!("opened websocket from: {}", key);
+    tracing::info!("opened websocket from: {}", key);
 
     let (client, response) = RemoteBrowserPlayer::from(ws, addr);
     let client_arc = Arc::new(client);
     if let Err(e) = client_arc.clone().send(RemoteMessage::Stop).await {
-        println!("failed to talk to new socket {}", e);
+        tracing::error!("failed to talk to new socket {}", e);
     }
 
     {
@@ -296,7 +293,7 @@ async fn video(
 ) -> impl IntoResponse {
     let video_file = state.store.as_path("".to_string(), video_path);
 
-    stream_video(video_file, headers).await
+    stream_video(&video_file, headers).await
 }
 
 #[debug_handler]

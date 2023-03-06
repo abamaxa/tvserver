@@ -10,7 +10,7 @@ pub async fn get_database() -> Result<SqlitePool, Error> {
 
     if url != ":memory:" && !Sqlite::database_exists(&url).await.unwrap_or(false) {
         match Sqlite::create_database(&url).await {
-            Ok(_) => println!("Created db {} successfully", url),
+            Ok(_) => tracing::info!("Created db {} successfully", url),
             Err(error) => panic!("error: {}", error),
         }
     }
@@ -44,8 +44,6 @@ async fn create_user(State(pool): State<SqlitePool>, Json(payload): Json<CreateU
         id,
         username: payload.username
     };
-
-    println!("laugh: @{}", user.laugh());
 
     (StatusCode::CREATED, Json(user))
 }*/

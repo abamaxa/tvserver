@@ -4,7 +4,7 @@ use crate::domain::SearchEngineType::YouTube;
 use html_escape::decode_html_entities;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DownloadableItem {
     pub title: String,
     pub description: String,
@@ -12,7 +12,7 @@ pub struct DownloadableItem {
     pub engine: SearchEngineType,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SearchResults<T> {
     pub results: Option<Vec<T>>,
     pub error: Option<String>,

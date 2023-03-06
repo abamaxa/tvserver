@@ -5,6 +5,7 @@ use crate::domain::models::{DownloadListResults, SearchResults, VideoEntry};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
+use mockall::automock;
 use serde::de::DeserializeOwned;
 
 #[async_trait]
@@ -22,6 +23,7 @@ pub trait SearchEngine<T>: Send + Sync {
     async fn search(&self, query: &str) -> anyhow::Result<SearchResults<T>>;
 }
 
+#[automock]
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
     async fn list(&self, collection: String) -> Result<VideoEntry, io::Error>;
@@ -32,11 +34,12 @@ pub trait MediaStorer: Send + Sync {
     async fn convert_to_mp4(&self, path: &Path) -> anyhow::Result<bool>;
 }
 
+#[automock]
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
-    async fn add(&self, link: &str) -> Result<String, String>;
-    async fn list(&self) -> Result<DownloadListResults, DownloadListResults>;
-    async fn delete(&self, id: i64, delete_local_data: bool) -> Result<(), String>;
+    async fn fetch(&self, link: &str) -> Result<String, String>;
+    async fn list_in_progress(&self) -> DownloadListResults;
+    async fn remove(&self, id: i64, delete_local_data: bool) -> Result<(), String>;
 }
 
 #[async_trait]

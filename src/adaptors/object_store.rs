@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(results.0, vec!["TV", "collection1", "collection2"]);
         assert_eq!(
             results.1,
-            vec!["test.jpg", "test.mp4", "test.png", "test.py"]
+            vec!["empty.mp4", "test.jpg", "test.mp4", "test.png", "test.py"]
         );
 
         Ok(())

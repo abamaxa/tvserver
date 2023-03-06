@@ -59,7 +59,7 @@ impl<'a> YoutubeClient<'a> {
 
 #[async_trait]
 impl<'a> DownloadClient for YoutubeClient<'a> {
-    async fn add(&self, link: &str) -> Result<String, String> {
+    async fn fetch(&self, link: &str) -> Result<String, String> {
         let output_dir = format!("home:{}/New", get_movie_dir());
         AsyncCommand::execute(
             "yt-dlp",
@@ -76,11 +76,11 @@ impl<'a> DownloadClient for YoutubeClient<'a> {
         Ok(String::from("queued"))
     }
 
-    async fn list(&self) -> Result<DownloadListResults, DownloadListResults> {
+    async fn list_in_progress(&self) -> DownloadListResults {
         todo!()
     }
 
-    async fn delete(&self, _id: i64, _delete_local_data: bool) -> Result<(), String> {
+    async fn remove(&self, _id: i64, _delete_local_data: bool) -> Result<(), String> {
         todo!()
     }
 }

@@ -48,7 +48,7 @@ impl RemoteBrowserPlayer {
 
         tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
-                println!("websocket {}, received: {:?}", who, msg);
+                tracing::info!("websocket {}, received: {:?}", who, msg);
             }
         });
 
@@ -77,13 +77,13 @@ async fn handle_sending(mut input: Receiver<Vec<u8>>, mut sender: SplitSink<WebS
         if let Some(msg) = input.recv().await {
             buffer = Some(msg);
         } else {
-            println!("broken pipe");
+            tracing::info!("broken pipe");
             break;
         }
 
         if let Some(msg) = buffer {
             if sender.send(msg.into()).await.is_err() {
-                println!("lost connection");
+                tracing::warn!("lost connection");
                 break;
             }
         }
@@ -94,7 +94,7 @@ async fn handle_receiving(output: Sender<String>, mut receiver: SplitStream<WebS
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(t) = msg {
             if let Err(e) = output.send(t).await {
-                println!("output.send failed: {}", e);
+                tracing::info!("output.send failed: {}", e);
             }
         }
     }
@@ -109,19 +109,19 @@ async fn wait_for_socket_to_close(
     tokio::select! {
         rv_a = (&mut send_task) => {
             match rv_a {
-                Ok(a)  => println!("{:?} messages sent to {}", a, who),
-                Err(a) => println!("Error sending messages {:?}", a)
+                Ok(a)  => tracing::info!("{:?} messages sent to {}", a, who),
+                Err(a) => tracing::info!("Error sending messages {:?}", a)
             }
             recv_task.abort();
         },
         rv_b = (&mut recv_task) => {
             match rv_b {
-                Ok(b)  => println!("Received {:?} messages", b),
-                Err(b) => println!("Error receiving messages {:?}", b)
+                Ok(b)  => tracing::debug!("Received {:?} messages", b),
+                Err(b) => tracing::debug!("Error receiving messages {:?}", b)
             }
             send_task.abort();
         }
     }
 
-    println!("Websocket context {} destroyed", who);
+    tracing::info!("Websocket context {} destroyed", who);
 }

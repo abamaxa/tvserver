@@ -17,7 +17,7 @@ pub struct AsyncCommand {
 
 impl AsyncCommand {
     pub fn execute(cmd: &str, args: Vec<&str>) {
-        println!("executing: {} {:?}", cmd, args);
+        tracing::info!("executing: {} {:?}", cmd, args);
 
         let string_args = args.iter().map(|s| String::from(*s)).collect();
 
@@ -31,8 +31,8 @@ impl AsyncCommand {
         tokio::spawn(async move {
             let str_args = ptr.args.iter().map(|s| s.as_str()).collect();
             match Self::command(ptr.command.as_str(), str_args).await {
-                Ok(_) => println!("download succeeded - {} {:?}", ptr.command, ptr.args),
-                Err(e) => println!("download failed {} - {} {:?}", e, ptr.command, ptr.args),
+                Ok(_) => tracing::info!("succeeded - {} {:?}", ptr.command, ptr.args),
+                Err(e) => tracing::error!("failed {} - {} {:?}", e, ptr.command, ptr.args),
             };
         });
     }
@@ -42,7 +42,7 @@ impl AsyncCommand {
 
         let output = child.await?;
 
-        print!(
+        tracing::debug!(
             "execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
             cmd,
             args,
@@ -74,12 +74,12 @@ impl StdSubprocess {
                 match child_out.read_line(&mut buffer).await {
                     Ok(read) => {
                         if read == 0 {
-                            println!("read stdout returned nothing");
+                            tracing::debug!("read stdout returned nothing");
                             break;
                         }
                     }
                     Err(e) => {
-                        println!("read stdout returned failed: {}", e);
+                        tracing::error!("read stdout returned failed: {}", e);
                         break;
                     }
                 }
@@ -87,7 +87,7 @@ impl StdSubprocess {
                 match output.send(buffer.clone()).await {
                     Ok(_) => buffer.clear(),
                     Err(e) => {
-                        println!("could not copy stdout to channel: {}", e);
+                        tracing::error!("could not copy stdout to channel: {}", e);
                         break;
                     }
                 }

@@ -14,10 +14,10 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::domain::traits::DownloadClient;
 use crate::domain::{config::get_movie_dir, traits::Player, CLIENT_DIR, ENABLE_VLC};
-use crate::services::{
-    api, media_store::MediaStore, monitor::monitor_downloads, vlc_player::VLCPlayer,
-};
+use crate::services::torrents::TransmissionDaemon;
+use crate::services::{api, media_store::MediaStore, monitor::Monitor, vlc_player::VLCPlayer};
 
 pub async fn run() -> anyhow::Result<()> {
     let pool = adaptors::repository::get_database().await?;
@@ -36,7 +36,9 @@ pub async fn run() -> anyhow::Result<()> {
         player,
     );
 
-    let monitor_handle = monitor_downloads(context.store.clone());
+    let downloader: Arc<dyn DownloadClient> = Arc::new(TransmissionDaemon::new());
+
+    let monitor_handle = Monitor::start(context.store.clone(), downloader);
 
     setup_logging();
 
