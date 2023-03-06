@@ -115,7 +115,7 @@ mod test {
     use crate::services::pirate_bay::PirateClient;
 
     #[tokio::test]
-    // #[ignore]
+    #[ignore]
     async fn test_torrents_list() {
         let client = TransmissionDaemon::new();
 
