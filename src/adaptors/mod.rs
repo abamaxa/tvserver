@@ -5,7 +5,7 @@ pub mod subprocess;
 pub mod websocket_connection;
 
 pub use http_fetcher::HTTPClient;
-pub use websocket_connection::{RemoteBrowserPlayer, RemotePlayer};
+pub use websocket_connection::RemoteBrowserPlayer;
 
 #[cfg(feature = "vlc")]
 pub use vlc_player::{Player, VLCPlayer};

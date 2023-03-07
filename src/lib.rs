@@ -2,6 +2,7 @@ extern crate core;
 
 pub mod adaptors;
 pub mod domain;
+pub mod entrypoints;
 pub mod services;
 
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -13,10 +14,14 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::domain::traits::DownloadClient;
-use crate::domain::{config::get_movie_dir, traits::Player, CLIENT_DIR, ENABLE_VLC};
-use crate::services::torrents::TransmissionDaemon;
-use crate::services::{api, media_store::MediaStore, monitor::Monitor, vlc_player::VLCPlayer};
+use crate::domain::{
+    config::get_movie_dir, traits::DownloadClient, traits::Player, CLIENT_DIR, ENABLE_VLC,
+};
+use crate::entrypoints::{register, Context};
+use crate::services::{
+    media_store::MediaStore, monitor::Monitor, remote_player::RemotePlayerService,
+    torrents::TransmissionDaemon, vlc_player::VLCPlayer,
+};
 
 pub async fn run() -> anyhow::Result<()> {
     let pool = adaptors::repository::get_database().await?;
@@ -29,10 +34,11 @@ pub async fn run() -> anyhow::Result<()> {
         _ => None,
     };
 
-    let context = api::Context::from(
+    let context = Context::from(
         Arc::new(MediaStore::from(&get_movie_dir())),
         Arc::new(adaptors::HTTPClient::new()),
         Arc::new(adaptors::HTTPClient::new()),
+        RemotePlayerService::new(),
         player,
     );
 
@@ -42,7 +48,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     setup_logging();
 
-    let app = api::register(Arc::new(context))
+    let app = register(Arc::new(context))
         .nest_service("/", ServeDir::new(get_client_path("app")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
         .layer(CorsLayer::permissive())

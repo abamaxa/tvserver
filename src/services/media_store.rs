@@ -82,7 +82,7 @@ impl MediaStorer for MediaStore {
         todo!()
     }
 
-    fn as_path(&self, collection: String, video: String) -> String {
+    fn as_path(&self, collection: &str, video: &str) -> String {
         // generates the path component of a URI to a video
         if collection.is_empty() {
             format!("{}/{}", self.root, video)

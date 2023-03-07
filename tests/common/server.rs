@@ -8,11 +8,14 @@ use tower_http::{
 use anyhow::Result;
 use tokio::{task::JoinHandle, time};
 
-use tvserver::{get_client_path, services::api};
+use tvserver::{
+    entrypoints::{register, Context},
+    get_client_path,
+};
 
-pub async fn create_server(context: api::Context, port: u16) -> JoinHandle<Result<()>> {
+pub async fn create_server(context: Context, port: u16) -> JoinHandle<Result<()>> {
     let task = tokio::spawn(async move {
-        let app = api::register(Arc::new(context))
+        let app = register(Arc::new(context))
             .nest_service("/", ServeDir::new(get_client_path("app")))
             .nest_service("/player", ServeDir::new(get_client_path("player")))
             .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()));

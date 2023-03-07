@@ -3,20 +3,22 @@ mod common;
 use crate::common::get_media_store;
 use anyhow::Result;
 use std::env;
+use tvserver::services::remote_player::RemotePlayerService;
 use tvserver::{
     domain::models::{DownloadableItem, SearchResults},
     domain::{enums::SearchEngineType, GOOGLE_KEY},
-    services,
+    entrypoints,
 };
 
 #[tokio::test]
 async fn test_search() -> Result<()> {
     env::set_var(GOOGLE_KEY, "");
 
-    let context = services::api::Context::from(
+    let context = entrypoints::Context::from(
         get_media_store(),
         common::get_json_fetcher("tests/fixtures/yt_search.json").await,
         common::get_text_fetcher("tests/fixtures/pb_search.html").await,
+        RemotePlayerService::new(),
         None,
     );
 
