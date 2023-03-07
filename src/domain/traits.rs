@@ -26,7 +26,7 @@ pub trait SearchEngine<T>: Send + Sync {
 #[automock]
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
-    async fn list(&self, collection: String) -> Result<VideoEntry, io::Error>;
+    async fn list(&self, collection: &str) -> Result<VideoEntry, io::Error>;
     async fn move_file(&self, path: &Path) -> io::Result<()>;
     fn delete(&self, path: String) -> io::Result<bool>;
     fn as_path(&self, collection: String, video: String) -> String;
@@ -42,6 +42,7 @@ pub trait DownloadClient: Send + Sync {
     async fn remove(&self, id: i64, delete_local_data: bool) -> Result<(), String>;
 }
 
+#[automock]
 #[async_trait]
 pub trait TextFetcher: Send + Sync {
     async fn get_text(&self, url: &str) -> anyhow::Result<String>;

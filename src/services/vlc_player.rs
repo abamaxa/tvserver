@@ -10,6 +10,8 @@ use crate::domain::traits::Player;
 
 #[derive(Debug)]
 pub struct VLCPlayer {
+    // TODO: re-implement using tokio::process and then implement the
+    // same interface as the remote player
     stdin_tx: Mutex<Sender<String>>,
     stdout_rx: Mutex<Receiver<String>>,
 }
@@ -114,7 +116,7 @@ mod test {
 
         println!("Help from VLC: {}", result.unwrap());
 
-        result = vlc.send_command("add file:///Users/chris2/Movies/Abigails Party.avi", 1);
+        result = vlc.send_command("add file:///Users/chris2/Movies/test.avi", 1);
 
         println!("Add file from VLC: {}", result.unwrap());
 

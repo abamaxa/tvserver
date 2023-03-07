@@ -1,4 +1,4 @@
-use crate::domain::events::RemoteMessage;
+use crate::domain::messages::RemoteMessage;
 use async_trait::async_trait;
 use axum::response::Response;
 use axum::{

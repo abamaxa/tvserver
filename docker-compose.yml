@@ -5,9 +5,6 @@ services:
     build:
       context: .
       network: host
-      args:
-        - PYPI_USER=$PYPI_USER
-        - PYPI_PASSWORD=$PYPI_PASSWORD
     volumes:
       - .:/opt/tvserver
       - ${HOME}/Movies:/movies
@@ -37,9 +34,6 @@ services:
       - .transmission/downloads:/downloads
       - .transmission/watch:/watch
     ports:
-#      - 9091:9091
-#      - 51413:51413
-#      - 51413:51413/udp
       - target: 9091
         published: 9091
       - target: 51413

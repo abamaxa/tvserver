@@ -1,11 +1,10 @@
 extern crate core;
 
-mod adaptors;
-mod domain;
-mod services;
+pub mod adaptors;
+pub mod domain;
+pub mod services;
 
-use std::path::PathBuf;
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tower_http::{
     cors::CorsLayer,
@@ -32,6 +31,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let context = api::Context::from(
         Arc::new(MediaStore::from(&get_movie_dir())),
+        Arc::new(adaptors::HTTPClient::new()),
         Arc::new(adaptors::HTTPClient::new()),
         player,
     );
@@ -77,7 +77,7 @@ fn setup_logging() {
         .init();
 }
 
-fn get_client_path(subdir: &str) -> PathBuf {
+pub fn get_client_path(subdir: &str) -> PathBuf {
     let root_dir = env::var(CLIENT_DIR).unwrap_or(String::from("client"));
     PathBuf::from(root_dir.as_str()).join(subdir)
 }

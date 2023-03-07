@@ -20,12 +20,16 @@ use super::{
     youtube::YoutubeClient,
 };
 use crate::adaptors::{RemoteBrowserPlayer, RemotePlayer};
-use crate::domain::events::{
+use crate::domain::messages::{
     ClientLogMessage, Command, DownloadRequest, LocalCommand, PlayRequest, RemoteMessage, Response,
 };
 use crate::domain::models::{DownloadableItem, SearchResults, VideoEntry, YoutubeResponse};
-use crate::domain::traits::{DownloadClient, JsonFetcher, MediaStorer, Player, SearchEngine};
+use crate::domain::traits::{
+    DownloadClient, JsonFetcher, MediaStorer, Player, SearchEngine, TextFetcher,
+};
 use crate::domain::{SearchEngineType, GOOGLE_KEY};
+
+type QueryParams = Query<HashMap<String, String>>;
 
 #[derive(Clone)]
 pub struct Context {
@@ -33,6 +37,7 @@ pub struct Context {
     pub client_map: Arc<RwLock<HashMap<String, Arc<dyn RemotePlayer>>>>,
     pub remote_player: Arc<RwLock<Option<Arc<dyn RemotePlayer>>>>,
     pub youtube_fetcher: Arc<dyn JsonFetcher<YoutubeResponse>>,
+    pub pirate_fetcher: Arc<dyn TextFetcher>,
     // TODO: wrap Player in Mutex, remove RWLock from Context
     pub player: Option<Arc<dyn Player>>,
 }
@@ -41,48 +46,46 @@ impl Context {
     pub fn from(
         store: Arc<dyn MediaStorer>,
         youtube_fetcher: Arc<dyn JsonFetcher<YoutubeResponse>>,
+        pirate_fetcher: Arc<dyn TextFetcher>,
         player: Option<Arc<dyn Player>>,
     ) -> Context {
         Context {
             player,
             store,
             youtube_fetcher,
+            pirate_fetcher,
             client_map: Arc::new(RwLock::new(HashMap::<String, Arc<dyn RemotePlayer>>::new())),
             remote_player: Arc::new(RwLock::new(None)),
         }
     }
 }
 
-// type SharedState = Arc<RwLock<Context>>;
 type SharedState = Arc<Context>;
 
 pub fn register(shared_state: SharedState) -> Router {
-    // let shared_state: SharedState = Arc::new(RwLock::new(Context::from(player, store)));
-    // let shared_state: SharedState = Arc::new(Context::from(player, store));
-
     Router::new()
-        .route("/collections", get(list_collections))
-        .route("/videos/*collection", get(list_videos))
-        .route("/play", post(play))
-        .route("/remote-play", post(remote_play))
-        .route("/remote", post(handle_command))
-        .route("/remote-control", post(remote_command))
+        .route("/downloads", post(downloads_add))
+        .route("/downloads", get(downloads_list))
+        .route("/downloads/*path", delete(downloads_delete))
+        .route("/log", post(log_client_message))
+        .route("/media", get(list_root_collection))
+        .route("/media/*collection", get(list_collection))
+        .route("/player/control", post(local_command))
+        .route("/player/play", post(local_play))
+        .route("/remote/control", post(remote_command))
+        .route("/remote/play", post(remote_play))
+        .route("/remote/ws", get(ws_handler))
         .route("/stream/*path", get(video))
         .route("/search/pirate", get(pirate_search))
         .route("/search/youtube", get(youtube_search))
-        .route("/downloads/add", post(downloads_add))
-        .route("/downloads/list", get(downloads_list))
-        .route("/downloads/*path", delete(downloads_delete))
-        .route("/log", post(log_client_message))
-        .route("/ws", get(ws_handler))
         .with_state(shared_state)
 }
 
 #[debug_handler]
 async fn downloads_add(
-    State(state): State<SharedState>,
-    Json(payload): Json<DownloadRequest>,
-) -> (StatusCode, Json<Response>) {
+    state: State<SharedState>,
+    payload: Json<DownloadRequest>,
+) -> impl IntoResponse {
     let link = payload.link.as_str();
     match payload.engine {
         SearchEngineType::YouTube => {
@@ -129,18 +132,13 @@ async fn downloads_list() -> impl IntoResponse {
 }
 
 #[debug_handler]
-async fn pirate_search(
-    Query(params): Query<HashMap<String, String>>,
-) -> (StatusCode, Json<SearchResults<DownloadableItem>>) {
-    let client = PirateClient::new(None);
+async fn pirate_search(state: State<SharedState>, params: QueryParams) -> impl IntoResponse {
+    let client = PirateClient::new(None, state.pirate_fetcher.as_ref());
     do_search::<PirateClient, DownloadableItem>(&client, &params).await
 }
 
 #[debug_handler]
-async fn youtube_search(
-    State(state): State<SharedState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> (StatusCode, Json<SearchResults<DownloadableItem>>) {
+async fn youtube_search(state: State<SharedState>, params: QueryParams) -> impl IntoResponse {
     match env::var(GOOGLE_KEY) {
         Ok(key) => {
             let client = YoutubeClient::new(&key, state.youtube_fetcher.as_ref());
@@ -173,10 +171,10 @@ async fn do_search<T, F>(
 }
 
 #[debug_handler]
-async fn handle_command(
-    State(state): State<SharedState>,
-    Json(payload): Json<LocalCommand>,
-) -> (StatusCode, Json<Response>) {
+async fn local_command(
+    state: State<SharedState>,
+    payload: Json<LocalCommand>,
+) -> impl IntoResponse {
     call_local_player(&state, |_, player| -> (StatusCode, Json<Response>) {
         match player.send_command(&payload.command, 0) {
             Ok(result) => (StatusCode::OK, Json(Response::success(result))),
@@ -187,7 +185,7 @@ async fn handle_command(
 }
 
 #[debug_handler]
-async fn play(
+async fn local_play(
     State(state): State<SharedState>,
     Json(payload): Json<PlayRequest>,
 ) -> (StatusCode, Json<Response>) {
@@ -223,21 +221,16 @@ where
 }
 
 #[debug_handler]
-async fn list_collections(State(state): State<SharedState>) -> impl IntoResponse {
-    match state.store.list("".to_string()).await {
-        Ok(result) => (StatusCode::OK, Json(result)),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(VideoEntry::error(e.to_string())),
-        ),
-    }
+async fn list_root_collection(state: State<SharedState>) -> impl IntoResponse {
+    list_media(&state, "").await
 }
 
 #[debug_handler]
-async fn list_videos(
-    State(state): State<SharedState>,
-    Path(collection): Path<String>,
-) -> (StatusCode, Json<VideoEntry>) {
+async fn list_collection(state: State<SharedState>, collection: Path<String>) -> impl IntoResponse {
+    list_media(&state, &collection).await
+}
+
+async fn list_media(state: &SharedState, collection: &str) -> (StatusCode, Json<VideoEntry>) {
     match state.store.list(collection).await {
         Ok(result) => (StatusCode::OK, Json(result)),
         Err(e) => (

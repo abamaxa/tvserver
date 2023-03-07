@@ -11,7 +11,7 @@ pub struct VideoEntry {
 
 impl VideoEntry {
     pub fn from(
-        collection: String,
+        collection: &str,
         child_collections: Vec<String>,
         videos: Vec<String>,
     ) -> VideoEntry {
@@ -23,7 +23,7 @@ impl VideoEntry {
         }
 
         VideoEntry {
-            collection,
+            collection: collection.to_string(),
             parent_collection,
             child_collections,
             videos,
