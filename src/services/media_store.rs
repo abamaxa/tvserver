@@ -38,10 +38,10 @@ impl MediaStore {
 
 #[async_trait]
 impl MediaStorer for MediaStore {
-    async fn list(&self, collection: String) -> Result<VideoEntry, io::Error> {
+    async fn list(&self, collection: &str) -> Result<VideoEntry, io::Error> {
         let mut child_collections: Vec<String> = Vec::new();
         let mut videos: Vec<String> = Vec::new();
-        let dir = Path::new(&self.root).join(&collection);
+        let dir = Path::new(&self.root).join(collection);
 
         if dir.is_dir() {
             let mut read_dir = fs::read_dir(dir).await?;
@@ -82,7 +82,8 @@ impl MediaStorer for MediaStore {
         todo!()
     }
 
-    fn as_path(&self, collection: String, video: String) -> String {
+    fn as_path(&self, collection: &str, video: &str) -> String {
+        // generates the path component of a URI to a video
         if collection.is_empty() {
             format!("{}/{}", self.root, video)
         } else {
@@ -128,7 +129,7 @@ mod tests {
     async fn test_video_entry_creation() -> Result<()> {
         let store = MediaStore::from("tests/fixtures/media_dir");
 
-        let results = store.list("".to_string()).await?;
+        let results = store.list("").await?;
 
         assert_eq!(
             results.child_collections,

@@ -41,6 +41,7 @@ const FIELDS: [TorrentGetField; 23] = [
 
 #[async_trait]
 impl DownloadClient for TransmissionDaemon {
+    // TODO: implement a timeout
     async fn fetch(&self, link: &str) -> Result<String, String> {
         let mut client = self.get_client();
         let add: TorrentAddArgs = TorrentAddArgs {
@@ -110,8 +111,9 @@ impl TransmissionDaemon {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::adaptors::HTTPClient;
     use crate::domain::models::DownloadableItem;
-    use crate::domain::traits::SearchEngine;
+    use crate::domain::traits::{SearchEngine, TextFetcher};
     use crate::services::pirate_bay::PirateClient;
 
     #[tokio::test]
@@ -130,7 +132,8 @@ mod test {
     #[ignore]
     async fn test_torrents_add_and_delete() {
         let mut link: Option<String> = None;
-        let pc: &dyn SearchEngine<DownloadableItem> = &PirateClient::new(None);
+        let fetcher: &dyn TextFetcher = &HTTPClient::new();
+        let pc: &dyn SearchEngine<DownloadableItem> = &PirateClient::new(None, fetcher);
 
         match pc.search("top-books").await {
             Err(err) => panic!("{}", err.to_string()),

@@ -26,24 +26,3 @@ pub async fn do_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
 
     m.run(pool).await
 }
-
-/*
-async fn create_user(State(pool): State<SqlitePool>, Json(payload): Json<CreateUser>) -> (StatusCode, Json<User>) {
-    // curl -v -X POST -H 'Content-Type: application/json'  http://localhost:3000/user -d '{"username": "john"}'
-
-    let sql = "INSERT INTO users (name) VALUES(?1)".to_string();
-
-    let id = sqlx::query::<_>(&sql)
-        .bind(&payload.username)
-        .execute(&pool)
-        .await
-        .unwrap()
-        .last_insert_rowid();
-
-    let user = User {
-        id,
-        username: payload.username
-    };
-
-    (StatusCode::CREATED, Json(user))
-}*/

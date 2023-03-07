@@ -1,4 +1,5 @@
-use crate::domain::events::RemoteMessage;
+use crate::domain::messages::RemoteMessage;
+use crate::domain::traits::RemotePlayer;
 use async_trait::async_trait;
 use axum::response::Response;
 use axum::{
@@ -11,11 +12,6 @@ use std::net::SocketAddr;
 use std::option::Option;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
-
-#[async_trait]
-pub trait RemotePlayer: Send + Sync {
-    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String>;
-}
 
 #[derive(Debug)]
 pub struct RemoteBrowserPlayer {
