@@ -277,7 +277,7 @@ async fn remote_play(
     State(state): State<SharedState>,
     Json(payload): Json<PlayRequest>,
 ) -> (StatusCode, Json<Response>) {
-    RemotePlayerService::execute_remote(&state.remote_players, payload.make_remote_command()).await
+    RemotePlayerService::execute(&state.remote_players, payload.make_remote_command()).await
 }
 
 #[debug_handler]
@@ -285,5 +285,5 @@ async fn remote_command(
     State(state): State<SharedState>,
     Json(payload): Json<Command>,
 ) -> (StatusCode, Json<Response>) {
-    RemotePlayerService::execute_remote(&state.remote_players, payload).await
+    RemotePlayerService::execute(&state.remote_players, payload).await
 }

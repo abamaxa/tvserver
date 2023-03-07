@@ -33,12 +33,15 @@ impl RemotePlayerService {
 
     pub fn remove(&mut self, _key: &str) {}
 
-    pub async fn execute_remote(
+    pub async fn execute(
         remote_players: &RwLock<Self>,
         command: Command,
     ) -> (StatusCode, Json<Response>) {
+        // This function does not take self as we don't want to hold a read lock
+        // while performing i/o
         let key = command.remote_address.unwrap_or_default();
 
+        // hold the lock for as short a time as possible.
         let remote_client = match remote_players.read().await.get(&key) {
             Some(client) => client,
             _ => {
@@ -49,6 +52,8 @@ impl RemotePlayerService {
             }
         };
 
+        // send the command over a websocket to be received by a browser, which should
+        // execute the command.
         match remote_client.send(command.message).await {
             Ok(result) => (result, Json(Response::success("todo".to_string()))),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e))),
