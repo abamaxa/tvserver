@@ -1,40 +1,23 @@
 mod common;
 
-use crate::common::get_media_store;
+use crate::common::{get_media_store, get_pirate_search, get_task_manager, get_youtube_search};
 use anyhow::Result;
-use std::env;
-use tvserver::services::remote_player::RemotePlayerService;
+use tokio::task::JoinHandle;
+use tvserver::services::SearchService;
 use tvserver::{
     domain::models::{DownloadableItem, SearchResults},
-    domain::{enums::SearchEngineType, GOOGLE_KEY},
+    domain::SearchEngineType,
     entrypoints,
+    services::RemotePlayerService,
 };
 
 #[tokio::test]
-async fn test_search() -> Result<()> {
-    env::set_var(GOOGLE_KEY, "");
-
-    let context = entrypoints::Context::from(
-        get_media_store(),
-        common::get_json_fetcher("tests/fixtures/yt_search.json").await,
-        common::get_text_fetcher("tests/fixtures/pb_search.html").await,
-        RemotePlayerService::new(),
-        None,
-    );
-
-    let server = common::create_server(context, 57180).await;
-
-    test_youtube().await?;
-
-    test_pirate_bay().await?;
-
-    server.abort();
-
-    Ok(())
-}
-
 async fn test_youtube() -> Result<()> {
-    let body = reqwest::get("http://localhost:57180/search/youtube?q=lord+of+the+rings")
+    let searcher = get_youtube_search("yt_search.json").await;
+
+    let server = make_server(searcher, 57179).await;
+
+    let body = reqwest::get("http://localhost:57179/search/youtube?q=lord+of+the+rings")
         .await?
         .text()
         .await?;
@@ -57,10 +40,15 @@ async fn test_youtube() -> Result<()> {
     assert_eq!(first.engine, SearchEngineType::YouTube);
     assert_eq!(first.link, "_SBQvd6vY9s");
 
-    Ok(())
+    Ok(server.abort())
 }
 
+#[tokio::test]
 async fn test_pirate_bay() -> Result<()> {
+    let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
+
+    let server = make_server(searcher, 57180).await;
+
     let body = reqwest::get("http://localhost:57180/search/pirate?q=dragons+den")
         .await?
         .text()
@@ -81,5 +69,17 @@ async fn test_pirate_bay() -> Result<()> {
     assert_eq!(first.engine, SearchEngineType::Torrent);
     assert_eq!(first.link, "magnet:?first-link");
 
-    Ok(())
+    Ok(server.abort())
+}
+
+async fn make_server(searcher: SearchService, port: u16) -> JoinHandle<Result<()>> {
+    let context = entrypoints::Context::from(
+        get_media_store(),
+        searcher,
+        RemotePlayerService::new(),
+        None,
+        get_task_manager(),
+    );
+
+    common::create_server(context, port).await
 }

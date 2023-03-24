@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -35,7 +35,9 @@ pub async fn get_json_fetcher(fixture: &str) -> Arc<dyn JsonFetcher<YoutubeRespo
 }
 
 async fn results_from_fixture(name: &str) -> YoutubeResponse {
-    let path = Path::new(name);
+    let mut path = PathBuf::from("tests/fixtures");
+
+    path.push(name);
 
     let data = fs::read(&path).await.unwrap();
 

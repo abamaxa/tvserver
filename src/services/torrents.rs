@@ -1,17 +1,19 @@
 use async_trait::async_trait;
-use std::env;
+use reqwest::Url;
+use std::sync::Arc;
 use transmission_rpc::types::{BasicAuth, Id, TorrentAddArgs, TorrentGetField};
 use transmission_rpc::TransClient;
 
-use crate::domain::models::{DownloadListResults, DownloadProgress, SearchResults};
-use crate::domain::traits::DownloadClient;
-use crate::domain::{TRANSMISSION_PWD, TRANSMISSION_URL, TRANSMISSION_USER};
+use crate::domain::config::{get_transmission_credentials, get_transmission_url};
+use crate::domain::models::TorrentTask;
+use crate::domain::traits::{MediaDownloader, Task};
 
 pub struct TransmissionDaemon {
-    url: String,
+    url: Url,
 }
 
-const DEFAULT_URL: &str = "http://higo.abamaxa.com:9091/transmission/rpc";
+// Daemon wraps generic client? but problem is that client isn't Send
+// also need rate limiting
 
 const FIELDS: [TorrentGetField; 23] = [
     TorrentGetField::ActivityDate,
@@ -40,9 +42,9 @@ const FIELDS: [TorrentGetField; 23] = [
 ];
 
 #[async_trait]
-impl DownloadClient for TransmissionDaemon {
+impl MediaDownloader for TransmissionDaemon {
     // TODO: implement a timeout
-    async fn fetch(&self, link: &str) -> Result<String, String> {
+    async fn fetch(&self, name: &str, link: &str) -> Result<String, String> {
         let mut client = self.get_client();
         let add: TorrentAddArgs = TorrentAddArgs {
             filename: Some(link.to_string()),
@@ -51,59 +53,54 @@ impl DownloadClient for TransmissionDaemon {
         };
 
         return match client.torrent_add(add).await {
-            Ok(res) => Ok(format!("response: {:?}", &res)),
+            Ok(res) => Ok(format!("{} response: {:?}", name, &res)),
             Err(e) => Err(e.to_string()),
         };
     }
 
-    async fn list_in_progress(&self) -> DownloadListResults {
+    async fn list_in_progress(&self) -> Result<Vec<Task>, String> {
         match self
             .get_client()
             .torrent_get(Some(FIELDS.to_vec()), None)
             .await
         {
-            Err(e) => {
-                tracing::error!("{}", e);
-                SearchResults::error(e.to_string().as_str())
-            }
-            Ok(res) => {
-                let results = res
-                    .arguments
-                    .torrents
-                    .iter()
-                    .map(DownloadProgress::from)
-                    .collect();
-
-                SearchResults::success(results)
-            }
+            Err(e) => Err(e.to_string()),
+            Ok(res) => Ok(res
+                .arguments
+                .torrents
+                .iter()
+                .map(|t| Arc::new(TorrentTask::from(t)) as Task)
+                .collect::<Vec<Task>>()),
         }
     }
 
-    async fn remove(&self, id: i64, delete_local_data: bool) -> Result<(), String> {
-        match self
-            .get_client()
-            .torrent_remove(vec![Id::Id(id)], delete_local_data)
-            .await
-        {
-            Err(e) => Err(e.to_string()),
-            Ok(_) => Ok(()),
+    async fn remove(&self, key: &str, delete_local_data: bool) -> Result<(), String> {
+        match key.parse::<i64>() {
+            Ok(id) => match self
+                .get_client()
+                .torrent_remove(vec![Id::Id(id)], delete_local_data)
+                .await
+            {
+                Err(e) => Err(e.to_string()),
+                Ok(_) => Ok(()),
+            },
+            Err(e) => Err(format!("invalid key '{}': {}", key, e)),
         }
     }
 }
 
 impl TransmissionDaemon {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let url = env::var(TRANSMISSION_URL).unwrap_or(String::from(DEFAULT_URL));
+        let url = get_transmission_url();
         TransmissionDaemon { url }
     }
 
     fn get_client(&self) -> TransClient {
-        let url = self.url.parse().unwrap();
-        if let (Ok(user), Ok(password)) = (env::var(TRANSMISSION_USER), env::var(TRANSMISSION_PWD))
-        {
-            TransClient::with_auth(url, BasicAuth { user, password })
+        if let (Ok(user), Ok(password)) = get_transmission_credentials() {
+            TransClient::with_auth(self.url.clone(), BasicAuth { user, password })
         } else {
-            TransClient::new(url)
+            TransClient::new(self.url.clone())
         }
     }
 }
@@ -113,8 +110,9 @@ mod test {
     use super::*;
     use crate::adaptors::HTTPClient;
     use crate::domain::models::DownloadableItem;
-    use crate::domain::traits::{SearchEngine, TextFetcher};
+    use crate::domain::traits::{MediaSearcher, TextFetcher};
     use crate::services::pirate_bay::PirateClient;
+    use std::sync::Arc;
 
     #[tokio::test]
     #[ignore]
@@ -123,8 +121,9 @@ mod test {
 
         let results = client.list_in_progress().await;
 
-        for item in &results.results.unwrap() {
-            println!("{:?}, {:?}", item.name, item.download_finished);
+        for item in &results.unwrap() {
+            let state = item.get_state().await;
+            println!("{:?}, {:?}", state.name, state.finished);
         }
     }
 
@@ -132,8 +131,8 @@ mod test {
     #[ignore]
     async fn test_torrents_add_and_delete() {
         let mut link: Option<String> = None;
-        let fetcher: &dyn TextFetcher = &HTTPClient::new();
-        let pc: &dyn SearchEngine<DownloadableItem> = &PirateClient::new(None, fetcher);
+        let fetcher: Arc<dyn TextFetcher> = Arc::new(HTTPClient::new());
+        let pc: &dyn MediaSearcher<DownloadableItem> = &PirateClient::new(fetcher, None);
 
         match pc.search("top-books").await {
             Err(err) => panic!("{}", err.to_string()),
@@ -152,14 +151,15 @@ mod test {
 
         let client = TransmissionDaemon::new();
 
-        match client.fetch(&link.unwrap()).await {
+        match client.fetch("test name", &link.unwrap()).await {
             Ok(result) => println!("{}", result),
             Err(err) => panic!("{}", err),
         }
 
         let results = client.list_in_progress().await;
-        for item in &results.results.unwrap() {
-            println!("{}, {}", item.name, item.download_finished);
+        for item in &results.unwrap() {
+            let state = item.get_state().await;
+            println!("{}, {}", state.name, state.finished);
         }
     }
 }

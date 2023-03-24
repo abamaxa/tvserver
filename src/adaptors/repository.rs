@@ -1,12 +1,12 @@
 use sqlx::migrate::{MigrateDatabase, MigrateError, Migrator};
 use sqlx::sqlite::SqlitePool;
 use sqlx::{Error, Sqlite};
-use std::{env, path};
+use std::path;
 
-use crate::domain::{DATABASE_MIGRATION_DIR, DATABASE_URL};
+use crate::domain::config::{get_database_migration_dir, get_database_url};
 
 pub async fn get_database() -> Result<SqlitePool, Error> {
-    let url = env::var(DATABASE_URL).expect("DATABASE_URL environment variable is not set");
+    let url = get_database_url();
 
     if url != ":memory:" && !Sqlite::database_exists(&url).await.unwrap_or(false) {
         match Sqlite::create_database(&url).await {
@@ -19,8 +19,7 @@ pub async fn get_database() -> Result<SqlitePool, Error> {
 }
 
 pub async fn do_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
-    let migrations_dir =
-        env::var(DATABASE_MIGRATION_DIR).unwrap_or_else(|_| String::from("./migrations"));
+    let migrations_dir = get_database_migration_dir();
 
     let m = Migrator::new(path::Path::new(&migrations_dir)).await?;
 

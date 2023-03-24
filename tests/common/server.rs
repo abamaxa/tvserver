@@ -9,8 +9,8 @@ use anyhow::Result;
 use tokio::{task::JoinHandle, time};
 
 use tvserver::{
+    domain::config::get_client_path,
     entrypoints::{register, Context},
-    get_client_path,
 };
 
 pub async fn create_server(context: Context, port: u16) -> JoinHandle<Result<()>> {

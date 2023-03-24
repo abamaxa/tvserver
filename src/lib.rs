@@ -5,8 +5,9 @@ pub mod domain;
 pub mod entrypoints;
 pub mod services;
 
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
+use crate::adaptors::TokioProcessSpawner;
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -14,37 +15,28 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::domain::traits::Downloader;
 use crate::domain::{
-    config::get_movie_dir, traits::DownloadClient, traits::Player, CLIENT_DIR, ENABLE_VLC,
+    config::{enable_vlc_player, get_client_path, get_movie_dir},
+    traits::Player,
 };
 use crate::entrypoints::{register, Context};
 use crate::services::{
-    media_store::MediaStore, monitor::Monitor, remote_player::RemotePlayerService,
-    torrents::TransmissionDaemon, vlc_player::VLCPlayer,
+    MediaStore, Monitor, RemotePlayerService, SearchService, TaskManager, TransmissionDaemon,
+    VLCPlayer,
 };
 
 pub async fn run() -> anyhow::Result<()> {
-    let pool = adaptors::repository::get_database().await?;
+    let pool = adaptors::get_database().await?;
 
-    adaptors::repository::do_migrations(&pool).await?;
+    adaptors::do_migrations(&pool).await?;
 
-    let enable_vlc = env::var(ENABLE_VLC).unwrap_or_default();
-    let player: Option<Arc<dyn Player>> = match enable_vlc.as_str() {
-        "1" | "true" => Some(Arc::new(VLCPlayer::new())),
-        _ => None,
-    };
+    let context = get_dependencies();
 
-    let context = Context::from(
-        Arc::new(MediaStore::from(&get_movie_dir())),
-        Arc::new(adaptors::HTTPClient::new()),
-        Arc::new(adaptors::HTTPClient::new()),
-        RemotePlayerService::new(),
-        player,
-    );
+    let downloader: Downloader = Arc::new(TransmissionDaemon::new());
 
-    let downloader: Arc<dyn DownloadClient> = Arc::new(TransmissionDaemon::new());
-
-    let monitor_handle = Monitor::start(context.store.clone(), downloader);
+    let monitor_handle =
+        Monitor::start(context.get_store(), downloader, context.get_task_manager());
 
     setup_logging();
 
@@ -66,6 +58,24 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn get_dependencies() -> Context {
+    let player: Option<Arc<dyn Player>> = if enable_vlc_player() {
+        Some(Arc::new(VLCPlayer::start()))
+    } else {
+        None
+    };
+
+    let task_manager = Arc::new(TaskManager::new(Arc::new(TokioProcessSpawner::new())));
+
+    Context::from(
+        Arc::new(MediaStore::from(&get_movie_dir())),
+        SearchService::new(task_manager.clone()),
+        RemotePlayerService::new(),
+        player,
+        task_manager,
+    )
+}
+
 fn setup_logging() {
     let format = fmt::format()
         .with_ansi(false)
@@ -81,9 +91,4 @@ fn setup_logging() {
         )
         .with(tracing_subscriber::fmt::layer().event_format(format))
         .init();
-}
-
-pub fn get_client_path(subdir: &str) -> PathBuf {
-    let root_dir = env::var(CLIENT_DIR).unwrap_or(String::from("client"));
-    PathBuf::from(root_dir.as_str()).join(subdir)
 }

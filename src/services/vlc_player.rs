@@ -31,7 +31,7 @@ impl Player for VLCPlayer {
 }
 
 impl VLCPlayer {
-    pub fn new() -> VLCPlayer {
+    pub fn start() -> VLCPlayer {
         let (stdin_tx, stdin_rx) = channel();
         let (stdout_tx, stdout_rx) = channel();
 
@@ -110,7 +110,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_run_vlc() {
-        let vlc = VLCPlayer::new();
+        let vlc = VLCPlayer::start();
 
         let mut result = vlc.send_command("help", 1);
 
