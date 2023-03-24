@@ -11,6 +11,7 @@ use transmission_rpc::types::{Torrent, TorrentStatus};
 
 use crate::domain::models::SearchResults;
 use crate::domain::traits::{Storer, TaskMonitor};
+use crate::domain::TaskType;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +168,7 @@ impl TaskMonitor for TorrentTask {
                 "Peers: {} connected ({}/{})",
                 self.peers_connected, self.peers_sending_to_us, self.peers_getting_from_us
             ),
+            task_type: TaskType::Transmission,
         }
     }
 
@@ -190,9 +192,10 @@ impl TaskMonitor for TorrentTask {
         self.download_finished
     }
 
-    async fn cleanup(&self, store: &Storer) -> Result<()> {
-        if !self.has_finished_downloading()
-            || self.get_seconds_since_finished() < delay_reaping_tasks()
+    async fn cleanup(&self, store: &Storer, force_delete: bool) -> Result<()> {
+        if !force_delete
+            && (!self.has_finished_downloading()
+                || self.get_seconds_since_finished() < delay_reaping_tasks())
         {
             return Err(anyhow!("download hasn't finished yet"));
         }
@@ -265,7 +268,7 @@ pub mod test {
 
         let store: Storer = Arc::new(store);
 
-        assert!(download.cleanup(&store).await.is_ok());
+        assert!(download.cleanup(&store, true).await.is_ok());
 
         Ok(())
     }

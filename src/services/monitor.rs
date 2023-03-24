@@ -41,8 +41,10 @@ impl Monitor {
 
     async fn move_completed_downloads(&self, items: &[Task]) {
         for item in items.iter().filter(|item| item.has_finished()) {
-            if let Err(e) = item.cleanup(&self.store).await {
-                tracing::error!("could not move videos: {}", e);
+            if let Err(e) = item.cleanup(&self.store, false).await {
+                // TODO: distinguish between genuine problems and policy delays in
+                // reaping completed tasks
+                tracing::debug!("could not move videos: {}", e);
             } else {
                 println!("key: {}", item.get_key());
                 if let Err(e) = self.downloads.remove(&item.get_key(), true).await {

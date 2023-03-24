@@ -9,7 +9,7 @@ use crate::domain::models::{
     Conversion, SearchResults, TaskListResults, VideoEntry, AVAILABLE_CONVERSIONS,
 };
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Storer};
-use crate::domain::{SearchEngineType, Searcher};
+use crate::domain::{SearchEngineType, Searcher, TaskType};
 use crate::services::{
     stream_video, RemotePlayerService, SearchService, TaskManager, TransmissionDaemon,
 };
@@ -78,7 +78,7 @@ pub fn register(shared_state: SharedState) -> Router {
     Router::new()
         .route("/tasks", post(tasks_add))
         .route("/tasks", get(tasks_list))
-        .route("/tasks/*path", delete(tasks_delete))
+        .route("/tasks/:type/*path", delete(tasks_delete))
         .route("/log", post(log_client_message))
         .route("/media", get(list_root_collection))
         .route("/media/*media", get(list_collection))
@@ -108,11 +108,22 @@ async fn tasks_add(state: State<SharedState>, payload: Json<DownloadRequest>) ->
 }
 
 #[debug_handler]
-async fn tasks_delete(Path(key): Path<String>) -> StdResponse {
-    let daemon = TransmissionDaemon::new();
-    match daemon.remove(&key, false).await {
-        Ok(_) => (OK, Json(Response::success(String::from("success")))),
-        Err(err) => (INTERNAL_SERVER_ERROR, Json(Response::error(err))),
+async fn tasks_delete(state: State<SharedState>, params: Path<(TaskType, String)>) -> StdResponse {
+    // TODO: define a struct for these params
+    let task_type = params.0 .0;
+    let key = params.0 .1;
+    // TODO: rationalize these two interfaces (one returns an error, the other a string on failure)
+    if task_type == TaskType::Transmission {
+        let daemon = TransmissionDaemon::new();
+        match daemon.remove(&key, false).await {
+            Ok(_) => (OK, Json(Response::success(String::from("success")))),
+            Err(err) => (INTERNAL_SERVER_ERROR, Json(Response::error(err))),
+        }
+    } else {
+        match state.task_manager.remove(&key, state.get_store()).await {
+            Ok(_) => (OK, Json(Response::success(String::from("success")))),
+            Err(err) => (INTERNAL_SERVER_ERROR, Json(Response::error(err.to_string()))),
+        }
     }
 }
 

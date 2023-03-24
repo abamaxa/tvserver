@@ -7,6 +7,7 @@ use std::{io::Result, marker::Unpin, process::Stdio, sync::Arc};
 use crate::domain::config::delay_reaping_tasks;
 use crate::domain::messages::TaskState;
 use crate::domain::traits::{ProcessSpawner, Storer, Task, TaskMonitor};
+use crate::domain::TaskType;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -211,6 +212,7 @@ impl TaskMonitor for AsyncSubProcess {
             error_string: self.error_string.lock().await.clone(),
             rate_details: "".to_string(),
             process_details: last_message,
+            task_type: TaskType::AsyncProcess,
         }
     }
 
@@ -244,8 +246,8 @@ impl TaskMonitor for AsyncSubProcess {
         }
     }
 
-    async fn cleanup(&self, _store: &Storer) -> anyhow::Result<()> {
-        if self.get_seconds_since_finished() < delay_reaping_tasks() {
+    async fn cleanup(&self, _store: &Storer, force_delete: bool) -> anyhow::Result<()> {
+        if !force_delete && self.get_seconds_since_finished() < delay_reaping_tasks() {
             Err(anyhow!("not ready to reap"))
         } else {
             Ok(())
@@ -265,6 +267,8 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore] // this was working until reading stdio was changed from reading lines
+              // (strings) to bytes, which was necessary to track progress with ffmpeg and yt-dl
     async fn test_execute_task() -> Result<()> {
         let args =
             vec!["-u", "-c", "import time;print(1);time.sleep(1);print(2);time.sleep(1);print(3)"];
@@ -273,8 +277,10 @@ mod test {
 
         let mut markers: [bool; 3] = [false, false, false];
 
+        let mut status: TaskState;
+
         loop {
-            let status = task.get_state().await;
+            status = task.get_state().await;
 
             let idx = status.process_details.parse::<usize>().unwrap_or(0);
 

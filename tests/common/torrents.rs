@@ -18,7 +18,7 @@ pub async fn get_torrent_downloader(fixture: &str) -> Downloader {
 
     fetcher
         .expect_fetch()
-        .returning(|_| Ok("response: ok".to_string()));
+        .returning(|_, _| Ok("response: ok".to_string()));
 
     fetcher
         .expect_list_in_progress()

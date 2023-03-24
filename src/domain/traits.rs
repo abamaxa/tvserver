@@ -122,7 +122,8 @@ pub trait TaskMonitor: Sync + Send {
     fn get_seconds_since_finished(&self) -> i64;
     fn terminate(&self);
     fn has_finished(&self) -> bool;
-    async fn cleanup(&self, store: &Arc<dyn MediaStorer>) -> anyhow::Result<()>;
+    async fn cleanup(&self, store: &Arc<dyn MediaStorer>, force_delete: bool)
+        -> anyhow::Result<()>;
 }
 
 pub type Task = Arc<dyn TaskMonitor>;

@@ -25,6 +25,7 @@ async fn test_pirate_download() -> Result<()> {
     let mut map = HashMap::new();
     map.insert("link", "magnet:");
     map.insert("engine", "Torrent");
+    map.insert("name", "test");
 
     let body = client
         .post("http://localhost:57185/tasks")

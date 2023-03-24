@@ -1,5 +1,6 @@
 use crate::domain::messages::TaskState;
 use crate::domain::traits::{ProcessSpawner, Spawner, Storer, Task};
+use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,14 +35,15 @@ impl TaskManager {
         self.current_tasks.write().await.insert(key, task)
     }
 
-    pub async fn remove(&self, task: Task, store: Storer) {
-        let key = task.get_key();
-        if self.current_tasks.write().await.remove(&key).is_some() && !task.has_finished() {
-            task.terminate();
-            if let Err(e) = task.cleanup(&store).await {
-                tracing::error!("cleanup {} failed: {}", task.get_key(), e.to_string());
+    pub async fn remove(&self, key: &str, store: Storer) -> Result<()> {
+        let key = String::from(key);
+        if let Some(task) = self.current_tasks.write().await.remove(&key) {
+            if !task.has_finished() {
+                task.terminate();
+                return task.cleanup(&store, true).await;
             }
         }
+        Ok(())
     }
 
     pub async fn get_current_state(&self) -> Vec<TaskState> {
@@ -73,7 +75,7 @@ impl TaskManager {
             #[allow(clippy::redundant_closure_call)]
             task_set.spawn((|store: Storer| async move {
                 let mut result: Option<String> = None;
-                if task.has_finished() && task.cleanup(&store).await.is_ok() {
+                if task.has_finished() && task.cleanup(&store, false).await.is_ok() {
                     result = Some(task.get_key());
                 }
                 result
@@ -99,7 +101,7 @@ mod test {
     use super::*;
     use crate::domain::{
         traits::{MockMediaStorer, MockTaskMonitor},
-        NoSpawner,
+        NoSpawner, TaskType,
     };
     use mockall::TimesRange;
     use tokio::task::JoinSet;
@@ -130,7 +132,7 @@ mod test {
         assert_eq!(states.len(), 1);
         assert_eq!(states.first().unwrap().name, STILL_RUNNING);
 
-        task_manager.remove(task_running, storer).await;
+        task_manager.remove(STILL_RUNNING, storer).await.unwrap();
 
         let states = task_manager.get_current_state().await;
 
@@ -157,7 +159,7 @@ mod test {
 
         mock_task.expect_has_finished().return_const(finished);
         mock_task.expect_terminate().return_const(());
-        mock_task.expect_cleanup().returning(|_| Ok(()));
+        mock_task.expect_cleanup().returning(|_, _| Ok(()));
         mock_task
             .expect_get_key()
             .returning(move || key.to_string());
@@ -172,6 +174,7 @@ mod test {
             error_string: "".to_string(),
             rate_details: "".to_string(),
             process_details: "".to_string(),
+            task_type: TaskType::AsyncProcess,
         });
 
         Arc::new(mock_task)

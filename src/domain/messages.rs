@@ -1,5 +1,5 @@
 use crate::domain::traits::Storer;
-use crate::domain::SearchEngineType;
+use crate::domain::{SearchEngineType, TaskType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,4 +118,5 @@ pub struct TaskState {
     pub rate_details: String,
     pub process_details: String,
     pub error_string: String,
+    pub task_type: TaskType,
 }
