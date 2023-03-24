@@ -1,7 +1,6 @@
-use crate::domain::traits::MediaStorer;
+use crate::domain::traits::Storer;
 use crate::domain::SearchEngineType;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RemoteMessage {
@@ -40,15 +39,12 @@ impl PlayRequest {
 
         Command {
             remote_address: self.remote_address.clone(),
-            message: RemoteMessage::Play { url: url.clone() },
+            message: RemoteMessage::Play { url },
         }
     }
 
-    pub fn make_local_command(&self, store: &Arc<dyn MediaStorer>) -> String {
-        format!(
-            "add file://{}",
-            store.as_path(&self.collection, &self.video)
-        )
+    pub fn make_local_command(&self, store: &Storer) -> String {
+        format!("add file://{}", store.as_path(&self.collection, &self.video))
     }
 }
 
@@ -81,6 +77,45 @@ pub struct ClientLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadRequest {
+    pub name: String,
     pub link: String,
     pub engine: SearchEngineType,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PlayerList {
+    pub players: Vec<String>,
+}
+
+impl PlayerList {
+    pub fn new(players: Vec<String>) -> Self {
+        Self { players }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversionRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameRequest {
+    pub new_name: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskState {
+    pub key: String,
+    pub name: String,
+    pub display_name: String,
+    pub finished: bool,
+    pub eta: i64,
+    pub percent_done: f32,
+    pub size_details: String,
+    pub rate_details: String,
+    pub process_details: String,
+    pub error_string: String,
 }

@@ -185,11 +185,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_headers_preserve_case() -> Result<()> {
-        let result = stream_video(
-            "tests/fixtures/media_dir/test.mp4",
-            header::HeaderMap::new(),
-        )
-        .await;
+        let result =
+            stream_video("tests/fixtures/media_dir/test.mp4", header::HeaderMap::new()).await;
 
         let response = result.into_response();
 

@@ -1,10 +1,10 @@
 use crate::domain::messages::RemoteMessage;
 use crate::domain::traits::RemotePlayer;
 use async_trait::async_trait;
-use axum::response::Response;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::StatusCode,
+    response::Response,
 };
 use futures::stream::{SplitSink, SplitStream};
 use futures::{sink::SinkExt, stream::StreamExt};

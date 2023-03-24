@@ -1,27 +1,26 @@
-use crate::adaptors::subprocess::AsyncCommand;
 use crate::domain::config::get_movie_dir;
-use crate::domain::models::{
-    DownloadListResults, DownloadableItem, SearchResults, YoutubeResponse,
-};
-use crate::domain::traits::{DownloadClient, JsonFetcher, SearchEngine};
+use crate::domain::models::{DownloadableItem, SearchResults, YoutubeResponse};
+use crate::domain::traits::{JsonFetcher, MediaDownloader, MediaSearcher, Spawner, Task};
 use anyhow;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 const SEARCH_URL: &str = "https://www.googleapis.com/youtube/v3/search";
 const SEARCH_PART: &str = "snippet";
 const SEARCH_MAX_RESULTS: &str = "50";
 const SEARCH_TYPE: &str = "video";
 
-type YoutubeResult = SearchResults<DownloadableItem>;
-type Fetcher = dyn JsonFetcher<YoutubeResponse>;
+pub type YoutubeResult = SearchResults<DownloadableItem>;
+pub type YoutubeFetcher = Arc<dyn JsonFetcher<YoutubeResponse>>;
 
-pub struct YoutubeClient<'a> {
+pub struct YoutubeClient {
     key: String,
-    client: &'a Fetcher,
+    client: YoutubeFetcher,
+    spawner: Spawner,
 }
 
 #[async_trait]
-impl<'a> SearchEngine<DownloadableItem> for YoutubeClient<'a> {
+impl MediaSearcher<DownloadableItem> for YoutubeClient {
     async fn search(&self, query: &str) -> anyhow::Result<YoutubeResult> {
         let query = [
             ("q", query),
@@ -38,11 +37,12 @@ impl<'a> SearchEngine<DownloadableItem> for YoutubeClient<'a> {
     }
 }
 
-impl<'a> YoutubeClient<'a> {
-    pub fn new(key: &str, client: &'a Fetcher) -> Self {
+impl YoutubeClient {
+    pub fn new(key: &str, client: YoutubeFetcher, spawner: Spawner) -> Self {
         Self {
             key: String::from(key),
             client,
+            spawner,
         }
     }
 
@@ -58,41 +58,46 @@ impl<'a> YoutubeClient<'a> {
 }
 
 #[async_trait]
-impl<'a> DownloadClient for YoutubeClient<'a> {
-    async fn fetch(&self, link: &str) -> Result<String, String> {
-        let output_dir = format!("home:{}/New", get_movie_dir());
-        AsyncCommand::execute(
-            "yt-dlp",
-            vec![
-                "--no-update",
-                "--sponsorblock-remove",
-                "all",
-                "--paths",
-                output_dir.as_str(),
-                link,
-            ],
-        );
+impl MediaDownloader for YoutubeClient {
+    async fn fetch(&self, name: &str, link: &str) -> Result<String, String> {
+        let output_dir = format!("home:{}/YouTube", get_movie_dir());
+        self.spawner
+            .execute(
+                name,
+                "yt-dlp",
+                vec![
+                    "--no-update",
+                    "--sponsorblock-remove",
+                    "all",
+                    "--paths",
+                    output_dir.as_str(),
+                    "-o",
+                    "%(title)s.%(ext)s",
+                    link,
+                ],
+            )
+            .await;
 
         Ok(String::from("queued"))
     }
 
-    async fn list_in_progress(&self) -> DownloadListResults {
-        todo!()
+    async fn list_in_progress(&self) -> Result<Vec<Task>, String> {
+        Ok(vec![])
     }
 
-    async fn remove(&self, _id: i64, _delete_local_data: bool) -> Result<(), String> {
-        todo!()
+    async fn remove(&self, _id: &str, _delete_local_data: bool) -> Result<(), String> {
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::adaptors::HTTPClient;
-    use crate::domain::models::youtube::{Id, Item, Snippet};
-    use crate::domain::GOOGLE_KEY;
+    use crate::adaptors::{HTTPClient, TokioProcessSpawner};
+    use crate::domain::config::get_google_key;
+    use crate::domain::models::{Id, Item, Snippet};
+    use crate::domain::traits::{MockTaskMonitor, ProcessSpawner, Task};
     use anyhow::anyhow;
-    use std::env;
 
     #[derive(Default, Debug, Clone)]
     struct MockFetcher {
@@ -141,6 +146,16 @@ mod test {
         }
     }
 
+    #[derive(Default, Debug, Clone)]
+    struct MockProcessSpawner {}
+
+    #[async_trait]
+    impl ProcessSpawner for MockProcessSpawner {
+        async fn execute(&self, _name: &str, _cmd: &str, _args: Vec<&str>) -> Task {
+            Arc::new(MockTaskMonitor::new())
+        }
+    }
+
     #[tokio::test]
     async fn test_conversion_of_response() -> anyhow::Result<()> {
         const THE_QUERY: &str = "find this";
@@ -149,8 +164,10 @@ mod test {
         let fetcher = MockFetcher {
             ..Default::default()
         };
+        let spawner = MockProcessSpawner {};
 
-        let client: &dyn SearchEngine<DownloadableItem> = &YoutubeClient::new(THE_KEY, &fetcher);
+        let client: &dyn MediaSearcher<DownloadableItem> =
+            &YoutubeClient::new(THE_KEY, Arc::new(fetcher), Arc::new(spawner));
 
         let response = client.search(THE_QUERY).await?;
 
@@ -189,7 +206,10 @@ mod test {
             ..Default::default()
         };
 
-        let client: &dyn SearchEngine<DownloadableItem> = &YoutubeClient::new("", &fetcher);
+        let spawner = MockProcessSpawner {};
+
+        let client: &dyn MediaSearcher<DownloadableItem> =
+            &YoutubeClient::new("", Arc::new(fetcher), Arc::new(spawner));
 
         let response = client.search("").await;
 
@@ -205,8 +225,9 @@ mod test {
     #[tokio::test]
     #[ignore]
     async fn test_live_search_youtube() {
-        let client: &Fetcher = &HTTPClient::new();
-        let pc = YoutubeClient::new(&env::var(GOOGLE_KEY).unwrap(), client);
+        let client = Arc::new(HTTPClient::new());
+        let spawner = Arc::new(TokioProcessSpawner::new());
+        let pc = YoutubeClient::new(&get_google_key(), client, spawner);
 
         match pc.search("Dragons Den 2023").await {
             Ok(response) => {
@@ -216,10 +237,7 @@ mod test {
 
                 if let Some(results) = response.results {
                     for result in &results {
-                        println!(
-                            "({}):{} - {}",
-                            result.link, result.title, result.description
-                        );
+                        println!("({}):{} - {}", result.link, result.title, result.description);
                     }
                 }
             }

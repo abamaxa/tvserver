@@ -1,15 +1,16 @@
+use crate::domain::config::get_pirate_bay_url;
 use crate::domain::models::{DownloadableItem, SearchResults};
-use crate::domain::traits::{SearchEngine, TextFetcher};
+use crate::domain::traits::{MediaSearcher, TextFetcher};
 use crate::domain::SearchEngineType::Torrent;
 use anyhow;
 use async_trait::async_trait;
 use mockall::lazy_static;
+use reqwest::Url;
 use scraper::{ElementRef, Html, Selector};
+use std::sync::Arc;
 use urlencoding::decode;
 
-const BASE_URL: &str = "https://thehiddenbay.com";
-
-type Fetcher = dyn TextFetcher;
+pub type PirateFetcher = Arc<dyn TextFetcher>;
 
 lazy_static! {
     static ref SELECTOR: Selector = Selector::parse(r#"#searchResult"#).unwrap();
@@ -19,13 +20,13 @@ lazy_static! {
     static ref DESC_SELECTOR: Selector = Selector::parse(".detDesc").unwrap();
 }
 
-pub struct PirateClient<'a> {
-    host: String,
-    client: &'a Fetcher,
+pub struct PirateClient {
+    host: Url,
+    client: PirateFetcher,
 }
 
 #[async_trait]
-impl<'a> SearchEngine<DownloadableItem> for PirateClient<'a> {
+impl MediaSearcher<DownloadableItem> for PirateClient {
     async fn search(&self, query: &str) -> anyhow::Result<SearchResults<DownloadableItem>> {
         let url = match query {
             "top-100" => format!("{}/top/all", self.host),
@@ -43,10 +44,10 @@ impl<'a> SearchEngine<DownloadableItem> for PirateClient<'a> {
     }
 }
 
-impl<'a> PirateClient<'a> {
-    pub fn new(host: Option<&str>, client: &'a Fetcher) -> Self {
+impl PirateClient {
+    pub fn new(client: PirateFetcher, host: Option<Url>) -> Self {
         Self {
-            host: String::from(host.unwrap_or(BASE_URL)),
+            host: host.unwrap_or(get_pirate_bay_url()),
             client,
         }
     }
@@ -59,7 +60,6 @@ impl<'a> PirateClient<'a> {
         Some(
             table
                 .select(&TR_SELECTOR)
-                .into_iter()
                 .filter_map(Self::parse_item)
                 .collect(),
         )
@@ -80,7 +80,7 @@ impl<'a> PirateClient<'a> {
                     let link = decode(itr.next().unwrap().value().attr("href")?);
                     let desc = PirateClient::get_element_text(&cell.select(&DESC_SELECTOR).next()?);
 
-                    record.title = (*title.first()?).to_string();
+                    record.title = (*title.first()?).replace('.', " ");
                     record.description = desc.to_owned();
                     record.link = link.unwrap_or_else(|_| String::new().into()).to_string();
                 }
@@ -117,7 +117,6 @@ mod test {
 
     #[tokio::test]
     async fn test_search() -> Result<()> {
-        // let fetcher = HTTPClient::new();
         let mut fetcher = MockTextFetcher::new();
         let html = String::from_utf8(tokio::fs::read("tests/fixtures/pb_search.html").await?)?;
 
@@ -125,7 +124,7 @@ mod test {
             .expect_get_text()
             .returning(move |_| Ok(html.clone()));
 
-        let pc = PirateClient::new(Some(BASE_URL), &fetcher);
+        let pc = PirateClient::new(Arc::new(fetcher), None);
 
         let response = pc.search("Dragons Den").await?;
 

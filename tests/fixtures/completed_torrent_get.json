@@ -1,0 +1,40 @@
+{
+  "torrents": [
+    {
+      "activityDate": 1678126439,
+      "addedDate": 1678124245,
+      "doneDate": 1678126439,
+      "downloadDir": "/downloads/complete",
+      "editDate": 1678126439,
+      "error": 0,
+      "errorString": "",
+      "eta": -1,
+      "files": [
+        {
+          "bytesCompleted": 8078103833,
+          "length": 8078103833,
+          "name": "The Dark Knight (2008) [2160p] [4K] [BluRay] [5.1] [YTS.MX]/The.Dark.Knight.2008.2160p.4K.BluRay.x265.10bit.AAC5.1-[YTS.MX].mkv"
+        },
+        {
+          "bytesCompleted": 53226,
+          "length": 53226,
+          "name": "The Dark Knight (2008) [2160p] [4K] [BluRay] [5.1] [YTS.MX]/www.YTS.MX.jpg"
+        }
+      ],
+      "hashString": "61be42fb337b1b84f844b88fd904982a0a2330e3",
+      "id": 2,
+      "isFinished": false,
+      "leftUntilDone": 0,
+      "name": "The Dark Knight (2008) [2160p] [4K] [BluRay] [5.1] [YTS.MX]",
+      "peersConnected": 0,
+      "peersGettingFromUs": 0,
+      "peersSendingToUs": 0,
+      "percentDone": 1,
+      "rateDownload": 0,
+      "rateUpload": 0,
+      "sizeWhenDone": 8078157059,
+      "status": 6,
+      "totalSize": 8078157059
+    }
+  ]
+}

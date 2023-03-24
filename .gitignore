@@ -11,4 +11,4 @@ Cargo.lock
 .env
 .transmission
 /.idea/
-
+client_src

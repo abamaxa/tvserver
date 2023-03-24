@@ -1,0 +1,6 @@
+[submodule "client_src/tvremote"]
+	path = client_src/tvremote
+	url = https://github.com/abamaxa/tvremote.git
+[submodule "client_src/remote_player"]
+	path = client_src/remote_player
+	url = https://github.com/abamaxa/remote_player.git

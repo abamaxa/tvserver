@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::{fs, io};
 
-use crate::adaptors::subprocess::AsyncCommand;
+use crate::adaptors::AsyncCommand;
 use crate::domain::models::VideoEntry;
 use crate::domain::traits::MediaStorer;
 
@@ -70,7 +70,7 @@ impl MediaStorer for MediaStore {
         let new_path = self.get_new_video_path(path).await?;
 
         tracing::debug!(
-            "moving file {} to {}",
+            "move file {} to {}",
             path.to_str().unwrap_or_default(),
             new_path.to_str().unwrap_or_default()
         );
@@ -78,8 +78,23 @@ impl MediaStorer for MediaStore {
         fs::rename(path, new_path).await
     }
 
-    fn delete(&self, _path: String) -> io::Result<bool> {
-        todo!()
+    async fn rename(&self, current: &str, new_path: &str) -> io::Result<()> {
+        tracing::debug!("rename file {} to {}", current, new_path);
+
+        fs::rename(self.as_path("", current), self.as_path("", new_path)).await
+    }
+
+    async fn delete(&self, path: &str) -> io::Result<bool> {
+        let full_path = self.as_path("", path);
+        let file_path = Path::new(&full_path);
+        if !file_path.exists() {
+            return Ok(false);
+        }
+
+        match fs::remove_file(file_path).await {
+            Ok(()) => Ok(true),
+            Err(e) => Err(e),
+        }
     }
 
     fn as_path(&self, collection: &str, video: &str) -> String {
@@ -92,6 +107,8 @@ impl MediaStorer for MediaStore {
     }
 
     async fn convert_to_mp4(&self, path: &Path) -> anyhow::Result<bool> {
+        // ffmpeg -i 'the lord of the rings the rings of power s01e05.mkv' -c:v libx265 -vtag hvc1 -vprofile main -c:a copy -pix_fmt yuv420p output.mp4
+
         let mut new_path = self.get_new_video_path(path).await?;
 
         new_path.set_extension("mp4");
@@ -131,10 +148,7 @@ mod tests {
 
         let results = store.list("").await?;
 
-        assert_eq!(
-            results.child_collections,
-            vec!["collection1", "collection2"]
-        );
+        assert_eq!(results.child_collections, vec!["collection1", "collection2"]);
         assert_eq!(results.videos, vec!["empty.mp4", "test.mp4"]);
 
         Ok(())

@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 
 const ACCESS_DENIED_MSG: &str = "Access denied, ensure access tokens have been set";
 
+#[derive(Default)]
 pub struct HTTPClient {
     client: reqwest::Client,
 }
