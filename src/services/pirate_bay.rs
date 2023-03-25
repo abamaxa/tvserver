@@ -32,6 +32,7 @@ impl MediaSearcher<DownloadableItem> for PirateClient {
             "top-100" => format!("{}/top/all", self.host),
             "top-videos" => format!("{}/top/200", self.host),
             "top-books" => format!("{}/top/601", self.host),
+            "top-music" => format!("{}/top/100", self.host),
             _ => format!("{}/search/{}/1/99/0", self.host, query),
         };
 

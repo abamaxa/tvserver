@@ -1,3 +1,5 @@
+# if getting an error WARN[0000] container xxx.xxx is missing com.docker.compose.container-number label
+# use `docker system prune -af`
 version: '3.7'
 
 services:
@@ -7,25 +9,25 @@ services:
       network: host
     volumes:
       - .:/opt/tvserver
-      - ${HOME}/Movies:/movies
+      - ${HOME}/Movies:/Movies
+      - .transmission/config:/config
+      - .transmission/downloads:/downloads
+      - .transmission/watch:/watch
     env_file:
       - .env
     restart: on-failure
     stop_grace_period: 1s
     ports:
-      - 81:80
-    profiles:
-      - tests
-
+      - 80:80
   transmission:
     image: linuxserver/transmission:3.00-r8-ls150
     container_name: transmission
     environment:
-      - PUID=1000
+      - PUID="${UID}"
       - PGID=1000
       - TZ=Etc/UTC
-      - USER=chris
-      - PASS=abcd1234
+      - USER=${TRANSMISSION_USER}
+      - PASS=${TRANSMISSION_PWD}
     env_file:
       - .env
     volumes:

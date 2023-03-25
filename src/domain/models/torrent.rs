@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::algorithm::generate_display_name;
 use crate::domain::config::{delay_reaping_tasks, get_torrent_dir};
@@ -165,7 +166,7 @@ impl TaskMonitor for TorrentTask {
             error_string: self.error_string.clone(),
             rate_details: format!("{}/{}", self.rate_download, self.rate_upload),
             process_details: format!(
-                "Peers: {} connected ({}/{})",
+                "Peers: {} connected (\u{2193}{}/\u{2191}{})",
                 self.peers_connected, self.peers_sending_to_us, self.peers_getting_from_us
             ),
             task_type: TaskType::Transmission,
@@ -178,13 +179,23 @@ impl TaskMonitor for TorrentTask {
 
     fn get_seconds_since_finished(&self) -> i64 {
         if self.download_finished {
-            self.done_date
+            let now_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs()
+                .try_into()
+                .unwrap_or(self.done_date + delay_reaping_tasks() + 1);
+
+            now_secs - self.done_date
         } else {
             0
         }
     }
 
     fn terminate(&self) {
+        // could simply do TransmissionDaemon::new().remove(self.get_key()) but prefer to
+        // avoid a hard coded dependency on TransmissionDaemon, prefer to receive an instance
+        // of MediaDownloader and call remove(self.get_key()) on that.
         todo!()
     }
 
@@ -193,10 +204,11 @@ impl TaskMonitor for TorrentTask {
     }
 
     async fn cleanup(&self, store: &Storer, force_delete: bool) -> Result<()> {
-        if !force_delete
-            && (!self.has_finished_downloading()
-                || self.get_seconds_since_finished() < delay_reaping_tasks())
-        {
+        // TODO: we don't delay cleanup because we want to make the downloaded video
+        // available asap, however that means the completed task never appears on the task
+        // list. Investigate sending a notification over the web socket when a task completes
+        // and avoid delaying cleanup.
+        if !force_delete && !self.has_finished_downloading() {
             return Err(anyhow!("download hasn't finished yet"));
         }
 

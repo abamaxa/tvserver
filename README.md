@@ -15,19 +15,29 @@ Architecturally, it consists of 3 components:
 - The server, which is a daemon that hosts the player and remote control apps and handles downloading 
 and streaming movies; 
 
-It tested on macOS and Ubuntu Linux.
+It has been tested on macOS and Debian Bullseye.
 
 ## Setup
 
-The easiest way to get started is with docker compose:
+The easiest way to get started is with docker compose. 
+
+First you must create a file called `.env` in the root of the source directory that will contain
+values for the required environment variables. There is a sample `.env` file called `env.sample`
+that contains suitable values for running docker compose on macOS,  except for the `GOOGLE_KEY`, 
+which you must supply yourself ([see below](#obtaining-a-google-api-key)).
 
 ```shell
+$ cp env.sample .env
+$ echo GOOGLE_KEY=YOUR_GOOGLE_KEY >> .env
+$ export UID
 $ docker compose up
 ```
 NB YouTube search will not work until a key for the Google API is provided through the 
-`GOOGLE_KEY` environment variable - see below.
+`GOOGLE_KEY` environment variable - ([see below](#obtaining-a-google-api-key)).
 
 ## Configuration
+
+The tvserver daemon is configured through the following environment variables
 
 | Environment Variable | Description                                                                        |
 |----------------------|------------------------------------------------------------------------------------|
@@ -47,6 +57,14 @@ NB YouTube search will not work until a key for the Google API is provided throu
 A Google account is required to create an API Key. Instructions for obtaining the key are
 described here: https://support.google.com/googleapi/answer/6158862?hl=en
 
+## Usage
+
+Once the TV server daemon is up and running, load the Player page onto your TV with your TV browser 
+by navigating to following page `http://hostname/player`, where `hostname` is the name of the 
+computer running the TV server daemon.
+
+Then, from your mobile phone's browser, navigate to `http://hostname` to load the remote control app.
+
 ## Clients
 
 For simplicity, compiled versions of the apps are available in the `clients` directory.
@@ -65,10 +83,6 @@ following in client source directory:
 ```shell
 client_src/tvremote $ yarn run export
 ```
-
-## File Formats
-
-All AVI files a re-formatted to MP4, as few, if any, browsers support AVI.
 
 ## VLC Player
 
