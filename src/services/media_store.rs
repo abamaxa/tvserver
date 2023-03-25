@@ -34,6 +34,16 @@ impl MediaStore {
             || name.ends_with(".jpg")
             || name.ends_with(".png")
     }
+
+    async fn rename_or_copy_and_delete(src: &Path, destination: &Path) -> io::Result<()> {
+        match fs::rename(src, destination).await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                fs::copy(src, destination).await?;
+                fs::remove_file(src).await
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -75,13 +85,15 @@ impl MediaStorer for MediaStore {
             new_path.to_str().unwrap_or_default()
         );
 
-        fs::rename(path, new_path).await
+        Self::rename_or_copy_and_delete(path, &new_path).await
     }
 
     async fn rename(&self, current: &str, new_path: &str) -> io::Result<()> {
         tracing::debug!("rename file {} to {}", current, new_path);
+        let src = self.as_path("", current);
+        let destination = self.as_path("", new_path);
 
-        fs::rename(self.as_path("", current), self.as_path("", new_path)).await
+        Self::rename_or_copy_and_delete((&src).as_ref(), (&destination).as_ref()).await
     }
 
     async fn delete(&self, path: &str) -> io::Result<bool> {
