@@ -15,6 +15,8 @@ Architecturally, it consists of 3 components:
 - The server, which is a daemon that hosts the player and remote control apps and handles downloading 
 and streaming movies; 
 
+![Overview](docs/overview.svg)
+
 It has been tested on macOS and Debian Bullseye.
 
 ## Setup
