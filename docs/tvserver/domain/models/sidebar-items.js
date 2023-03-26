@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":[["AVAILABLE_CONVERSIONS",""]],"struct":[["Conversion",""],["DownloadableItem",""],["FileDetails",""],["Id",""],["Item",""],["SearchResults",""],["Snippet",""],["TorrentTask",""],["VideoEntry",""],["YoutubeResponse",""]],"type":[["TaskListResults",""]]};

@@ -15,6 +15,8 @@ Architecturally, it consists of 3 components:
 - The server, which is a daemon that hosts the player and remote control apps and handles downloading 
 and streaming movies; 
 
+![Overview](docs/images/overview.svg)
+
 It has been tested on macOS and Debian Bullseye.
 
 ## Setup
@@ -89,3 +91,48 @@ client_src/tvremote $ yarn run export
 VLC has support for a very broad range of video and audio codecs.
 As a fallback, can player files with VLC on the monitor/TV connected to the box running the 
 server. 
+
+## Remote Control
+
+The remote control is a web app the runs in the browser of a mobile phone
+and provides the following functionality:
+
+### List of available videos
+
+### Videos are organised into collections (folders).
+
+<img src="docs/images/video-list.png" alt="Video List" width="585"/>
+
+### Clicking on a video brings up a menu of available options
+
+<img src="docs/images/video-clicked.png" alt="Click Video" width="585"/>
+
+### For instance the option to rename or move a video
+
+<img src="docs/images/video-rename.png" alt="Rename Video" width="585"/>
+
+### Or to create a new video by applying one of a list of available transformations 
+
+<img src="docs/images/video-convert.png" alt="Convert Video" width="585"/>
+
+The user is invited to confirm the conversion
+
+<img src="docs/images/video-confirm-convert.png" alt="Confirm Converting Video" width="585"/>
+
+### New Videos can be found by searching and downloading them from YouTube
+
+<img src="docs/images/search-youtube.png" alt="Search YouTube" width="585"/>
+
+And PirateBay
+
+<img src="docs/images/search-piratebay.png" alt="Search Piratebay" width="585"/>
+
+Clicking brings up a dialog asking to confirm before downloading.
+
+<img src="docs/images/search-download.png" alt="Confirm Download" width="585"/>
+
+### The final tab provides a list of running tasks, e.g. downloads and conversions in progress.
+
+<img src="docs/images/tasks.png" alt="Task List" width="585"/>
+
+
