@@ -1,3 +1,9 @@
+//! # TVServer
+//!
+//! `TVServer` is the daemon server that provides a REST API for the remote control and more....
+//!
+//! Currently its very lightly documented as it is very much a work in progress.
+
 extern crate core;
 
 pub mod adaptors;

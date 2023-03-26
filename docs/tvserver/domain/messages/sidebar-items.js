@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":[["RemoteMessage",""]],"struct":[["ClientLogMessage",""],["Command",""],["ConversionRequest",""],["DownloadRequest",""],["LocalCommand",""],["PlayRequest",""],["PlayerList",""],["RenameRequest",""],["Response",""],["TaskState",""]]};

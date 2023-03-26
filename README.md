@@ -15,7 +15,7 @@ Architecturally, it consists of 3 components:
 - The server, which is a daemon that hosts the player and remote control apps and handles downloading 
 and streaming movies; 
 
-![Overview](docs/overview.svg)
+![Overview](docs/images/overview.svg)
 
 It has been tested on macOS and Debian Bullseye.
 
@@ -91,3 +91,42 @@ client_src/tvremote $ yarn run export
 VLC has support for a very broad range of video and audio codecs.
 As a fallback, can player files with VLC on the monitor/TV connected to the box running the 
 server. 
+
+## Remote Control
+
+The remote control is a web app the runs in the browser of a mobile phone
+and provides the following functionality:
+
+### List of available videos
+
+### Videos are organised into collections (folders).
+
+![Video List](docs/images/video-list.png)
+
+### Clicking on a video brings up a menu of available options
+
+![Click Video](docs/images/video-clicked.png)
+
+### For instance the option to rename or move a video
+
+![Rename Video](docs/images/video-rename.png)
+
+### Or to create a new video by applying one of a list of available transformations 
+
+![Convert Video](docs/images/video-convert.png)
+
+![Confirm Converting Video](docs/images/video-confirm-convert.png)
+
+### New Videos can be found by searching and downloading them from YouTube
+
+![Search YouTube](docs/images/search-youtube.png)
+
+![Search Piratebay](docs/images/search-piratebay.png)
+
+![Confirm Download](docs/images/search-download.png)
+
+### The final tab provides a list of running tasks, e.g. downloads and conversions in progress.
+
+![Task List](docs/images/tasks.png)
+
+

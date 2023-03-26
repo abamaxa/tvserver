@@ -1,3 +1,9 @@
+//! # MediaStore
+//!
+//! `MediaStore` is responsible to storing and retrieving media from disk, as opposed
+//! to some sort of cloud storage like AWS S3.
+//!
+//! provides an implementation of MediaStorer.
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::{fs, io};

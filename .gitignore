@@ -12,3 +12,5 @@ Cargo.lock
 .transmission
 /.idea/
 client_src
+docs/.lock
+.DS_Store

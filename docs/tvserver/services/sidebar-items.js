@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":[["stream_video",""]],"struct":[["MediaStore",""],["Monitor",""],["PirateClient",""],["RemotePlayerService",""],["SearchEngine",""],["SearchService",""],["TaskManager",""],["TransmissionDaemon",""],["VLCPlayer",""],["YoutubeClient",""]],"type":[["PirateFetcher",""],["SearchEngineMap",""],["YoutubeFetcher",""],["YoutubeResult",""]]};
