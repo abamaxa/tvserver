@@ -101,32 +101,38 @@ and provides the following functionality:
 
 ### Videos are organised into collections (folders).
 
-![Video List](docs/images/video-list.png)
+<img src="docs/images/video-list.png" alt="Video List" width="585"/>
 
 ### Clicking on a video brings up a menu of available options
 
-![Click Video](docs/images/video-clicked.png)
+<img src="docs/images/video-clicked.png" alt="Click Video" width="585"/>
 
 ### For instance the option to rename or move a video
 
-![Rename Video](docs/images/video-rename.png)
+<img src="docs/images/video-rename.png" alt="Rename Video" width="585"/>
 
 ### Or to create a new video by applying one of a list of available transformations 
 
-![Convert Video](docs/images/video-convert.png)
+<img src="docs/images/video-convert.png" alt="Convert Video" width="585"/>
 
-![Confirm Converting Video](docs/images/video-confirm-convert.png)
+The user is invited to confirm the conversion
+
+<img src="docs/images/video-confirm-convert.png" alt="Confirm Converting Video" width="585"/>
 
 ### New Videos can be found by searching and downloading them from YouTube
 
-![Search YouTube](docs/images/search-youtube.png)
+<img src="docs/images/search-youtube.png" alt="Search YouTube" width="585"/>
 
-![Search Piratebay](docs/images/search-piratebay.png)
+And PirateBay
 
-![Confirm Download](docs/images/search-download.png)
+<img src="docs/images/search-piratebay.png" alt="Search Piratebay" width="585"/>
+
+Clicking brings up a dialog asking to confirm before downloading.
+
+<img src="docs/images/search-download.png" alt="Confirm Download" width="585"/>
 
 ### The final tab provides a list of running tasks, e.g. downloads and conversions in progress.
 
-![Task List](docs/images/tasks.png)
+<img src="docs/images/tasks.png" alt="Task List" width="585"/>
 
 
