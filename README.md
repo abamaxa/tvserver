@@ -4,7 +4,7 @@
 
 TV Server 
 - provides ad free viewing of videos published on the public internet.
-- connects Youtube and PirateBay to your TV and lets you control them with your mobile phone.
+- connects Youtube to your TV and lets you control them with your mobile phone.
 - is a thin wrapper around [FFmpeg](https://ffmpeg.org/), 
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [Transmission](https://transmissionbt.com/)
 
@@ -49,7 +49,6 @@ The tvserver daemon is configured through the following environment variables
 | TRANSMISSION_URL     | URL to access the Transmission HTTP interface                                      |
 | TRANSMISSION_USER    | Username to access the Transmission HTTP interface                                 |
 | TRANSMISSION_PWD     | Password to access the Transmission HTTP interface                                 |
-| PIRATE_BAY_PROXY_URL | URL of the Pirate Bay proxy site to search, defaults to `https://thehiddenbay.com` |
 | TORRENT_DIR          | The directory where torrent files are saved.                                       |
 
 `*` Required
@@ -71,7 +70,7 @@ Then, from your mobile phone's browser, navigate to `http://hostname` to load th
 
 For simplicity, compiled versions of the apps are available in the `clients` directory.
 
-The full source for the clients are available as submodules that can be downloaded using
+The source for the clients is available as submodules that can be downloaded using
 the following commands:
 
 ```shell
@@ -89,12 +88,11 @@ client_src/tvremote $ yarn run export
 ## VLC Player
 
 VLC has support for a very broad range of video and audio codecs.
-As a fallback, can player files with VLC on the monitor/TV connected to the box running the 
-server. 
+As a fallback, VLC can be used to play videos to a monitor to the server. 
 
 ## Remote Control
 
-The remote control is a web app the runs in the browser of a mobile phone
+The remote control is a web app that runs in the browser of a mobile phone
 and provides the following functionality:
 
 ### List of available videos
@@ -122,10 +120,6 @@ The user is invited to confirm the conversion
 ### New Videos can be found by searching and downloading them from YouTube
 
 <img src="docs/images/search-youtube.png" alt="Search YouTube" width="585"/>
-
-And PirateBay
-
-<img src="docs/images/search-piratebay.png" alt="Search Piratebay" width="585"/>
 
 Clicking brings up a dialog asking to confirm before downloading.
 
