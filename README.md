@@ -71,7 +71,7 @@ Then, from your mobile phone's browser, navigate to `http://hostname` to load th
 
 For simplicity, compiled versions of the apps are available in the `clients` directory.
 
-The full source for the clients are available as submodules that can be downloaded using
+The source for the clients is available as submodules that can be downloaded using
 the following commands:
 
 ```shell
@@ -89,12 +89,11 @@ client_src/tvremote $ yarn run export
 ## VLC Player
 
 VLC has support for a very broad range of video and audio codecs.
-As a fallback, can player files with VLC on the monitor/TV connected to the box running the 
-server. 
+As a fallback, VLC can be used to play videos to a monitor to the server. 
 
 ## Remote Control
 
-The remote control is a web app the runs in the browser of a mobile phone
+The remote control is a web app that runs in the browser of a mobile phone
 and provides the following functionality:
 
 ### List of available videos
