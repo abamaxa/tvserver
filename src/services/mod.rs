@@ -10,7 +10,7 @@ mod vlc_player;
 mod youtube;
 
 pub use media_store::MediaStore;
-pub use media_stream::stream_video;
+pub use media_stream::{get_range, stream_video};
 pub use monitor::Monitor;
 pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use remote_player::RemotePlayerService;

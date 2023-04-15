@@ -121,3 +121,28 @@ async fn wait_for_socket_to_close(
 
     tracing::info!("Websocket context {} destroyed", who);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct TestMessage {
+        content: String,
+    }
+
+    #[tokio::test]
+    async fn test_remote_browser_player_send() {
+        let (tx, mut rx) = channel(100);
+        let player = RemoteBrowserPlayer { in_tx: tx };
+        let message = RemoteMessage::Command {
+            command: String::from("test message"),
+        };
+        let result = player.send(message.clone()).await;
+        assert_eq!(result, Ok(StatusCode::OK));
+        let received = rx.recv().await.unwrap();
+        let expected = serde_json::to_vec(&message).unwrap();
+        assert_eq!(received, expected);
+    }
+}

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-mod algorithm;
+pub mod algorithm;
 pub mod config;
 mod enums;
 pub mod messages;

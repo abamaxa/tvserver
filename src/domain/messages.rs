@@ -2,7 +2,7 @@ use crate::domain::traits::Storer;
 use crate::domain::{SearchEngineType, TaskType};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RemoteMessage {
     Command { command: String },
     Play { url: String },
@@ -36,6 +36,22 @@ impl PlayRequest {
         } else {
             format!("/stream/{}/{}", self.collection, self.video)
         };
+
+        /*let url: String = if self.collection.is_empty() {
+            format!("http://coco.abamaxa.com:8080/stream/{}  ", self.video)
+        } else {
+            format!(
+                "http://coco.abamaxa.com:8080/stream/{}/{}",
+                self.collection, self.video
+            )
+        };*/
+
+        /*
+        let url: String = if self.collection.is_empty() {
+            format!("http://coco.abamaxa.com:8010/{}  ", self.video)
+        } else {
+            format!("http://coco.abamaxa.com:8010/{}/{}", self.collection, self.video)
+        };*/
 
         Command {
             remote_address: self.remote_address.clone(),

@@ -1,23 +1,19 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::adaptors::RemoteBrowserPlayer;
+use crate::domain::algorithm::{Conversion, AVAILABLE_CONVERSIONS};
 use crate::domain::messages::{
     ClientLogMessage, Command, ConversionRequest, DownloadRequest, LocalCommand, PlayRequest,
     PlayerList, RenameRequest, Response,
 };
-use crate::domain::models::{
-    Conversion, SearchResults, TaskListResults, VideoEntry, AVAILABLE_CONVERSIONS,
-};
+use crate::domain::models::{SearchResults, TaskListResults, VideoEntry};
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
-use crate::services::{
-    stream_video, RemotePlayerService, SearchService, TaskManager, TransmissionDaemon,
-};
+use crate::services::{RemotePlayerService, SearchService, TaskManager, TransmissionDaemon};
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
     extract::{ConnectInfo, Path, Query, State},
-    headers::HeaderMap,
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -91,7 +87,7 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/remote/control", post(remote_command))
         .route("/remote/play", post(remote_play))
         .route("/remote/ws", get(ws_handler))
-        .route("/stream/*path", get(video))
+        //.route("/stream/*path", get(video))
         .route("/search/pirate", get(pirate_search))
         .route("/search/youtube", get(youtube_search))
         .route("/conversion", get(list_conversions))
@@ -241,6 +237,7 @@ pub async fn ws_handler(
     response
 }
 
+/*
 #[debug_handler]
 async fn video(
     State(state): State<SharedState>,
@@ -250,7 +247,7 @@ async fn video(
     let video_file = state.store.as_path("", &video_path);
 
     stream_video(&video_file, headers).await
-}
+}*/
 
 #[debug_handler]
 async fn remote_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
