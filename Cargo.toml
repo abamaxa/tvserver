@@ -27,15 +27,17 @@ tokio-util = "0.7.4"
 tower-http = { version = "0.4.0", features = ["fs", "trace", "cors"] }
 tower = { version = "0.4.10", features = ["util"] }
 tracing = "0.1.35"
-tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.16", default-features = false, features = ["env-filter", "fmt"] }
 transmission-rpc = "0.4.1"
 urlencoding = "2.1.2"
 mockall = "0.11.3"
 regex = "1.7.1"
 titlecase = "2.2.1"
+axum-extra = { version = "0.7.2", features = ["async-read-body"] }
+httparse = "1.8.0"
 
-[patch.crates-io]
-http = {git = "https://github.com/abamaxa/http"}
+#[patch.crates-io]
+#http = {git = "https://github.com/abamaxa/http"}
 
 [profile.release]
 strip = "debuginfo"

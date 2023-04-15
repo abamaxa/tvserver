@@ -1,15 +1,115 @@
-use axum::http::header::HeaderName;
+use crate::domain::config::get_movie_dir;
+use futures::StreamExt;
+use std::io;
+use std::io::SeekFrom;
+use std::path::PathBuf;
+use tokio::fs::File as TokioFile;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio_util::codec::{BytesCodec, FramedRead};
+
+pub async fn stream_video(
+    stream: &mut tokio::net::TcpStream,
+    video_name: &str,
+    start: u64,
+    mut end: u64,
+) {
+    let file_path = PathBuf::from(get_movie_dir()).join(video_name);
+    if !file_path.exists() {
+        let response = b"HTTP/1.1 404 Not Found\r\n\r\n";
+        let _ = stream.write_all(response).await;
+        return;
+    }
+
+    let mut file = match TokioFile::open(file_path).await {
+        Ok(file) => file,
+        Err(_) => {
+            let response = b"HTTP/1.1 500 Internal Server Error\r\n\r\n";
+            let _ = stream.write_all(response).await;
+            return;
+        }
+    };
+
+    let file_size = match file.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => {
+            let response = b"HTTP/1.1 500 Internal Server Error\r\n\r\n";
+            let _ = stream.write_all(response).await;
+            return;
+        }
+    };
+
+    if end == 0 {
+        end = file_size - 1;
+    }
+
+    file.seek(SeekFrom::Start(start)).await.unwrap();
+
+    let response = format!(
+        "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nContent-Type: video/mp4\r\n\r\n",
+        start, end, file_size, 1 + end - start
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+
+    if let Err(e) = copy_file_to_stream_in_chunks(file, stream, 0x200000).await {
+        println!("Streaming error: {}", e.to_string());
+    }
+}
+
+pub fn get_range(req: &httparse::Request) -> (u64, u64) {
+    let range = req
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("range"));
+
+    let (start, end) = match range {
+        Some(range) => {
+            let range_value = String::from_utf8(range.value.to_vec()).unwrap();
+            let range_str = range_value
+                .trim_start_matches("bytes=")
+                .splitn(2, '-')
+                .collect::<Vec<&str>>();
+            let start: u64 = range_str[0].parse().unwrap();
+            let end: u64 = range_str.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            (start, end)
+        }
+        None => (0, 0),
+    };
+
+    (start, end)
+}
+
+async fn copy_file_to_stream_in_chunks(
+    file: TokioFile,
+    stream: &mut tokio::net::TcpStream,
+    buffer_size: usize,
+) -> io::Result<()> {
+    let framed_read = FramedRead::with_capacity(file, BytesCodec::new(), buffer_size);
+
+    let mut chunks = framed_read.map(Result::unwrap);
+
+    while let Some(chunk) = chunks.next().await {
+        if let Err(e) = stream.write_all(chunk.as_ref()).await {
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+/*use axum::http::header::HeaderName;
 use axum::{
     body::StreamBody,
     http::{header, StatusCode},
     response::{AppendHeaders, IntoResponse},
 };
+use axum_extra::body::AsyncReadBody;
 use std::io::{self, SeekFrom};
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncRead, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 pub async fn stream_video(video_file: &str, headers: header::HeaderMap) -> impl IntoResponse {
-    const BUFFER_SIZE: usize = 0x100000; // 1 megabyte
+    //const BUFFER_SIZE: usize = 0x100000; // 1 megabyte
+    const BUFFER_SIZE: usize = 0x200000;
 
     let file_parts: Vec<&str> = video_file.rsplitn(2, '/').collect();
     let file_name = String::from(file_parts[0]);
@@ -34,6 +134,16 @@ pub async fn stream_video(video_file: &str, headers: header::HeaderMap) -> impl 
         return Err((StatusCode::BAD_REQUEST, "corrupt file".to_string()));
     }
 
+    if stream_from >= file_size {
+        return Err((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!(
+                "requested read from {} but file is {} bytes long",
+                stream_from, file_size
+            ),
+        ));
+    }
+
     if stream_from > 0 {
         match file.seek(SeekFrom::Start(stream_from)).await {
             Ok(o) => o,
@@ -42,19 +152,14 @@ pub async fn stream_video(video_file: &str, headers: header::HeaderMap) -> impl 
     }
 
     if stream_to == 0 {
-        // stream_to = file_size - 1;
-        let buf_size = BUFFER_SIZE as u64;
-        stream_to = if stream_from + buf_size < file_size {
-            stream_from + buf_size
-        } else {
-            file_size - 1
-        };
+        stream_to = file_size - 1;
     }
 
     // convert the `AsyncRead` into a `Stream`
     let stream = ReaderStream::with_capacity(file, BUFFER_SIZE);
     // convert the `Stream` into an `axum::body::HttpBody`
     let body = StreamBody::new(stream);
+    //let body = AsyncReadBody::new(file);
 
     // Sadly we can't use the builtin in header names as they are all lower case, which is the
     // standard for HTTP2. However, this HTTP/1.1 server has a Samsung TV as a client with a built
@@ -68,37 +173,26 @@ pub async fn stream_video(video_file: &str, headers: header::HeaderMap) -> impl 
     let content_range = HeaderName::from_static_preserve_case("Content-Range");
     let accept_ranges = HeaderName::from_static_preserve_case("Accept-Ranges");
 
-    if !found_range || (stream_to - stream_from) >= (file_size - 1) {
-        let headers = AppendHeaders([
-            (content_type, "video/mp4".to_string()),
-            (content_length, file_size.to_string()),
-            (
-                content_disposition,
-                format!("attachment; filename=\"{}\"", file_name),
-            ),
-            (
-                content_range,
-                format!("bytes {}-{}/{}", stream_from, stream_to, file_size),
-            ),
-        ]);
-
-        return Ok((StatusCode::OK, headers, body));
-    }
-
     let headers = AppendHeaders([
         (accept_ranges, "bytes".to_string()),
         (content_type, "video/mp4".to_string()),
+        (content_length, format!("{}", 1 + stream_to - stream_from)),
         (
             content_range,
             format!("bytes {}-{}/{}", stream_from, stream_to, file_size),
         ),
-        (
-            content_disposition,
-            format!("attachment; filename=\"{}\"", file_name),
-        ),
+        // (
+        //     content_disposition,
+        //     format!("attachment; filename=\"{}\"", file_name),
+        // ),
     ]);
 
-    Ok((StatusCode::PARTIAL_CONTENT, headers, body))
+    let code = match found_range {
+        true => StatusCode::PARTIAL_CONTENT,
+        _ => StatusCode::OK,
+    };
+
+    Ok((code, headers, body))
 }
 
 fn get_range(headers: header::HeaderMap) -> (bool, u64, u64) {
@@ -107,6 +201,8 @@ fn get_range(headers: header::HeaderMap) -> (bool, u64, u64) {
     let mut found_range = false;
 
     for (k, v) in headers.iter() {
+        println!("{} - {}", k, v.to_str().unwrap_or("???"));
+
         if k != "range" {
             continue;
         }
@@ -263,4 +359,4 @@ mod tests {
 
         Ok(())
     }
-}
+}*/
