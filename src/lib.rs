@@ -53,7 +53,7 @@ pub async fn run() -> anyhow::Result<()> {
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::default().include_headers(true)),
+                .make_span_with(DefaultMakeSpan::default().include_headers(false)),
         );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
