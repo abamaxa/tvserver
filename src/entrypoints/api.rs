@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::adaptors::RemoteBrowserPlayer;
@@ -91,7 +92,7 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/remote/control", post(remote_command))
         .route("/remote/play", post(remote_play))
         .route("/remote/ws", get(ws_handler))
-        .route("/stream/*path", get(video))
+        .route("/alt-stream/*path", get(video))
         .route("/search/pirate", get(pirate_search))
         .route("/search/youtube", get(youtube_search))
         .route("/conversion", get(list_conversions))
@@ -131,6 +132,13 @@ async fn tasks_delete(state: State<SharedState>, params: Path<(TaskType, String)
 async fn tasks_list(state: State<SharedState>) -> impl IntoResponse {
     let mut tasks = state.search.get_task_states().await;
     tasks.extend_from_slice(&state.task_manager.get_current_state().await);
+    tasks.sort_by(|a, b| {
+        let ord = a.display_name.cmp(&b.display_name);
+        match ord {
+            Ordering::Equal => a.key.cmp(&b.key),
+            _ => ord,
+        }
+    });
     Json(TaskListResults::success(tasks))
 }
 
