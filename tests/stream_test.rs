@@ -27,7 +27,7 @@ async fn test_video_stream() -> Result<()> {
     let client = reqwest::Client::new();
 
     let response = client
-        .get("http://localhost:57186/stream/test.mp4")
+        .get("http://localhost:57186/alt-stream/test.mp4")
         .header(RANGE, "bytes=0-100")
         .send()
         .await?;
