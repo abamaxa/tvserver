@@ -49,8 +49,12 @@ pub async fn run() -> anyhow::Result<()> {
     let app = register(Arc::new(context))
         .nest_service("/", ServeDir::new(get_client_path("app")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
+        .nest_service("/stream", ServeDir::new(get_movie_dir()))
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()));
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::default().include_headers(false)),
+        );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     tracing::info!("listening on {}", addr);
