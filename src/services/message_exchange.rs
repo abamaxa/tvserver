@@ -263,14 +263,17 @@ mod tests {
     }
 
     struct MockRemotePlayer {
-        address: SocketAddr,
+        _address: SocketAddr,
         sender: Sender<RemoteMessage>,
     }
 
     impl MockRemotePlayer {
         fn new(address: SocketAddr) -> Arc<Self> {
             let (sender, _) = channel::<RemoteMessage>(100);
-            Arc::new(Self { address, sender })
+            Arc::new(Self {
+                _address: address,
+                sender,
+            })
         }
     }
 
