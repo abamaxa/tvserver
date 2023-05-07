@@ -3,7 +3,9 @@ mod common;
 use crate::common::{get_media_store, get_pirate_search, get_task_manager, get_youtube_search};
 use anyhow::Result;
 use std::collections::HashMap;
-use tvserver::{domain::messages::Response, entrypoints, services::RemotePlayerService};
+use std::net::SocketAddr;
+use std::str::FromStr;
+use tvserver::{domain::messages::Response, entrypoints, services::MessageExchange};
 
 #[tokio::test]
 async fn test_local_play() -> Result<()> {
@@ -12,7 +14,7 @@ async fn test_local_play() -> Result<()> {
     let context = entrypoints::Context::from(
         get_media_store(),
         search,
-        RemotePlayerService::new(),
+        MessageExchange::new(),
         Some(common::get_player()),
         get_task_manager(),
     );
@@ -27,7 +29,7 @@ async fn test_local_play() -> Result<()> {
     map.insert("remote_address", "");
 
     let body = client
-        .post("http://localhost:57181/vlc/play")
+        .post("http://localhost:57181/api/vlc/play")
         .json(&map)
         .send()
         .await?
@@ -44,9 +46,13 @@ async fn test_local_play() -> Result<()> {
 
 #[tokio::test]
 async fn test_remote_play() -> Result<()> {
-    let mut remote_player = RemotePlayerService::new();
+    let remote_player = MessageExchange::new();
 
-    remote_player.add(String::new(), common::get_remote_player());
+    let key = SocketAddr::from_str("0.0.0.0:456").unwrap();
+
+    remote_player
+        .add_player(key, common::get_remote_player())
+        .await;
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
@@ -68,7 +74,7 @@ async fn test_remote_play() -> Result<()> {
     map.insert("remote_address", "");
 
     let body = client
-        .post("http://localhost:57182/remote/play")
+        .post("http://localhost:57182/api/remote/play")
         .json(&map)
         .send()
         .await?

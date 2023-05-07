@@ -32,6 +32,12 @@ impl SearchEngine {
     }
 }
 
+impl From<SearchEngineMap> for SearchService {
+    fn from(engines: SearchEngineMap) -> Self {
+        Self { engines }
+    }
+}
+
 impl SearchService {
     pub fn new(spawner: Spawner) -> Self {
         let google_key = get_google_key();
@@ -48,10 +54,6 @@ impl SearchService {
             (Torrent, SearchEngine::from(pirate_bay, torrents)),
         ]);
 
-        Self { engines }
-    }
-
-    pub fn from(engines: SearchEngineMap) -> Self {
         Self { engines }
     }
 

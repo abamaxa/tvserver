@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use axum::http::StatusCode;
 use mockall::automock;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 /*
 The following are higher level traits that provide polymorphism
@@ -40,8 +41,6 @@ pub trait MediaStorer: Send + Sync {
     async fn rename(&self, current: &str, new_name: &str) -> io::Result<()>;
     async fn delete(&self, path: &str) -> io::Result<bool>;
     fn as_path(&self, collection: &str, video: &str) -> String;
-
-    async fn convert_to_mp4(&self, path: &Path) -> anyhow::Result<bool>;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
@@ -73,9 +72,11 @@ pub trait TextFetcher: Send + Sync {
 /// that data. The interface is parameterized by the type of struct to return,
 /// with much implement the DeserializeOwned trait (e.g. by deriving serde Deserialize)
 #[async_trait]
-pub trait JsonFetcher<T: DeserializeOwned>: Send + Sync {
-    async fn get_json(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<T>;
+pub trait JsonFetcher<'a, T: DeserializeOwned, Q: Serialize>: Send + Sync {
+    async fn fetch(&self, url: &str, query: &'a Q) -> anyhow::Result<T>;
 }
+
+// &[(&str, &str)]
 
 /// Interface to control the browser based video player via a websocket.
 #[automock]

@@ -4,7 +4,8 @@ use crate::common::{get_media_store, get_pirate_search, get_task_manager};
 use anyhow::Result;
 use reqwest::StatusCode;
 use std::collections::HashMap;
-use tvserver::{domain::messages::Response, entrypoints::Context, services::RemotePlayerService};
+use tvserver::services::MessageExchange;
+use tvserver::{domain::messages::Response, entrypoints::Context};
 
 #[tokio::test]
 async fn test_pirate_download() -> Result<()> {
@@ -13,7 +14,7 @@ async fn test_pirate_download() -> Result<()> {
     let context = Context::from(
         get_media_store(),
         searcher,
-        RemotePlayerService::new(),
+        MessageExchange::new(),
         None,
         get_task_manager(),
     );
@@ -28,7 +29,7 @@ async fn test_pirate_download() -> Result<()> {
     map.insert("name", "test");
 
     let body = client
-        .post("http://localhost:57185/tasks")
+        .post("http://localhost:57185/api/tasks")
         .json(&map)
         .send()
         .await?
@@ -43,7 +44,7 @@ async fn test_pirate_download() -> Result<()> {
     map.insert("engine", "doesn't exist");
 
     let response = client
-        .post("http://localhost:57185/tasks")
+        .post("http://localhost:57185/api/tasks")
         .json(&map)
         .send()
         .await?;

@@ -5,8 +5,8 @@ use anyhow::Result;
 use common::get_pirate_search;
 use reqwest::{header::RANGE, StatusCode};
 use std::sync::Arc;
-use tvserver::services::MediaStore;
-use tvserver::{entrypoints::Context, services::RemotePlayerService};
+use tvserver::entrypoints::Context;
+use tvserver::services::{MediaStore, MessageExchange};
 
 #[tokio::test]
 async fn test_video_stream() -> Result<()> {
@@ -14,20 +14,14 @@ async fn test_video_stream() -> Result<()> {
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::from(
-        store,
-        searcher,
-        RemotePlayerService::new(),
-        None,
-        get_task_manager(),
-    );
+    let context = Context::from(store, searcher, MessageExchange::new(), None, get_task_manager());
 
     let server = common::create_server(context, 57186).await;
 
     let client = reqwest::Client::new();
 
     let response = client
-        .get("http://localhost:57186/alt-stream/test.mp4")
+        .get("http://localhost:57186/api/alt-stream/test.mp4")
         .header(RANGE, "bytes=0-100")
         .send()
         .await?;

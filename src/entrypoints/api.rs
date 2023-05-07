@@ -12,7 +12,7 @@ use crate::domain::models::{
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
 use crate::services::{
-    stream_video, RemotePlayerService, SearchService, TaskManager, TransmissionDaemon,
+    stream_video, MessageExchange, SearchService, TaskManager, TransmissionDaemon,
 };
 use axum::{
     debug_handler,
@@ -24,7 +24,6 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use tokio::sync::RwLock;
 
 type QueryParams = Query<HashMap<String, String>>;
 type StdResponse = (StatusCode, Json<Response>);
@@ -38,7 +37,8 @@ const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
 pub struct Context {
     store: Storer,
     search: SearchService,
-    remote_players: Arc<RwLock<RemotePlayerService>>,
+    //messenger: Arc<RwLock<MessagingService>>,
+    messenger: MessageExchange,
     player: Option<Arc<dyn Player>>,
     task_manager: Arc<TaskManager>,
 }
@@ -47,14 +47,14 @@ impl Context {
     pub fn from(
         store: Storer,
         search: SearchService,
-        remote_players: RemotePlayerService,
+        messenger: MessageExchange,
         player: Option<Arc<dyn Player>>,
         task_manager: Arc<TaskManager>,
     ) -> Context {
         Context {
             store,
             search,
-            remote_players: Arc::new(RwLock::new(remote_players)),
+            messenger,
             player,
             task_manager,
         }
@@ -77,25 +77,26 @@ pub type SharedState = Arc<Context>;
 
 pub fn register(shared_state: SharedState) -> Router {
     Router::new()
-        .route("/tasks", post(tasks_add))
-        .route("/tasks", get(tasks_list))
-        .route("/tasks/:type/*path", delete(tasks_delete))
-        .route("/log", post(log_client_message))
-        .route("/media", get(list_root_collection))
-        .route("/media/*media", get(list_collection))
-        .route("/media/*media", delete(delete_video))
-        .route("/media/*media", put(rename_video))
-        .route("/media/*media", post(convert_video))
-        .route("/vlc/control", post(local_command))
-        .route("/vlc/play", post(local_play))
-        .route("/remote", get(list_player))
-        .route("/remote/control", post(remote_command))
-        .route("/remote/play", post(remote_play))
-        .route("/remote/ws", get(ws_handler))
-        .route("/alt-stream/*path", get(video))
-        .route("/search/pirate", get(pirate_search))
-        .route("/search/youtube", get(youtube_search))
-        .route("/conversion", get(list_conversions))
+        .route("/api/tasks", post(tasks_add))
+        .route("/api/tasks", get(tasks_list))
+        .route("/api/tasks/:type/*path", delete(tasks_delete))
+        .route("/api/log", post(log_client_message))
+        .route("/api/media", get(list_root_collection))
+        .route("/api/media/*media", get(list_collection))
+        .route("/api/media/*media", delete(delete_video))
+        .route("/api/media/*media", put(rename_video))
+        .route("/api/media/*media", post(convert_video))
+        .route("/api/vlc/control", post(local_command))
+        .route("/api/vlc/play", post(local_play))
+        .route("/api/remote", get(list_player))
+        .route("/api/remote/control", post(remote_command))
+        .route("/api/remote/play", post(remote_play))
+        .route("/api/remote/ws", get(ws_player_handler))
+        .route("/api/control/ws", get(ws_control_handler))
+        .route("/api/alt-stream/*path", get(video))
+        .route("/api/search/pirate", get(pirate_search))
+        .route("/api/search/youtube", get(youtube_search))
+        .route("/api/conversion", get(list_conversions))
         .with_state(shared_state)
 }
 
@@ -229,22 +230,32 @@ async fn log_client_message(Json(payload): Json<ClientLogMessage>) -> impl IntoR
 }
 
 #[debug_handler]
-pub async fn ws_handler(
+pub async fn ws_player_handler(
     state: State<SharedState>,
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let key = addr.to_string();
 
-    tracing::info!("opened websocket from: {}", key);
+    tracing::info!("opened websocket from player: {}", key);
 
-    let (client, response) = RemoteBrowserPlayer::from(ws, addr);
+    let (client, response) = RemoteBrowserPlayer::create(ws, addr, state.messenger.get_sender());
 
-    state
-        .remote_players
-        .write()
-        .await
-        .add(key, Arc::new(client));
+    state.messenger.add_player(addr, Arc::new(client)).await;
+
+    response
+}
+
+pub async fn ws_control_handler(
+    state: State<SharedState>,
+    ws: WebSocketUpgrade,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    tracing::info!("opened websocket from remote control: {}", addr);
+
+    let (client, response) = RemoteBrowserPlayer::create(ws, addr, state.messenger.get_sender());
+
+    state.messenger.add_control(addr, Arc::new(client)).await;
 
     response
 }
@@ -262,7 +273,11 @@ async fn video(
 
 #[debug_handler]
 async fn remote_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
-    RemotePlayerService::execute(&state.remote_players, payload.make_remote_command()).await
+    let key = payload.address();
+    state
+        .messenger
+        .execute(key, payload.make_remote_command())
+        .await
 }
 
 #[debug_handler]
@@ -270,12 +285,15 @@ async fn remote_command(
     State(state): State<SharedState>,
     Json(payload): Json<Command>,
 ) -> StdResponse {
-    RemotePlayerService::execute(&state.remote_players, payload).await
+    state
+        .messenger
+        .execute(payload.address(), payload.message)
+        .await
 }
 
 #[debug_handler]
 async fn list_player(State(state): State<SharedState>) -> (StatusCode, Json<PlayerList>) {
-    let players = PlayerList::new(state.remote_players.read().await.list());
+    let players = PlayerList::new(state.messenger.list_players().await);
     (OK, Json(players))
 }
 

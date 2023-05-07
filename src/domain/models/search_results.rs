@@ -34,8 +34,8 @@ impl<T> SearchResults<T> {
     }
 }
 
-impl DownloadableItem {
-    pub fn from(item: &Item) -> Self {
+impl From<&Item> for DownloadableItem {
+    fn from(item: &Item) -> Self {
         Self {
             title: decode_html_entities(&item.snippet.title).to_string(),
             description: item.snippet.description.clone(),

@@ -1,11 +1,12 @@
-use crate::domain::{
-    models::YoutubeResponse,
-    traits::{JsonFetcher, TextFetcher},
-};
+use crate::domain::config::get_openai_api_key;
+use crate::domain::messages::{ChatGPTRequest, ChatGPTResponse};
+use crate::domain::models::YoutubeResponse;
+use crate::domain::traits::{JsonFetcher, TextFetcher};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::StatusCode;
+use serde::Serialize;
 
 const ACCESS_DENIED_MSG: &str = "Access denied, ensure access tokens have been set";
 
@@ -23,8 +24,8 @@ impl HTTPClient {
 }
 
 #[async_trait]
-impl JsonFetcher<YoutubeResponse> for HTTPClient {
-    async fn get_json(&self, url: &str, query: &[(&str, &str)]) -> Result<YoutubeResponse> {
+impl<'a, Q: Serialize + Sync + Send + 'a> JsonFetcher<'a, YoutubeResponse, Q> for HTTPClient {
+    async fn fetch(&self, url: &str, query: &'a Q) -> anyhow::Result<YoutubeResponse> {
         let response = self
             .client
             .get(url)
@@ -43,6 +44,33 @@ impl JsonFetcher<YoutubeResponse> for HTTPClient {
 }
 
 #[async_trait]
+impl<'a> JsonFetcher<'a, ChatGPTResponse, ChatGPTRequest> for HTTPClient {
+    async fn fetch(&self, url: &str, query: &'a ChatGPTRequest) -> anyhow::Result<ChatGPTResponse> {
+        let api_key = get_openai_api_key();
+
+        let response = self
+            .client
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {}", api_key))
+            .json(query)
+            .send()
+            .await?;
+
+        match response.status() {
+            StatusCode::OK => Ok(response.json::<ChatGPTResponse>().await?),
+            StatusCode::UNAUTHORIZED => Err(anyhow!(ACCESS_DENIED_MSG)),
+            _ => Err(anyhow!(
+                "Error code {}: {:?}",
+                response.status(),
+                response.text().await
+            )),
+        }
+    }
+}
+
+#[async_trait]
 impl TextFetcher for HTTPClient {
     async fn get_text(&self, url: &str) -> Result<String> {
         Ok(self.client.get(url).send().await?.text().await?)
@@ -52,6 +80,8 @@ impl TextFetcher for HTTPClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::messages::ChatGPTMessage;
+    use crate::domain::models::YoutubeResponse;
     use axum::extract::Query;
     use axum::routing::get;
     use axum::{Json, Router};
@@ -101,18 +131,17 @@ mod tests {
 
         let http_server = setup_http_server(app, HOST_ADDR).await;
 
-        let client: &dyn JsonFetcher<YoutubeResponse> = &HTTPClient::new();
+        let client: &dyn JsonFetcher<'_, YoutubeResponse, &[(&str, &str)]> = &HTTPClient::new();
 
-        let result = client
-            .get_json(
-                &format!("http://{}/", HOST_ADDR),
-                &[
-                    ("ETAG_PARAM", ETAG_PARAM),
-                    ("KIND_PARAM", KIND_PARAM),
-                    ("REGION_PARAM", REGION_PARAM),
-                ],
-            )
-            .await?;
+        let query = [
+            ("ETAG_PARAM", ETAG_PARAM),
+            ("KIND_PARAM", KIND_PARAM),
+            ("REGION_PARAM", REGION_PARAM),
+        ];
+
+        let q: &[(&str, &str)] = &query;
+
+        let result = client.fetch(&format!("http://{}/", HOST_ADDR), &q).await?;
 
         http_server.abort();
 
@@ -130,10 +159,10 @@ mod tests {
 
         let http_server = setup_http_server(app, HOST_ADDR).await;
 
-        let client: &dyn JsonFetcher<YoutubeResponse> = &HTTPClient::new();
+        let client: &dyn JsonFetcher<'_, YoutubeResponse, &[(&str, &str)]> = &HTTPClient::new();
 
         let result = client
-            .get_json(&format!("http://{}/", HOST_ADDR), &[])
+            .fetch(&format!("http://{}/", HOST_ADDR), &(&[] as &[(&str, &str)]))
             .await;
 
         http_server.abort();
@@ -153,10 +182,10 @@ mod tests {
 
         let http_server = setup_http_server(app, HOST_ADDR).await;
 
-        let client: &dyn JsonFetcher<YoutubeResponse> = &HTTPClient::new();
+        let client: &dyn JsonFetcher<'_, YoutubeResponse, &[(&str, &str)]> = &HTTPClient::new();
 
         let result = client
-            .get_json(&format!("http://{}/", HOST_ADDR), &[])
+            .fetch(&format!("http://{}/", HOST_ADDR), &(&[] as &[(&str, &str)]))
             .await;
 
         http_server.abort();
@@ -177,6 +206,29 @@ mod tests {
         let result = client.get_text("http://localhost:60232/").await;
 
         assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chatgpt() -> Result<()> {
+        let client: &dyn JsonFetcher<'_, ChatGPTResponse, ChatGPTRequest> = &HTTPClient::new();
+
+        let request = ChatGPTRequest {
+            model: String::from("gpt-4"),
+            messages: vec![ChatGPTMessage {
+                role: "user".to_string(),
+                content: "Hello!".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let results = client
+            .fetch("https://api.openai.com/v1/chat/completions", &request)
+            .await?;
+
+        println!("{:?}", results);
 
         Ok(())
     }

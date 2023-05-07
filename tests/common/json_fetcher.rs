@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use serde::Serialize;
 use tokio::fs;
 use tvserver::domain::models::YoutubeResponse;
 use tvserver::domain::traits::JsonFetcher;
@@ -14,8 +15,8 @@ pub struct MockFetcher {
 }
 
 #[async_trait]
-impl JsonFetcher<YoutubeResponse> for MockFetcher {
-    async fn get_json(&self, _: &str, _: &[(&str, &str)]) -> anyhow::Result<YoutubeResponse> {
+impl<'a, Q: Serialize + Sync + Send + 'a> JsonFetcher<'a, YoutubeResponse, Q> for MockFetcher {
+    async fn fetch(&self, _: &str, _: &'a Q) -> anyhow::Result<YoutubeResponse> {
         match &self.response {
             Some(response) => Ok(response.clone()),
             None => match &self.error {
@@ -26,7 +27,9 @@ impl JsonFetcher<YoutubeResponse> for MockFetcher {
     }
 }
 
-pub async fn get_json_fetcher(fixture: &str) -> Arc<dyn JsonFetcher<YoutubeResponse>> {
+type TestJsonFetcher = Arc<dyn for<'a> JsonFetcher<'a, YoutubeResponse, &'a [(&'a str, &'a str)]>>;
+
+pub async fn get_json_fetcher(fixture: &str) -> TestJsonFetcher {
     let response = Some(results_from_fixture(fixture).await);
     Arc::new(MockFetcher {
         response,

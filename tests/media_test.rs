@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 use tvserver::domain::messages::Response;
-use tvserver::services::MediaStore;
-use tvserver::{entrypoints::Context, services::RemotePlayerService};
+use tvserver::entrypoints::Context;
+use tvserver::services::{MediaStore, MessageExchange};
 
 #[tokio::test]
 async fn test_rename_video() -> Result<()> {
@@ -18,13 +18,7 @@ async fn test_rename_video() -> Result<()> {
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::from(
-        store,
-        searcher,
-        RemotePlayerService::new(),
-        None,
-        get_task_manager(),
-    );
+    let context = Context::from(store, searcher, MessageExchange::new(), None, get_task_manager());
 
     let server = common::create_server(context, 57190).await;
 
@@ -38,7 +32,7 @@ async fn test_rename_video() -> Result<()> {
     params.insert("newName", "collection1/new_name_123.mp4");
 
     let response = client
-        .put("http://localhost:57190/media/collection1/old_name_99.mp4")
+        .put("http://localhost:57190/api/media/collection1/old_name_99.mp4")
         .json(&params)
         .send()
         .await?;
@@ -57,7 +51,7 @@ async fn test_rename_video() -> Result<()> {
     assert!(new_path.exists());
 
     let response = client
-        .delete("http://localhost:57190/media/collection1/new_name_123.mp4")
+        .delete("http://localhost:57190/api/media/collection1/new_name_123.mp4")
         .send()
         .await?;
 

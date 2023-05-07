@@ -28,15 +28,8 @@ impl FileDetails {
         match self.filepath.extension() {
             Some(extension) => matches!(
                 extension.to_str().unwrap_or_default(),
-                "mpeg" | "mpg" | "mp4" | "avi" | "mkv" | "mp3" | "webm"
+                "mpeg" | "mpg" | "mp4" | "avi" | "mkv" | "mp3" | "webm" | "ogg"
             ),
-            None => false,
-        }
-    }
-
-    fn should_convert_to_mp4(&self) -> bool {
-        match self.filepath.extension() {
-            Some(extension) => matches!(extension.to_str().unwrap_or_default(), "avi"),
             None => false,
         }
     }
@@ -74,8 +67,8 @@ pub struct TorrentTask {
     pub display_name: String,
 }
 
-impl TorrentTask {
-    pub fn from(t: &Torrent) -> Self {
+impl From<&Torrent> for TorrentTask {
+    fn from(t: &Torrent) -> Self {
         let download_finished = matches!(
             t.status,
             Some(TorrentStatus::QueuedToSeed) | Some(TorrentStatus::Seeding)
@@ -136,7 +129,9 @@ impl TorrentTask {
             },
         }
     }
+}
 
+impl TorrentTask {
     pub fn has_finished_downloading(&self) -> bool {
         self.download_finished
     }
@@ -218,11 +213,7 @@ impl TaskMonitor for TorrentTask {
                 continue;
             }
 
-            if item.should_convert_to_mp4() {
-                store.convert_to_mp4(&item.filepath).await?;
-            } else {
-                store.move_file(&item.filepath).await?;
-            }
+            store.move_file(&item.filepath).await?;
         }
         Ok(())
     }

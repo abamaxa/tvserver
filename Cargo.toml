@@ -32,7 +32,9 @@ transmission-rpc = "0.4.1"
 urlencoding = "2.1.2"
 mockall = "0.11.3"
 regex = "1.7.1"
+rand = "0.8.5"
 titlecase = "2.2.1"
+serde_with = "3.0.0"
 
 [patch.crates-io]
 http = {git = "https://github.com/abamaxa/http"}

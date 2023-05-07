@@ -4,26 +4,35 @@
 //! to some sort of cloud storage like AWS S3.
 //!
 //! provides an implementation of MediaStorer.
+use crate::domain::config::get_thumbnail_dir;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::{fs, io};
 
-use crate::adaptors::AsyncCommand;
 use crate::domain::models::VideoEntry;
 use crate::domain::traits::MediaStorer;
+use crate::services::video_information::store_video_info;
 
 #[derive(Clone, Debug)]
 pub struct MediaStore {
     root: String,
 }
 
-impl MediaStore {
-    pub fn from(root: &str) -> MediaStore {
+impl From<String> for MediaStore {
+    fn from(root: String) -> MediaStore {
+        MediaStore { root }
+    }
+}
+
+impl From<&str> for MediaStore {
+    fn from(root: &str) -> MediaStore {
         MediaStore {
             root: root.to_string(),
         }
     }
+}
 
+impl MediaStore {
     async fn get_new_video_path(&self, path: &Path) -> io::Result<PathBuf> {
         let dest_dir = Path::new(&self.root).join("New");
         if !dest_dir.exists() {
@@ -37,18 +46,28 @@ impl MediaStore {
         name.starts_with('.')
             || name == "TV"
             || name.ends_with(".py")
-            || name.ends_with(".jpg")
             || name.ends_with(".png")
+            || name.ends_with(".jpg")
+            || name.starts_with(".")
     }
 
-    async fn rename_or_copy_and_delete(src: &Path, destination: &Path) -> io::Result<()> {
+    async fn rename_or_copy_and_delete(&self, src: &Path, destination: &Path) -> io::Result<()> {
         match fs::rename(src, destination).await {
-            Ok(_) => Ok(()),
+            Ok(_) => self.store_video_info(destination).await,
             Err(_) => {
                 fs::copy(src, destination).await?;
-                fs::remove_file(src).await
+                fs::remove_file(src).await?;
+                self.store_video_info(destination).await
             }
         }
+    }
+
+    async fn store_video_info(&self, path: &Path) -> io::Result<()> {
+        let thumbnail_dir = get_thumbnail_dir(&self.root);
+        if let Err(err) = store_video_info(thumbnail_dir, path).await {
+            tracing::error!("could not store info for video {:?}, error was: {}", path, err);
+        }
+        Ok(())
     }
 }
 
@@ -91,7 +110,7 @@ impl MediaStorer for MediaStore {
             new_path.to_str().unwrap_or_default()
         );
 
-        Self::rename_or_copy_and_delete(path, &new_path).await
+        self.rename_or_copy_and_delete(path, &new_path).await
     }
 
     async fn rename(&self, current: &str, new_path: &str) -> io::Result<()> {
@@ -99,7 +118,8 @@ impl MediaStorer for MediaStore {
         let src = self.as_path("", current);
         let destination = self.as_path("", new_path);
 
-        Self::rename_or_copy_and_delete((&src).as_ref(), (&destination).as_ref()).await
+        self.rename_or_copy_and_delete((&src).as_ref(), (&destination).as_ref())
+            .await
     }
 
     async fn delete(&self, path: &str) -> io::Result<bool> {
@@ -123,36 +143,6 @@ impl MediaStorer for MediaStore {
             format!("{}/{}/{}", self.root, collection, video)
         }
     }
-
-    async fn convert_to_mp4(&self, path: &Path) -> anyhow::Result<bool> {
-        // ffmpeg -i 'the lord of the rings the rings of power s01e05.mkv' -c:v libx265 -vtag hvc1 -vprofile main -c:a copy -pix_fmt yuv420p output.mp4
-
-        let mut new_path = self.get_new_video_path(path).await?;
-
-        new_path.set_extension("mp4");
-
-        tracing::debug!(
-            "converting {} to mp4 {}",
-            path.to_str().unwrap_or_default(),
-            new_path.to_str().unwrap_or_default()
-        );
-
-        convert_to_mp4(path, &new_path).await
-    }
-}
-
-async fn convert_to_mp4(src: &Path, dest: &Path) -> anyhow::Result<bool> {
-    let args = vec![
-        "-i",
-        src.to_str().unwrap_or_default(),
-        "-c:v",
-        "copy",
-        "-c:a",
-        "copy",
-        "-y",
-        dest.to_str().unwrap_or_default(),
-    ];
-    AsyncCommand::command("ffmpeg", args).await
 }
 
 #[cfg(test)]

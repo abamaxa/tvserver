@@ -28,8 +28,7 @@ use crate::domain::{
 };
 use crate::entrypoints::{register, Context};
 use crate::services::{
-    MediaStore, Monitor, RemotePlayerService, SearchService, TaskManager, TransmissionDaemon,
-    VLCPlayer,
+    MediaStore, MessageExchange, Monitor, SearchService, TaskManager, TransmissionDaemon, VLCPlayer,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -49,7 +48,7 @@ pub async fn run() -> anyhow::Result<()> {
     let app = register(Arc::new(context))
         .nest_service("/", ServeDir::new(get_client_path("app")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
-        .nest_service("/stream", ServeDir::new(get_movie_dir()))
+        .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
@@ -78,9 +77,9 @@ fn get_dependencies() -> Context {
     let task_manager = Arc::new(TaskManager::new(Arc::new(TokioProcessSpawner::new())));
 
     Context::from(
-        Arc::new(MediaStore::from(&get_movie_dir())),
+        Arc::new(MediaStore::from(get_movie_dir())),
         SearchService::new(task_manager.clone()),
-        RemotePlayerService::new(),
+        MessageExchange::new(),
         player,
         task_manager,
     )

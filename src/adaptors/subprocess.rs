@@ -14,51 +14,6 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
-pub struct AsyncCommand {
-    command: String,
-    args: Vec<String>,
-}
-
-impl AsyncCommand {
-    pub fn execute(cmd: &str, args: Vec<&str>) {
-        tracing::info!("executing: {} {:?}", cmd, args);
-
-        let string_args = args.iter().map(|s| String::from(*s)).collect();
-
-        let async_command = Self {
-            command: String::from(cmd),
-            args: string_args,
-        };
-
-        let ptr = Arc::new(async_command);
-
-        tokio::spawn(async move {
-            let str_args = ptr.args.iter().map(|s| s.as_str()).collect();
-            match Self::command(ptr.command.as_str(), str_args).await {
-                Ok(_) => tracing::info!("succeeded - {} {:?}", ptr.command, ptr.args),
-                Err(e) => tracing::error!("failed {} - {} {:?}", e, ptr.command, ptr.args),
-            };
-        });
-    }
-
-    pub async fn command(cmd: &str, args: Vec<&str>) -> anyhow::Result<bool> {
-        let child = Command::new(cmd).args(&args).output();
-
-        let output = child.await?;
-
-        tracing::debug!(
-            "execute: {} {:?}\nsuccess: {}\nstdout:\n{}stderr:\n{}",
-            cmd,
-            args,
-            output.status.success(),
-            String::from_utf8(output.stdout).unwrap(),
-            String::from_utf8(output.stderr).unwrap(),
-        );
-
-        Ok(output.status.success())
-    }
-}
-
 #[derive(Debug)]
 pub struct AsyncSubProcess {
     /*
@@ -73,6 +28,7 @@ pub struct AsyncSubProcess {
     error_string: Arc<Mutex<String>>,
     output: Arc<RwLock<Vec<String>>>,
     created: SystemTime,
+    status: Arc<Mutex<Option<ExitStatus>>>,
 }
 
 #[derive(Default)]
@@ -109,6 +65,7 @@ impl AsyncSubProcess {
             error_string: Arc::new(Mutex::new(String::new())),
             handle: None,
             output: Arc::new(RwLock::new(Vec::new())),
+            status: Arc::new(Mutex::new(None)),
         };
 
         process.handle = Some(process.start(stdout_tx));
@@ -123,10 +80,14 @@ impl AsyncSubProcess {
         let args = self.args.clone();
         let name = self.name.clone();
         let error_string = self.error_string.clone();
+        let status = self.status.clone();
 
         tokio::spawn(async move {
             match Self::run(&cmd, args.clone(), stdout_tx).await {
-                Ok(_) => tracing::info!("succeeded - {} {} {:?}", name, cmd, args),
+                Ok(exit_status) => {
+                    *status.lock().await = Some(exit_status);
+                    tracing::info!("succeeded - {} {} {:?}", name, cmd, args)
+                }
                 Err(e) => {
                     *error_string.lock().await = e.to_string();
                     tracing::error!("failed {} - {} {} {:?}", e, name, cmd, args)
@@ -260,11 +221,6 @@ mod test {
     use super::*;
     use anyhow::Result;
     use std::time::Duration;
-
-    #[tokio::test]
-    async fn test_execute_async_command() {
-        assert!(AsyncCommand::command("ls", vec!["-l"]).await.unwrap());
-    }
 
     #[tokio::test]
     #[ignore] // this was working until reading stdio was changed from reading lines

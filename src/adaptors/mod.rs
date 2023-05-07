@@ -6,7 +6,7 @@ mod websocket;
 
 pub use http_fetcher::HTTPClient;
 pub use repository::{do_migrations, get_database};
-pub use subprocess::{AsyncCommand, AsyncSubProcess, TokioProcessSpawner};
+pub use subprocess::TokioProcessSpawner;
 pub use websocket::RemoteBrowserPlayer;
 
 #[cfg(feature = "vlc")]
