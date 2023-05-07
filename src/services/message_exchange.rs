@@ -222,3 +222,63 @@ impl MessageExchange {
         self.sender.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::messages::RemoteMessage;
+    use crate::domain::traits::RemotePlayer;
+    use async_trait::async_trait;
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::sync::mpsc::{channel, Sender};
+
+    #[tokio::test]
+    async fn test_add_player() {
+        let message_exchange = MessageExchange::new();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let remote_player = MockRemotePlayer::new(addr);
+
+        message_exchange
+            .add_player(addr, remote_player.clone())
+            .await;
+
+        let players = message_exchange.list_players().await;
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0], addr.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_remove_player() {
+        let message_exchange = MessageExchange::new();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let remote_player = MockRemotePlayer::new(addr);
+
+        message_exchange
+            .add_player(addr, remote_player.clone())
+            .await;
+        message_exchange.remove(addr).await;
+
+        let players = message_exchange.list_players().await;
+        assert_eq!(players.len(), 0);
+    }
+
+    struct MockRemotePlayer {
+        address: SocketAddr,
+        sender: Sender<RemoteMessage>,
+    }
+
+    impl MockRemotePlayer {
+        fn new(address: SocketAddr) -> Arc<Self> {
+            let (sender, _) = channel::<RemoteMessage>(100);
+            Arc::new(Self { address, sender })
+        }
+    }
+
+    #[async_trait]
+    impl RemotePlayer for MockRemotePlayer {
+        async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String> {
+            self.sender.send(message).await.map_err(|e| e.to_string())?;
+            Ok(StatusCode::OK)
+        }
+    }
+}

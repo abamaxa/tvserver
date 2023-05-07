@@ -118,8 +118,11 @@ fn strip_file_paths(response: &str) -> String {
         }
     }
 
-    let last_index = new_lines.len() - 1;
-    new_lines[last_index] = "}".to_string();
+    if !new_lines.is_empty() {
+        let last_index = new_lines.len() - 1;
+        new_lines[last_index] = "}".to_string();
+    }
+
     let new_lines: String = new_lines.join("\n");
 
     format!("[\n{}\n]", new_lines)
@@ -207,7 +210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    // #[ignore]
+    #[ignore]
     async fn test_chatgpt_describe() -> Result<()> {
         let client: ChatFetcher = Arc::new(HTTPClient::new());
 
