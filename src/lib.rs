@@ -21,6 +21,7 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::domain::config::get_thumbnail_dir;
 use crate::domain::traits::Downloader;
 use crate::domain::{
     config::{enable_vlc_player, get_client_path, get_movie_dir},
@@ -49,6 +50,10 @@ pub async fn run() -> anyhow::Result<()> {
         .nest_service("/", ServeDir::new(get_client_path("app")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
         .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
+        .nest_service(
+            "/api/thumbnails",
+            ServeDir::new(get_thumbnail_dir(&get_movie_dir())),
+        )
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()

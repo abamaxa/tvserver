@@ -1,10 +1,10 @@
+use crate::domain::models::{CollectionDetails, VideoDetails};
 use crate::domain::traits::Storer;
 use crate::domain::{SearchEngineType, TaskType};
 use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::str::FromStr;
 
 lazy_static! {
@@ -39,6 +39,25 @@ pub enum RemoteMessage {
 
     State(RemotePlayerState),
     Error(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MediaItem {
+    Collection(CollectionDetails),
+    Video(VideoDetails),
+    Error(String),
+}
+
+impl MediaItem {
+    pub fn error(message: &str) -> Self {
+        Self::Error(message.to_string())
+    }
+}
+
+impl From<std::io::Error> for MediaItem {
+    fn from(value: std::io::Error) -> Self {
+        Self::Error(value.to_string())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -265,53 +284,4 @@ impl ChatGPTMessage {
             content: message.to_string(),
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoMetadata {
-    pub duration: f64,
-    pub width: u32,
-    pub height: u32,
-    pub audio_tracks: u32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SeriesDetails {
-    pub series_title: String,
-    pub season: String,
-    pub episode: String,
-    pub episode_title: String,
-}
-
-impl SeriesDetails {
-    pub fn full_title(&self) -> String {
-        let mut title = self.series_title.clone();
-
-        if !self.season.is_empty() {
-            title = format!("{}, Season {}", title, self.season);
-        }
-
-        if !self.episode.is_empty() {
-            title = format!("{}, Episode {}", title, self.episode);
-        }
-
-        if !self.episode_title.is_empty() {
-            title = format!("{}, {}", title, self.episode_title);
-        }
-
-        title
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoDetails {
-    pub video: String,
-    pub collection: String,
-    pub description: String,
-    pub series: SeriesDetails,
-    pub thumbnail: PathBuf,
-    pub metadata: VideoMetadata,
 }

@@ -3,12 +3,10 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::adaptors::RemoteBrowserPlayer;
 use crate::domain::messages::{
-    ClientLogMessage, Command, ConversionRequest, DownloadRequest, LocalCommand, PlayRequest,
-    PlayerList, RenameRequest, Response,
+    ClientLogMessage, Command, ConversionRequest, DownloadRequest, LocalCommand, MediaItem,
+    PlayRequest, PlayerList, RenameRequest, Response,
 };
-use crate::domain::models::{
-    Conversion, SearchResults, TaskListResults, VideoEntry, AVAILABLE_CONVERSIONS,
-};
+use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
 use crate::services::{
@@ -214,10 +212,10 @@ async fn list_collection(state: State<SharedState>, collection: Path<String>) ->
     list_media(&state, &collection).await
 }
 
-async fn list_media(state: &SharedState, collection: &str) -> (StatusCode, Json<VideoEntry>) {
+async fn list_media(state: &SharedState, collection: &str) -> (StatusCode, Json<MediaItem>) {
     match state.store.list(collection).await {
         Ok(result) => (OK, Json(result)),
-        Err(e) => (NOT_FOUND, Json(VideoEntry::error(e.to_string()))),
+        Err(e) => (NOT_FOUND, Json(MediaItem::from(e))),
     }
 }
 
@@ -299,6 +297,15 @@ async fn list_player(State(state): State<SharedState>) -> (StatusCode, Json<Play
 
 #[debug_handler]
 async fn delete_video(state: State<SharedState>, Path(collection): Path<String>) -> StdResponse {
+    /*
+    Cannot delete filenames with the `#` character in the name, think this is due
+    to axum seeing everything past the # as being part of the query instead of the
+    path. e.g. the following files cannot currently be deleted
+
+    'Dragons Den - S19EP4 - OPAL ECO, Lewis #dragonsdennew [j5-D7HmSL9k].webm'
+    'Dragons Den - S19EP5 - Berczy, Nick & Nick #dragonsdennew [Zlb1y7bLAlQ].webm'
+    '#Dragons Dens - S19EP6 - LONDON NOOTROPICS [y9W2MTHwGLE].webm'
+     */
     match state.store.delete(&collection).await {
         Ok(found) => match found {
             true => (OK, Json(Response::success(collection))),

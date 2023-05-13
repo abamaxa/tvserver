@@ -1,4 +1,5 @@
-use crate::domain::messages::{ChatGPTMessage, ChatGPTRequest, ChatGPTResponse, SeriesDetails};
+use crate::domain::messages::{ChatGPTMessage, ChatGPTRequest, ChatGPTResponse};
+use crate::domain::models::SeriesDetails;
 use crate::domain::traits::JsonFetcher;
 use anyhow::anyhow;
 use std::sync::Arc;

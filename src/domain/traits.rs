@@ -2,8 +2,8 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::domain::messages::{RemoteMessage, TaskState};
-use crate::domain::models::{SearchResults, VideoEntry};
+use crate::domain::messages::{MediaItem, RemoteMessage, TaskState};
+use crate::domain::models::SearchResults;
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -36,10 +36,11 @@ pub trait MediaSearcher<T>: Send + Sync {
 #[automock]
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
-    async fn list(&self, collection: &str) -> Result<VideoEntry, io::Error>;
+    async fn list(&self, collection: &str) -> io::Result<MediaItem>;
     async fn move_file(&self, path: &Path) -> io::Result<()>;
     async fn rename(&self, current: &str, new_name: &str) -> io::Result<()>;
     async fn delete(&self, path: &str) -> io::Result<bool>;
+    async fn check_video_information(&self) -> io::Result<()>;
     fn as_path(&self, collection: &str, video: &str) -> String;
 }
 

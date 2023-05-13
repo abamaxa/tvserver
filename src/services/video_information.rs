@@ -1,11 +1,12 @@
-use crate::domain::messages::VideoMetadata;
+use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata};
 use rand::Rng;
+use serde::Serialize;
 use serde_json::Value;
 use std::error::Error;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::process::Command;
+use tokio::{fs, io::AsyncWriteExt, process::Command};
 
 pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
     //let spawner = Arc::new(TokioProcessSpawner::new());
@@ -91,7 +92,7 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
     })
 }
 
-pub fn get_thumbnail_path<P: AsRef<Path>>(thumbnail_dir: PathBuf, video: P) -> PathBuf {
+pub fn get_thumbnail_path<P: AsRef<Path>>(thumbnail_dir: &PathBuf, video: P) -> PathBuf {
     let input_filename = video
         .as_ref()
         .file_stem()
@@ -107,23 +108,30 @@ pub async fn extract_random_frame<P: AsRef<Path>>(
     metadata: VideoMetadata,
 ) -> io::Result<()> {
     // Get video duration
-    let duration = metadata.duration;
+    let mut duration = metadata.duration;
     let random_time;
 
-    // Generate a random timestamp
-    {
-        let mut rng = rand::thread_rng();
-        random_time = rng.gen_range(0.0..duration);
+    // if its longer than 10 minutes skip the last 10 minutes
+    if duration > 600.0 {
+        duration -= 180.0;
     }
 
+    // Generate a random timestamp for the final 1/4 of the video
+    {
+        let mut rng = rand::thread_rng();
+        random_time = rng.gen_range((3. * duration / 4.0)..duration);
+    }
+
+    // "scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2"
+    // "scale=-1:480"
     // Run ffmpeg command
-    let status = Command::new("ffmpeg")
+    let output = Command::new("ffmpeg")
         .arg("-ss")
         .arg(format!("{}", random_time))
         .arg("-i")
         .arg(input_path.as_ref().as_os_str())
         .arg("-vf")
-        .arg("scale=-1:480")
+        .arg("scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2")
         .arg("-vframes")
         .arg("1")
         .arg("-q:v")
@@ -132,10 +140,14 @@ pub async fn extract_random_frame<P: AsRef<Path>>(
         .arg(output_path.as_ref().as_os_str())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .output()
         .await?;
 
-    if !status.success() {
+    if !output.status.success() {
+        let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+        let stderr = String::from_utf8(output.stderr).unwrap_or_default();
+        eprintln!("{}", stdout);
+        eprintln!("{}", stderr);
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "ffmpeg exited with an error",
@@ -145,12 +157,74 @@ pub async fn extract_random_frame<P: AsRef<Path>>(
     Ok(())
 }
 
-pub async fn store_video_info(thumbnail_dir: PathBuf, video: &Path) -> io::Result<()> {
-    let output_path = get_thumbnail_path(thumbnail_dir, video);
-    let video_meta = match get_video_metadata(video).await {
+pub async fn store_video_info(thumbnail_dir: PathBuf, video: PathBuf) -> io::Result<()> {
+    let data_file = video.with_extension("json");
+    if data_file.exists() {
+        return Ok(());
+    }
+
+    if !thumbnail_dir.exists() {
+        fs::create_dir_all(&thumbnail_dir).await?;
+    }
+
+    if is_subdirectory(&video, &thumbnail_dir) {
+        return Ok(());
+    }
+
+    eprintln!("processing: {}", video.to_str().unwrap());
+
+    let output_path = get_thumbnail_path(&thumbnail_dir, &video);
+    let video_meta = match get_video_metadata(&video).await {
         Ok(video_info) => video_info,
         Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
     };
 
-    extract_random_frame(video, output_path.as_path(), video_meta).await
+    extract_random_frame(&video, &output_path, video_meta.clone()).await?;
+
+    let thumbnail = match output_path.strip_prefix(&thumbnail_dir) {
+        Ok(thumbnail) => PathBuf::from(thumbnail),
+        _ => PathBuf::new(),
+    };
+
+    let details = VideoDetails {
+        video: video
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .to_string(),
+        collection: "".to_string(),
+        description: "".to_string(),
+        series: SeriesDetails::from(video.as_path()),
+        thumbnail: thumbnail,
+        metadata: video_meta,
+    };
+
+    // for now just write to a disk file, TODO: use a database
+    write_struct_to_json_file(&details, &data_file).await
+}
+
+pub async fn write_struct_to_json_file<T: Serialize>(data: &T, file_path: &Path) -> io::Result<()> {
+    // Serialize the struct to a JSON string with indentation.
+    let json_string = serde_json::to_string_pretty(data)?;
+
+    // Open the file in write mode or create it if it doesn't exist.
+    let mut file = fs::File::create(file_path).await?;
+
+    // Write the JSON string to the file.
+    file.write_all(json_string.as_bytes()).await?;
+
+    // Flush and close the file.
+    file.flush().await?;
+
+    Ok(())
+}
+
+fn is_subdirectory(path: &Path, base: &Path) -> bool {
+    // Canonicalize the paths to remove symbolic links and other artifacts
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_owned());
+
+    // Check if the canonical path starts with the canonical base path
+    canonical_path.starts_with(&canonical_base)
 }
