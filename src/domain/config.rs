@@ -16,6 +16,8 @@ const TRANSMISSION_PWD: &str = "TRANSMISSION_PWD";
 const TRANSMISSION_URL: &str = "TRANSMISSION_URL";
 const PIRATE_BAY_PROXY_URL: &str = "PIRATE_BAY_PROXY_URL";
 const DELAY_REAPING_TASKS_SECS: &str = "DELAY_REAPING_TASKS_SECS";
+const THUMBNAIL_DIR: &str = "THUMBNAIL_DIR";
+const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
 //  Defaults
 const DEFAULT_DATABASE_URL: &str = ":memory";
@@ -80,4 +82,15 @@ pub fn delay_reaping_tasks() -> i64 {
             .unwrap_or(DEFAULT_DELAY_REAPING_TASKS_SECS),
         _ => DEFAULT_DELAY_REAPING_TASKS_SECS,
     }
+}
+
+pub fn get_thumbnail_dir(movie_dir: &str) -> PathBuf {
+    match env::var(THUMBNAIL_DIR) {
+        Ok(dir) => PathBuf::from(dir),
+        _ => PathBuf::from(movie_dir).join(".thumbnails"),
+    }
+}
+
+pub fn get_openai_api_key() -> String {
+    env::var(OPENAI_API_KEY).unwrap_or_default()
 }

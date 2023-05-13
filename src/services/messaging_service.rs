@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Default, Clone)]
-pub struct RemotePlayerService {
+pub struct MessagingService {
     /*
     Tracks clients that are available to play media, e.g. Samsung TVs.
      */
@@ -14,7 +14,7 @@ pub struct RemotePlayerService {
     remote_player: Option<Arc<dyn RemotePlayer>>,
 }
 
-impl RemotePlayerService {
+impl MessagingService {
     pub fn new() -> Self {
         Self {
             client_map: HashMap::<String, Arc<dyn RemotePlayer>>::new(),
@@ -22,9 +22,13 @@ impl RemotePlayerService {
         }
     }
 
-    pub fn add(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
+    pub fn add_player(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
         self.client_map.insert(key, client.clone());
         self.remote_player = Some(client);
+    }
+
+    pub fn add_control(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
+        self.client_map.insert(key, client.clone());
     }
 
     pub fn get(&self, key: &str) -> Option<Arc<dyn RemotePlayer>> {
@@ -84,7 +88,7 @@ mod test {
         let key1 = String::from("key1");
         let key2 = String::from("key2");
 
-        let mut rp = RemotePlayerService::new();
+        let mut rp = MessagingService::new();
 
         let player1 = MockRemotePlayer::new();
 
@@ -92,7 +96,7 @@ mod test {
 
         assert!(rp.remote_player.is_none());
 
-        rp.add(key1.clone(), player1);
+        rp.add_player(key1.clone(), player1);
 
         assert!(rp.remote_player.is_some());
 
@@ -100,7 +104,7 @@ mod test {
 
         let player2: Arc<dyn RemotePlayer> = Arc::new(player2);
 
-        rp.add(key2.clone(), player2);
+        rp.add_player(key2.clone(), player2);
 
         let players = rp.list();
 

@@ -1,14 +1,69 @@
+use crate::domain::models::{CollectionDetails, VideoDetails};
 use crate::domain::traits::Storer;
 use crate::domain::{SearchEngineType, TaskType};
+use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 
-#[derive(Debug, Serialize, Deserialize)]
+lazy_static! {
+    static ref DEFAULT_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 80);
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePlayerState {
+    pub current_time: f64,
+    pub duration: f64,
+    pub current_src: String,
+    pub collection: String,
+    pub video: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RemoteMessage {
-    Command { command: String },
-    Play { url: String },
-    Seek { interval: i32 },
+    Command {
+        command: String,
+    },
+    Play {
+        url: String,
+        collection: String,
+        video: String,
+    },
+    Seek {
+        interval: i32,
+    },
     Stop,
     TogglePause(String),
+
+    State(RemotePlayerState),
+    Error(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum MediaItem {
+    Collection(CollectionDetails),
+    Video(VideoDetails),
+    Error(String),
+}
+
+impl MediaItem {
+    pub fn error(message: &str) -> Self {
+        Self::Error(message.to_string())
+    }
+}
+
+impl From<std::io::Error> for MediaItem {
+    fn from(value: std::io::Error) -> Self {
+        Self::Error(value.to_string())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReceivedRemoteMessage {
+    pub from_address: SocketAddr,
+    pub message: RemoteMessage,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -22,6 +77,12 @@ pub struct Command {
     pub message: RemoteMessage,
 }
 
+impl Command {
+    pub fn address(&self) -> SocketAddr {
+        as_sockaddr(&self.remote_address)
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlayRequest {
     pub collection: String,
@@ -30,21 +91,26 @@ pub struct PlayRequest {
 }
 
 impl PlayRequest {
-    pub fn make_remote_command(&self) -> Command {
+    pub fn make_remote_command(&self) -> RemoteMessage {
         let url: String = if self.collection.is_empty() {
-            format!("/stream/{}  ", self.video)
+            format!("/api/stream/{}  ", self.video)
         } else {
-            format!("/stream/{}/{}", self.collection, self.video)
+            format!("/api/stream/{}/{}", self.collection, self.video)
         };
 
-        Command {
-            remote_address: self.remote_address.clone(),
-            message: RemoteMessage::Play { url },
+        RemoteMessage::Play {
+            url,
+            collection: self.collection.clone(),
+            video: self.video.clone(),
         }
     }
 
     pub fn make_local_command(&self, store: &Storer) -> String {
         format!("add file://{}", store.as_path(&self.collection, &self.video))
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        as_sockaddr(&self.remote_address)
     }
 }
 
@@ -119,4 +185,103 @@ pub struct TaskState {
     pub process_details: String,
     pub error_string: String,
     pub task_type: TaskType,
+}
+
+fn as_sockaddr(remote_address: &Option<String>) -> SocketAddr {
+    match remote_address {
+        Some(addr) => match SocketAddr::from_str(&addr) {
+            Ok(addr) => addr,
+            _ => *DEFAULT_ADDRESS,
+        },
+        _ => *DEFAULT_ADDRESS,
+    }
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGPTRequest {
+    pub model: String,
+    pub messages: Vec<ChatGPTMessage>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub n: Option<i32>,
+    pub stream: Option<bool>,
+    pub stop: Option<Vec<String>>,
+    pub max_tokens: Option<i32>,
+    pub presence_penalty: Option<f64>,
+    pub frequency_penalty: Option<f64>,
+    pub logit_bias: Option<HashMap<String, f64>>,
+    pub user: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGPTResponse {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub model: String,
+    pub usage: ChatGPTUsage,
+    pub choices: Vec<ChatGPTChoice>,
+}
+
+impl<'a> ChatGPTResponse {
+    pub fn get_all_content(&self) -> String {
+        self.choices
+            .iter()
+            .map(|c| c.message.content.to_string())
+            .collect::<Vec<String>>()
+            .join(" ")
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGPTUsage {
+    #[serde(rename = "prompt_tokens")]
+    pub prompt_tokens: i64,
+    #[serde(rename = "completion_tokens")]
+    pub completion_tokens: i64,
+    #[serde(rename = "total_tokens")]
+    pub total_tokens: i64,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGPTChoice {
+    pub message: ChatGPTMessage,
+    #[serde(rename = "finish_reason")]
+    pub finish_reason: String,
+    pub index: i64,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGPTMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatGPTMessage {
+    pub fn system(message: &str) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: message.to_string(),
+        }
+    }
+
+    pub fn user(message: &str) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: message.to_string(),
+        }
+    }
+
+    pub fn assistant(message: &str) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: message.to_string(),
+        }
+    }
 }

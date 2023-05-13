@@ -3,12 +3,11 @@ mod common;
 use crate::common::{get_media_store, get_pirate_search, get_task_manager, get_youtube_search};
 use anyhow::Result;
 use tokio::task::JoinHandle;
-use tvserver::services::SearchService;
+use tvserver::services::{MessageExchange, SearchService};
 use tvserver::{
     domain::models::{DownloadableItem, SearchResults},
     domain::SearchEngineType,
     entrypoints,
-    services::RemotePlayerService,
 };
 
 #[tokio::test]
@@ -17,7 +16,7 @@ async fn test_youtube() -> Result<()> {
 
     let server = make_server(searcher, 57179).await;
 
-    let body = reqwest::get("http://localhost:57179/search/youtube?q=lord+of+the+rings")
+    let body = reqwest::get("http://localhost:57179/api/search/youtube?q=lord+of+the+rings")
         .await?
         .text()
         .await?;
@@ -49,7 +48,7 @@ async fn test_pirate_bay() -> Result<()> {
 
     let server = make_server(searcher, 57180).await;
 
-    let body = reqwest::get("http://localhost:57180/search/pirate?q=dragons+den")
+    let body = reqwest::get("http://localhost:57180/api/search/pirate?q=dragons+den")
         .await?
         .text()
         .await?;
@@ -76,7 +75,7 @@ async fn make_server(searcher: SearchService, port: u16) -> JoinHandle<Result<()
     let context = entrypoints::Context::from(
         get_media_store(),
         searcher,
-        RemotePlayerService::new(),
+        MessageExchange::new(),
         None,
         get_task_manager(),
     );

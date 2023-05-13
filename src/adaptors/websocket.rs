@@ -1,4 +1,4 @@
-use crate::domain::messages::RemoteMessage;
+use crate::domain::messages::{ReceivedRemoteMessage, RemoteMessage};
 use crate::domain::traits::RemotePlayer;
 use async_trait::async_trait;
 use axum::{
@@ -34,7 +34,11 @@ impl RemotePlayer for RemoteBrowserPlayer {
 }
 
 impl RemoteBrowserPlayer {
-    pub fn from(ws: WebSocketUpgrade, who: SocketAddr) -> (RemoteBrowserPlayer, Response) {
+    pub fn create(
+        ws: WebSocketUpgrade,
+        who: SocketAddr,
+        on_message: Sender<ReceivedRemoteMessage>,
+    ) -> (RemoteBrowserPlayer, Response) {
         let (in_tx, in_rx) = channel(100);
         let (out_tx, mut out_rx) = channel(100);
 
@@ -43,8 +47,16 @@ impl RemoteBrowserPlayer {
         let response = ws.on_upgrade(move |socket| handle_socket(socket, who, in_rx, out_tx));
 
         tokio::spawn(async move {
-            while let Some(msg) = out_rx.recv().await {
-                tracing::info!("websocket {}, received: {:?}", who, msg);
+            while let Some(message) = out_rx.recv().await {
+                if let Err(err) = on_message
+                    .send(ReceivedRemoteMessage {
+                        message,
+                        from_address: who,
+                    })
+                    .await
+                {
+                    tracing::error!("error forwarding message: {}", err);
+                }
             }
         });
 
@@ -56,7 +68,7 @@ async fn handle_socket(
     socket: WebSocket,
     who: SocketAddr,
     input: Receiver<Vec<u8>>,
-    output: Sender<String>,
+    output: Sender<RemoteMessage>,
 ) {
     let (sender, receiver) = socket.split();
 
@@ -86,11 +98,21 @@ async fn handle_sending(mut input: Receiver<Vec<u8>>, mut sender: SplitSink<WebS
     }
 }
 
-async fn handle_receiving(output: Sender<String>, mut receiver: SplitStream<WebSocket>) {
+async fn handle_receiving(output: Sender<RemoteMessage>, mut receiver: SplitStream<WebSocket>) {
     while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Text(t) = msg {
-            if let Err(e) = output.send(t).await {
-                tracing::info!("output.send failed: {}", e);
+        if let Message::Text(txt) = msg {
+            tracing::info!("websocket received: {}", txt);
+        } else if let Message::Binary(msg) = msg {
+            match serde_json::from_slice::<RemoteMessage>(&msg) {
+                Ok(player) => {
+                    // tracing::info!("Received state: {:?}", player);
+                    if let Err(e) = output.send(player).await {
+                        tracing::info!("output.send failed: {}", e);
+                    }
+                }
+                Err(error) => {
+                    tracing::error!("Failed to deserialize RemoteMessage: {}", error);
+                }
             }
         }
     }

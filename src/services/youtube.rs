@@ -11,7 +11,8 @@ const SEARCH_MAX_RESULTS: &str = "50";
 const SEARCH_TYPE: &str = "video";
 
 pub type YoutubeResult = SearchResults<DownloadableItem>;
-pub type YoutubeFetcher = Arc<dyn JsonFetcher<YoutubeResponse>>;
+pub type YoutubeFetcher =
+    Arc<dyn for<'a> JsonFetcher<'a, YoutubeResponse, &'a [(&'a str, &'a str)]>>;
 
 pub struct YoutubeClient {
     key: String,
@@ -29,8 +30,8 @@ impl MediaSearcher<DownloadableItem> for YoutubeClient {
             ("maxResults", SEARCH_MAX_RESULTS),
             ("type", SEARCH_TYPE),
         ];
-
-        match self.client.get_json(SEARCH_URL, &query).await {
+        let q: &[(&str, &str)] = &query;
+        match self.client.fetch(SEARCH_URL, &q).await {
             Ok(results) => Ok(self.make_success_response(results)),
             Err(err) => Ok(SearchResults::error(&err.to_string())),
         }
@@ -106,11 +107,11 @@ mod test {
     }
 
     #[async_trait]
-    impl JsonFetcher<YoutubeResponse> for MockFetcher {
-        async fn get_json(
+    impl<'a> JsonFetcher<'a, YoutubeResponse, &'a [(&'a str, &'a str)]> for MockFetcher {
+        async fn fetch(
             &self,
             url: &str,
-            query: &[(&str, &str)],
+            query: &'a &'a [(&'a str, &'a str)],
         ) -> anyhow::Result<YoutubeResponse> {
             match &self.response {
                 Some(response) => Ok(response.clone()),
