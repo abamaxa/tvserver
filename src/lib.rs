@@ -46,6 +46,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     setup_logging();
 
+    context.get_store().check_video_information().await?;
+
     let app = register(Arc::new(context))
         .nest_service("/", ServeDir::new(get_client_path("app")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
