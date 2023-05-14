@@ -9,24 +9,18 @@ use axum::{
 use futures::stream::{SplitSink, SplitStream};
 use futures::{sink::SinkExt, stream::StreamExt};
 use std::net::SocketAddr;
-use std::option::Option;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 
 #[derive(Debug)]
 pub struct RemoteBrowserPlayer {
-    in_tx: Sender<Vec<u8>>,
+    in_tx: Sender<RemoteMessage>,
 }
 
 #[async_trait]
 impl RemotePlayer for RemoteBrowserPlayer {
     async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String> {
-        let as_bytes: Vec<u8> = match serde_json::to_vec(&message) {
-            Ok(result) => result,
-            Err(e) => return Err(e.to_string()),
-        };
-
-        match self.in_tx.send(as_bytes).await {
+        match self.in_tx.send(message).await {
             Ok(_) => Ok(StatusCode::OK),
             Err(err) => Err(err.to_string()),
         }
@@ -67,53 +61,94 @@ impl RemoteBrowserPlayer {
 async fn handle_socket(
     socket: WebSocket,
     who: SocketAddr,
-    input: Receiver<Vec<u8>>,
+    input: Receiver<RemoteMessage>,
     output: Sender<RemoteMessage>,
 ) {
     let (sender, receiver) = socket.split();
 
     let send_task = tokio::spawn(async move { handle_sending(input, sender).await });
 
-    let recv_task = tokio::spawn(async move { handle_receiving(output, receiver).await });
+    let recv_task = tokio::spawn(async move { handle_receiving(output, receiver, who).await });
 
     wait_for_socket_to_close(who, send_task, recv_task).await
 }
 
-async fn handle_sending(mut input: Receiver<Vec<u8>>, mut sender: SplitSink<WebSocket, Message>) {
+async fn handle_sending(
+    mut input: Receiver<RemoteMessage>,
+    mut sender: SplitSink<WebSocket, Message>,
+) {
     loop {
-        let buffer: Option<Vec<u8>>;
-        if let Some(msg) = input.recv().await {
-            buffer = Some(msg);
-        } else {
-            tracing::info!("broken pipe");
-            break;
-        }
-
-        if let Some(msg) = buffer {
-            if sender.send(msg.into()).await.is_err() {
-                tracing::warn!("lost connection");
+        let message = match input.recv().await {
+            Some(msg) => msg,
+            _ => {
+                tracing::info!("broken pipe");
                 break;
             }
+        };
+
+        let result = match message {
+            RemoteMessage::Ping(n) => sender.send(Message::Ping(n.to_be_bytes().to_vec())).await,
+            _ => {
+                let as_bytes: Vec<u8> = match serde_json::to_vec(&message) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::error!("{}", e.to_string());
+                        continue;
+                    }
+                };
+
+                sender.send(as_bytes.into()).await
+            }
+        };
+
+        if result.is_err() {
+            tracing::warn!("lost connection");
+            break;
         }
     }
 }
 
-async fn handle_receiving(output: Sender<RemoteMessage>, mut receiver: SplitStream<WebSocket>) {
+async fn handle_receiving(
+    output: Sender<RemoteMessage>,
+    mut receiver: SplitStream<WebSocket>,
+    who: SocketAddr,
+) {
     while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Text(txt) = msg {
-            tracing::info!("websocket received: {}", txt);
-        } else if let Message::Binary(msg) = msg {
-            match serde_json::from_slice::<RemoteMessage>(&msg) {
-                Ok(player) => {
-                    // tracing::info!("Received state: {:?}", player);
-                    if let Err(e) = output.send(player).await {
-                        tracing::info!("output.send failed: {}", e);
+        match msg {
+            Message::Text(txt) => {
+                tracing::info!("websocket {} sent text: {}", who, txt)
+            }
+            Message::Binary(msg) => {
+                match serde_json::from_slice::<RemoteMessage>(&msg) {
+                    Ok(player) => {
+                        // tracing::info!("Received state: {:?}", player);
+                        if let Err(e) = output.send(player).await {
+                            tracing::error!("output.send failed: {}", e);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "failed to deserialize RemoteMessage: {} from {}",
+                            error,
+                            who
+                        );
                     }
                 }
-                Err(error) => {
-                    tracing::error!("Failed to deserialize RemoteMessage: {}", error);
+            }
+            Message::Pong(msg) => {
+                tracing::info!("websocket {} pong: {:?}", who, msg);
+                let pong_message = RemoteMessage::Pong(who);
+                if let Err(e) = output.send(pong_message).await {
+                    tracing::error!("output.send pong message failed: {}", e);
                 }
             }
+            Message::Close(_) => {
+                tracing::info!("websocket {} close message", who);
+                if let Err(e) = output.send(RemoteMessage::Close(who)).await {
+                    tracing::error!("output.send close message failed: {}", e);
+                }
+            }
+            _ => tracing::info!("websocket {} sent: {:?}", who, msg),
         }
     }
 }

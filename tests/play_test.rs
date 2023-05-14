@@ -46,23 +46,16 @@ async fn test_local_play() -> Result<()> {
 
 #[tokio::test]
 async fn test_remote_play() -> Result<()> {
-    let remote_player = MessageExchange::new();
+    let exchange = MessageExchange::new();
 
     let key = SocketAddr::from_str("0.0.0.0:456").unwrap();
 
-    remote_player
-        .add_player(key, common::get_remote_player())
-        .await;
+    exchange.add_player(key, common::get_remote_player()).await;
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = entrypoints::Context::from(
-        get_media_store(),
-        searcher,
-        remote_player,
-        None,
-        get_task_manager(),
-    );
+    let context =
+        entrypoints::Context::from(get_media_store(), searcher, exchange, None, get_task_manager());
 
     let server = common::create_server(context, 57182).await;
 
