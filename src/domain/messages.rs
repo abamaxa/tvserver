@@ -38,7 +38,13 @@ pub enum RemoteMessage {
     TogglePause(String),
 
     State(RemotePlayerState),
+    SendLastState,
     Error(String),
+
+    Ping(u64),
+    Pong(SocketAddr),
+
+    Close(SocketAddr),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,13 +154,20 @@ pub struct DownloadRequest {
     pub engine: SearchEngineType,
 }
 
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PlayerListItem {
+    pub name: String,
+    pub last_message: Option<RemoteMessage>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlayerList {
-    pub players: Vec<String>,
+    pub players: Vec<PlayerListItem>,
 }
 
 impl PlayerList {
-    pub fn new(players: Vec<String>) -> Self {
+    pub fn new(players: Vec<PlayerListItem>) -> Self {
         Self { players }
     }
 }

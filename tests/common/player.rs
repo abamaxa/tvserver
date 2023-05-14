@@ -17,7 +17,7 @@ pub fn get_remote_player() -> Arc<dyn RemotePlayer> {
     let mut player = MockRemotePlayer::new();
     player
         .expect_send()
-        .times(1)
+        .times(2)
         .returning(|_| Ok(StatusCode::OK));
 
     Arc::new(player)
