@@ -1,6 +1,6 @@
 [package]
 name = "tvserver"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 authors = ["Chris Morgan <cmorgan@abamaxa.com>"]
 repository = "https://github.com/abamaxa/tvserver"
