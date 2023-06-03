@@ -151,7 +151,7 @@ mod test {
         let path = "tests/fixtures/media_dir/collection2/test_collection2-v1.mkv";
 
         assert_eq!(
-            get_next_version_name(path, true),
+            get_next_version_name(path, Some("mp4")),
             Some("tests/fixtures/media_dir/collection2/test_collection2-v3.mp4".to_string())
         );
     }
