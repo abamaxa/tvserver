@@ -1,10 +1,10 @@
 mod common;
 
-use crate::common::{get_media_store, get_pirate_search, get_task_manager};
+use crate::common::{get_media_store, get_pirate_search, get_repository, get_task_manager};
 use anyhow::Result;
 use reqwest::StatusCode;
 use std::collections::HashMap;
-use tvserver::services::MessageExchange;
+use tvserver::domain::services::MessageExchange;
 use tvserver::{domain::messages::Response, entrypoints::Context};
 
 #[tokio::test]
@@ -17,6 +17,7 @@ async fn test_pirate_download() -> Result<()> {
         MessageExchange::new(),
         None,
         get_task_manager(),
+        get_repository().await,
     );
 
     let server = common::create_server(context, 57185).await;

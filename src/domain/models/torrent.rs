@@ -213,7 +213,7 @@ impl TaskMonitor for TorrentTask {
                 continue;
             }
 
-            store.move_file(&item.filepath).await?;
+            store.add_file(&item.filepath).await?;
         }
         Ok(())
     }
@@ -267,7 +267,7 @@ pub mod test {
 
         let mut store = MockMediaStorer::new();
 
-        store.expect_move_file().times(1).returning(|_| Ok(()));
+        store.expect_add_file().times(1).returning(|_| Ok(()));
 
         let store: Storer = Arc::new(store);
 

@@ -1,20 +1,38 @@
 mod common;
 
-use crate::common::get_task_manager;
+use crate::common::{get_repository, get_task_manager};
 use anyhow::Result;
 use common::get_pirate_search;
 use reqwest::{header::RANGE, StatusCode};
+use std::env;
 use std::sync::Arc;
+use tvserver::adaptors::FileSystemStore;
+use tvserver::domain::config::MOVIE_DIR;
+use tvserver::domain::services::MessageExchange;
+use tvserver::domain::traits::FileStorer;
 use tvserver::entrypoints::Context;
-use tvserver::services::{MediaStore, MessageExchange};
+use tvserver::services::MediaStore;
+
+const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
 
 #[tokio::test]
 async fn test_video_stream() -> Result<()> {
-    let store = Arc::new(MediaStore::from("tests/fixtures/media_dir"));
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
+
+    let store = Arc::new(MediaStore::from(file_storer));
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::from(store, searcher, MessageExchange::new(), None, get_task_manager());
+    let context = Context::from(
+        store,
+        searcher,
+        MessageExchange::new(),
+        None,
+        get_task_manager(),
+        get_repository().await,
+    );
 
     let server = common::create_server(context, 57186).await;
 

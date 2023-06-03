@@ -1,3 +1,4 @@
+use crate::domain::config::get_movie_dir;
 use mockall::lazy_static;
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,37 @@ pub fn generate_display_name(name: &Option<String>) -> String {
     let result = new_name[0..end_pos].replace('.', " ") + &new_name[end_pos..];
 
     titlecase(&result)
+}
+
+/*
+pub fn get_collection_and_video(path: &str) -> (String, String) {
+    if let Some(pos) = path.rfind("/") {
+        return (path[..pos].to_string(), path[pos..].to_string());
+    } else {
+        return (String::new(), path.to_string());
+    }
+}*/
+
+pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
+    let short_path = match path.strip_prefix(&get_movie_dir()) {
+        Ok(p) => PathBuf::from(p),
+        _ => PathBuf::from(path),
+    };
+
+    let parent = match short_path.parent() {
+        Some(parent) => parent.to_str().unwrap_or_default().to_string(),
+        _ => String::new(),
+    };
+
+    (
+        parent,
+        short_path
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 #[cfg(test)]

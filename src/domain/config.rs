@@ -9,7 +9,7 @@ const DATABASE_URL: &str = "DATABASE_URL";
 const DATABASE_MIGRATION_DIR: &str = "DATABASE_MIGRATION_DIR";
 const ENABLE_VLC: &str = "ENABLE_VLC";
 pub const GOOGLE_KEY: &str = "GOOGLE_KEY";
-const MOVIE_DIR: &str = "MOVIE_DIR";
+pub const MOVIE_DIR: &str = "MOVIE_DIR";
 const TORRENT_DIR: &str = "TORRENT_DIR";
 const TRANSMISSION_USER: &str = "TRANSMISSION_USER";
 const TRANSMISSION_PWD: &str = "TRANSMISSION_PWD";
@@ -20,7 +20,7 @@ const THUMBNAIL_DIR: &str = "THUMBNAIL_DIR";
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
 //  Defaults
-const DEFAULT_DATABASE_URL: &str = ":memory";
+const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
 const DEFAULT_TRANSMISSION_URL: &str = "http://higo.abamaxa.com:9091/transmission/rpc";
 const DEFAULT_CLIENT_DIR: &str = "client";
