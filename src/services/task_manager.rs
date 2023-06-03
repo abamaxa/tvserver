@@ -184,7 +184,7 @@ mod test {
         let mut mock_store = MockMediaStorer::new();
 
         mock_store
-            .expect_move_file()
+            .expect_add_file()
             .times(count_move_file)
             .returning(|_| Ok(()));
 

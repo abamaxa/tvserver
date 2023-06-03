@@ -1,9 +1,8 @@
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::domain::messages::{MediaItem, RemoteMessage, TaskState};
-use crate::domain::models::SearchResults;
+use crate::domain::models::{SearchResults, VideoDetails};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -36,12 +35,12 @@ pub trait MediaSearcher<T>: Send + Sync {
 #[automock]
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
-    async fn list(&self, collection: &str) -> io::Result<MediaItem>;
-    async fn move_file(&self, path: &Path) -> io::Result<()>;
-    async fn rename(&self, current: &str, new_name: &str) -> io::Result<()>;
-    async fn delete(&self, path: &str) -> io::Result<bool>;
-    async fn check_video_information(&self) -> io::Result<()>;
-    fn as_path(&self, collection: &str, video: &str) -> String;
+    async fn list(&self, collection: &str) -> anyhow::Result<MediaItem>;
+    async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
+    async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
+    async fn delete(&self, path: &str) -> anyhow::Result<()>;
+    async fn check_video_information(&self) -> anyhow::Result<()>;
+    fn as_local_path(&self, collection: &str, video: &str) -> String;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
@@ -86,17 +85,34 @@ pub trait RemotePlayer: Send + Sync {
     async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String>;
 }
 
+#[async_trait]
+pub trait Filer: Sync + Send {
+    fn is_dir(&self) -> bool;
+    /*async fn read(&self, count: usize) -> anyhow::Result<Vec<u8>>;
+    async fn write(&self, data: Vec<u8>) -> anyhow::Result<()>;
+    async fn close(&self);*/
+    async fn get_metadata(&self) -> anyhow::Result<VideoDetails>;
+    async fn save_metadata(&self, details: VideoDetails) -> anyhow::Result<()>;
+}
+
+pub type StoreObject = Arc<dyn Filer>;
+
 /// An interface to a collection of files.
 ///
 /// Unlike the MediaStorer interface, this is a low level interface implemented
 /// by an adaptor that knows nothing about videos, media etc, it is meant to be
 /// a thin wrapper around a file system, S3 object store etc.
 #[async_trait]
-pub trait StoreReaderWriter {
-    async fn list_directory(&self, path: &Path) -> anyhow::Result<(Vec<String>, Vec<String>)>;
-    async fn ensure_path_exists(&self, path: &Path) -> anyhow::Result<()>;
-    async fn rename(&self, old_path: &Path, new_path: &Path) -> anyhow::Result<()>;
+pub trait FileStore: Sync + Send {
+    async fn create_folder(&self, path: &str) -> anyhow::Result<()>;
+    async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
+    async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
+    async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
+    async fn delete(&self, path: &str) -> anyhow::Result<()>;
 }
+
+pub type FileStorer = Arc<dyn FileStore>;
 
 /// Provides a common interface to obtain the state of a task and terminate it.
 ///
@@ -123,3 +139,13 @@ pub trait ProcessSpawner: Sync + Send {
 }
 
 pub type Spawner = Arc<dyn ProcessSpawner>;
+
+#[async_trait]
+pub trait Databaser: Sync + Send {
+    async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
+    async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error>;
+    async fn update_video(&self, details: &VideoDetails) -> Result<u64, sqlx::Error>;
+    async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;
+}
+
+pub type Repository = Arc<dyn Databaser>;

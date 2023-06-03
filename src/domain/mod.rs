@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-mod algorithm;
+pub mod algorithm;
 pub mod config;
 mod enums;
 pub mod messages;
 pub mod models;
 pub mod traits;
 pub use enums::*;
+pub mod services;
 #[cfg(test)]
 mod test_util;
 

@@ -11,9 +11,10 @@ pub mod domain;
 pub mod entrypoints;
 pub mod services;
 
+use sqlx::Error;
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::adaptors::TokioProcessSpawner;
+use crate::adaptors::{FileSystemStore, TokioProcessSpawner};
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -21,23 +22,20 @@ use tower_http::{
 };
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::domain::config::get_thumbnail_dir;
-use crate::domain::traits::Downloader;
+use crate::domain::config::{get_database_url, get_thumbnail_dir};
+use crate::domain::services::MessageExchange;
+use crate::domain::traits::{Downloader, FileStorer};
 use crate::domain::{
     config::{enable_vlc_player, get_client_path, get_movie_dir},
     traits::Player,
 };
 use crate::entrypoints::{register, Context};
 use crate::services::{
-    MediaStore, MessageExchange, Monitor, SearchService, TaskManager, TransmissionDaemon, VLCPlayer,
+    MediaStore, Monitor, SearchService, TaskManager, TransmissionDaemon, VLCPlayer,
 };
 
 pub async fn run() -> anyhow::Result<()> {
-    let pool = adaptors::get_database().await?;
-
-    adaptors::do_migrations(&pool).await?;
-
-    let context = get_dependencies();
+    let context = get_dependencies().await?;
 
     let downloader: Downloader = Arc::new(TransmissionDaemon::new());
 
@@ -74,7 +72,9 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn get_dependencies() -> Context {
+async fn get_dependencies() -> Result<Context, Error> {
+    let repository = adaptors::SqlRepository::new(&get_database_url()).await?;
+
     let player: Option<Arc<dyn Player>> = if enable_vlc_player() {
         Some(Arc::new(VLCPlayer::start()))
     } else {
@@ -83,13 +83,16 @@ fn get_dependencies() -> Context {
 
     let task_manager = Arc::new(TaskManager::new(Arc::new(TokioProcessSpawner::new())));
 
-    Context::from(
-        Arc::new(MediaStore::from(get_movie_dir())),
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
+
+    Ok(Context::from(
+        Arc::new(MediaStore::from(file_storer)),
         SearchService::new(task_manager.clone()),
         MessageExchange::new(),
         player,
         task_manager,
-    )
+        Arc::new(repository),
+    ))
 }
 
 fn setup_logging() {

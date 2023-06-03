@@ -7,11 +7,10 @@ use crate::domain::messages::{
     PlayRequest, PlayerList, RenameRequest, Response,
 };
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
-use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Storer};
+use crate::domain::services::MessageExchange;
+use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Repository, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
-use crate::services::{
-    stream_video, MessageExchange, SearchService, TaskManager, TransmissionDaemon,
-};
+use crate::services::{stream_video, SearchService, TaskManager, TransmissionDaemon};
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
@@ -35,10 +34,10 @@ const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
 pub struct Context {
     store: Storer,
     search: SearchService,
-    //messenger: Arc<RwLock<MessagingService>>,
     messenger: MessageExchange,
     player: Option<Arc<dyn Player>>,
     task_manager: Arc<TaskManager>,
+    repository: Repository,
 }
 
 impl Context {
@@ -48,6 +47,7 @@ impl Context {
         messenger: MessageExchange,
         player: Option<Arc<dyn Player>>,
         task_manager: Arc<TaskManager>,
+        repository: Repository,
     ) -> Context {
         Context {
             store,
@@ -55,6 +55,7 @@ impl Context {
             messenger,
             player,
             task_manager,
+            repository,
         }
     }
 
@@ -264,7 +265,7 @@ async fn video(
     Path(video_path): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let video_file = state.store.as_path("", &video_path);
+    let video_file = state.store.as_local_path("", &video_path);
 
     stream_video(&video_file, headers).await
 }
@@ -307,10 +308,7 @@ async fn delete_video(state: State<SharedState>, Path(collection): Path<String>)
     '#Dragons Dens - S19EP6 - LONDON NOOTROPICS [y9W2MTHwGLE].webm'
      */
     match state.store.delete(&collection).await {
-        Ok(found) => match found {
-            true => (OK, Json(Response::success(collection))),
-            _ => std_error(NOT_FOUND, collection),
-        },
+        Ok(()) => (OK, Json(Response::success(collection))),
         Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -334,7 +332,7 @@ async fn convert_video(
     request: Json<ConversionRequest>,
 ) -> StdResponse {
     if let Some(conversion) = Conversion::find(&request.0.name) {
-        let collection = state.store.as_path("", &collection);
+        let collection = state.store.as_local_path("", &collection);
         conversion.execute(state.get_spawner(), &collection).await;
         (OK, Json(Response::success("conversion queued".to_string())))
     } else {

@@ -1,9 +1,12 @@
 mod common;
 
-use crate::common::{get_media_store, get_pirate_search, get_task_manager, get_youtube_search};
+use crate::common::{
+    get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
+};
 use anyhow::Result;
 use tokio::task::JoinHandle;
-use tvserver::services::{MessageExchange, SearchService};
+use tvserver::domain::services::MessageExchange;
+use tvserver::services::SearchService;
 use tvserver::{
     domain::models::{DownloadableItem, SearchResults},
     domain::SearchEngineType,
@@ -78,6 +81,7 @@ async fn make_server(searcher: SearchService, port: u16) -> JoinHandle<Result<()
         MessageExchange::new(),
         None,
         get_task_manager(),
+        get_repository().await,
     );
 
     common::create_server(context, port).await

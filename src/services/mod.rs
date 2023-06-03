@@ -1,8 +1,6 @@
 mod chatgpt;
 mod media_store;
 mod media_stream;
-mod message_exchange;
-mod messaging_service;
 mod monitor;
 mod pirate_bay;
 mod search;
@@ -14,8 +12,6 @@ mod youtube;
 
 pub use media_store::MediaStore;
 pub use media_stream::stream_video;
-pub use message_exchange::MessageExchange;
-pub use messaging_service::MessagingService;
 pub use monitor::Monitor;
 pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use search::{SearchEngine, SearchEngineMap, SearchService};

@@ -42,7 +42,7 @@ impl CollectionDetails {
     }
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoMetadata {
     pub duration: f64,
@@ -67,7 +67,8 @@ pub struct VideoParseError {
     message: String,
 }
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[serde_with::skip_serializing_none]
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoDetails {
     pub video: String,
@@ -76,6 +77,8 @@ pub struct VideoDetails {
     pub series: SeriesDetails,
     pub thumbnail: PathBuf,
     pub metadata: VideoMetadata,
+    pub checksum: i64,
+    pub search_phrase: Option<String>,
 }
 
 impl SeriesDetails {

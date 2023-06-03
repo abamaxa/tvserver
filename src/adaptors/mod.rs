@@ -5,7 +5,8 @@ mod subprocess;
 mod websocket;
 
 pub use http_fetcher::HTTPClient;
-pub use repository::{do_migrations, get_database};
+pub use object_store::FileSystemStore;
+pub use repository::SqlRepository;
 pub use subprocess::TokioProcessSpawner;
 pub use websocket::RemoteBrowserPlayer;
 

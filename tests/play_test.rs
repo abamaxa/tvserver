@@ -1,11 +1,14 @@
 mod common;
 
-use crate::common::{get_media_store, get_pirate_search, get_task_manager, get_youtube_search};
+use crate::common::{
+    get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
+};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tvserver::{domain::messages::Response, entrypoints, services::MessageExchange};
+use tvserver::domain::services::MessageExchange;
+use tvserver::{domain::messages::Response, entrypoints};
 
 #[tokio::test]
 async fn test_local_play() -> Result<()> {
@@ -17,6 +20,7 @@ async fn test_local_play() -> Result<()> {
         MessageExchange::new(),
         Some(common::get_player()),
         get_task_manager(),
+        get_repository().await,
     );
 
     let server = common::create_server(context, 57181).await;
@@ -54,8 +58,14 @@ async fn test_remote_play() -> Result<()> {
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context =
-        entrypoints::Context::from(get_media_store(), searcher, exchange, None, get_task_manager());
+    let context = entrypoints::Context::from(
+        get_media_store(),
+        searcher,
+        exchange,
+        None,
+        get_task_manager(),
+        get_repository().await,
+    );
 
     let server = common::create_server(context, 57182).await;
 

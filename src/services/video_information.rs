@@ -1,11 +1,17 @@
+use crate::domain::algorithm::get_collection_and_video_from_path;
 use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata};
 use rand::Rng;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
+use std::hash::Hasher;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::io::BufReader;
 use tokio::{fs, io::AsyncWriteExt, process::Command};
 
 pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
@@ -38,8 +44,8 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
     let task = spawner.execute(name, cmd, args).await;*/
 
     if !output.status.success() {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(Box::new(io::Error::new(
+            io::ErrorKind::Other,
             "ffprobe exited with an error",
         )));
     }
@@ -157,8 +163,30 @@ pub async fn extract_random_frame<P: AsRef<Path>>(
     Ok(())
 }
 
-pub async fn store_video_info(thumbnail_dir: PathBuf, video: PathBuf) -> io::Result<()> {
-    let data_file = video.with_extension("json");
+async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
+    let file = File::open(path).await?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = DefaultHasher::new();
+    let mut buffer = vec![0; 1024 * 1024]; // Read in chunks of 4MB
+    let mut total_read = 0;
+
+    while total_read <= 10 * 1024 * 1024 {
+        // Check if we've read more than 10MB
+        match reader.read(&mut buffer).await {
+            Ok(0) => break, // No more data to read
+            Ok(n) => {
+                hasher.write(&buffer[..n]);
+                total_read += n;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(hasher.finish() as i64)
+}
+
+pub async fn store_video_info(thumbnail_dir: PathBuf, path: PathBuf) -> io::Result<()> {
+    let data_file = path.with_extension("json");
     if data_file.exists() {
         return Ok(());
     }
@@ -167,37 +195,37 @@ pub async fn store_video_info(thumbnail_dir: PathBuf, video: PathBuf) -> io::Res
         fs::create_dir_all(&thumbnail_dir).await?;
     }
 
-    if is_subdirectory(&video, &thumbnail_dir) {
+    if is_subdirectory(&path, &thumbnail_dir) {
         return Ok(());
     }
 
-    eprintln!("processing: {}", video.to_str().unwrap());
+    eprintln!("processing: {}", path.to_str().unwrap());
 
-    let output_path = get_thumbnail_path(&thumbnail_dir, &video);
-    let video_meta = match get_video_metadata(&video).await {
+    let checksum = calculate_checksum(&path).await?;
+    let output_path = get_thumbnail_path(&thumbnail_dir, &path);
+    let metadata = match get_video_metadata(&path).await {
         Ok(video_info) => video_info,
         Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
     };
 
-    extract_random_frame(&video, &output_path, video_meta.clone()).await?;
+    extract_random_frame(&path, &output_path, metadata.clone()).await?;
 
     let thumbnail = match output_path.strip_prefix(&thumbnail_dir) {
         Ok(thumbnail) => PathBuf::from(thumbnail),
         _ => PathBuf::new(),
     };
 
+    let (collection, video) = get_collection_and_video_from_path(&path);
+
     let details = VideoDetails {
-        video: video
-            .file_name()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default()
-            .to_string(),
-        collection: "".to_string(),
+        video,
+        collection,
         description: "".to_string(),
-        series: SeriesDetails::from(video.as_path()),
-        thumbnail: thumbnail,
-        metadata: video_meta,
+        series: SeriesDetails::from(path.as_path()),
+        thumbnail,
+        metadata,
+        checksum,
+        search_phrase: None,
     };
 
     // for now just write to a disk file, TODO: use a database
@@ -209,7 +237,7 @@ pub async fn write_struct_to_json_file<T: Serialize>(data: &T, file_path: &Path)
     let json_string = serde_json::to_string_pretty(data)?;
 
     // Open the file in write mode or create it if it doesn't exist.
-    let mut file = fs::File::create(file_path).await?;
+    let mut file = File::create(file_path).await?;
 
     // Write the JSON string to the file.
     file.write_all(json_string.as_bytes()).await?;

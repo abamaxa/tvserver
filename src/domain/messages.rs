@@ -1,10 +1,12 @@
 use crate::domain::models::{CollectionDetails, VideoDetails};
 use crate::domain::traits::Storer;
 use crate::domain::{SearchEngineType, TaskType};
+use chrono::NaiveDate;
 use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 lazy_static! {
@@ -47,6 +49,23 @@ pub enum RemoteMessage {
     Close(SocketAddr),
 }
 
+/*
+This event is generated when a file is downloaded, renamed, deleted and is used to trigger
+copying the file into the MediaStore, metadata generation and notifications to remote clients.
+ */
+pub enum MediaEvent {
+    NewLocalMediaAvailable {
+        full_path: PathBuf,
+        search: Option<String>,
+        date: Option<NaiveDate>,
+    },
+    MediaMoved {
+        old_path: PathBuf,
+        new_path: PathBuf,
+    },
+    MediaDeleted(PathBuf),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MediaItem {
     Collection(CollectionDetails),
@@ -62,6 +81,12 @@ impl MediaItem {
 
 impl From<std::io::Error> for MediaItem {
     fn from(value: std::io::Error) -> Self {
+        Self::Error(value.to_string())
+    }
+}
+
+impl From<anyhow::Error> for MediaItem {
+    fn from(value: anyhow::Error) -> Self {
         Self::Error(value.to_string())
     }
 }
@@ -112,7 +137,10 @@ impl PlayRequest {
     }
 
     pub fn make_local_command(&self, store: &Storer) -> String {
-        format!("add file://{}", store.as_path(&self.collection, &self.video))
+        format!(
+            "add file://{}",
+            store.as_local_path(&self.collection, &self.video)
+        )
     }
 
     pub fn address(&self) -> SocketAddr {

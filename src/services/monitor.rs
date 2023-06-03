@@ -34,6 +34,10 @@ impl Monitor {
 
                 monitor.task_manager.cleanup(&monitor.store).await;
 
+                if let Err(err) = &monitor.store.check_video_information().await {
+                    tracing::error!("error checking video info: {}", err);
+                }
+
                 sleep(Duration::from_secs(3)).await;
             }
         })
@@ -93,7 +97,7 @@ mod tests {
 
         let mut mock_store = MockMediaStorer::new();
 
-        mock_store.expect_move_file().times(1).returning(|_| Ok(()));
+        mock_store.expect_add_file().times(1).returning(|_| Ok(()));
 
         let store: Storer = Arc::new(mock_store);
 

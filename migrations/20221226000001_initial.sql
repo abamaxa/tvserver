@@ -1,17 +1,23 @@
-CREATE TABLE IF NOT EXISTS users(
-    id INTEGER PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS video_details (
+    checksum INTEGER PRIMARY KEY NOT NULL,
+    video TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    description TEXT,
+    series_title TEXT,
+    season TEXT,
+    episode TEXT,
+    episode_title TEXT,
+    thumbnail TEXT,
+    duration REAL,
+    width INTEGER,
+    height INTEGER,
+    audio_tracks INTEGER,
+    search_phrase TEXT,
+    added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS videos (
+CREATE TABLE IF NOT EXISTS history (
     path TEXT PRIMARY KEY NOT NULL,
-    last_viewed DATE,
-    count_views INT DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS downloads (
-    link TEXT PRIMARY KEY NOT NULL,
-    engine INT NOT NULL,
-    added DATETIME NOT NULL,
-    process_id INT
+    started TIMESTAMP,
+    stopped TIMESTAMP
 );

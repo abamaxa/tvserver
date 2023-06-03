@@ -1,0 +1,135 @@
+{
+  "db": "SQLite",
+  "2d19866804b2ad472815c3366873642fa38cc6b1ab46ebd949315308fa1f9f2c": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "\n            DELETE FROM video_details \n            WHERE checksum = ?\n            "
+  },
+  "3f56ea213a89efefff3c1ab4ac0a8fee7f438941e0f3d0855e4591318eb9f48b": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 13
+      }
+    },
+    "query": "\n            UPDATE \n                video_details \n            SET \n                collection = ?, \n                description = ?, \n                series_title = ?, \n                season = ?, \n                episode = ?, \n                episode_title = ?, \n                thumbnail = ?, \n                duration = ?, \n                width = ?, \n                height = ?, \n                audio_tracks = ?,\n                search_phrase = ?\n            WHERE \n                checksum = ?\n            "
+  },
+  "a908f295569d8ca61d3ef50704ce6c43db3af200e539bee29b554ea51fb4d910": {
+    "describe": {
+      "columns": [
+        {
+          "name": "checksum",
+          "ordinal": 0,
+          "type_info": "Int64"
+        },
+        {
+          "name": "video",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "collection",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "description",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "series_title",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "season",
+          "ordinal": 5,
+          "type_info": "Text"
+        },
+        {
+          "name": "episode",
+          "ordinal": 6,
+          "type_info": "Text"
+        },
+        {
+          "name": "episode_title",
+          "ordinal": 7,
+          "type_info": "Text"
+        },
+        {
+          "name": "thumbnail",
+          "ordinal": 8,
+          "type_info": "Text"
+        },
+        {
+          "name": "duration",
+          "ordinal": 9,
+          "type_info": "Float"
+        },
+        {
+          "name": "width",
+          "ordinal": 10,
+          "type_info": "Int64"
+        },
+        {
+          "name": "height",
+          "ordinal": 11,
+          "type_info": "Int64"
+        },
+        {
+          "name": "audio_tracks",
+          "ordinal": 12,
+          "type_info": "Int64"
+        },
+        {
+          "name": "search_phrase",
+          "ordinal": 13,
+          "type_info": "Text"
+        },
+        {
+          "name": "added",
+          "ordinal": 14,
+          "type_info": "Datetime"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "\n            SELECT \n                *\n            FROM \n                video_details \n            WHERE \n                checksum = ?\n            "
+  },
+  "e02dac2b8558ed49b421df69e798dee8d41909f6f4357ed53d1b9dc4204d5be7": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 14
+      }
+    },
+    "query": "\n            INSERT INTO video_details (\n                checksum, \n                video, \n                collection, \n                description, \n                series_title, \n                season, \n                episode, \n                episode_title, \n                thumbnail, \n                duration, \n                width, \n                height, \n                audio_tracks, \n                search_phrase\n            )\n            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            "
+  }
+}
