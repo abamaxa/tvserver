@@ -4,12 +4,15 @@ use regex::Regex;
 use std::path::{Path, PathBuf};
 use titlecase::titlecase;
 
-pub fn get_next_version_name(filename: &str) -> Option<String> {
+pub fn get_next_version_name(filename: &str, ext: Option<&str>) -> Option<String> {
     let path = Path::new(filename);
 
     let mut stem = path.file_stem()?.to_str()?.to_string();
 
-    let extension = path.extension()?.to_str()?;
+    let extension = match ext {
+        Some(ext) => ext,
+        None => path.extension()?.to_str()?,
+    };
 
     let mut new_path = PathBuf::from(path.parent()?);
 
@@ -145,10 +148,10 @@ mod test {
 
     #[test]
     fn test_get_next_version_name() {
-        let path = "tests/fixtures/media_dir/collection2/test_collection2-v1.mp4";
+        let path = "tests/fixtures/media_dir/collection2/test_collection2-v1.mkv";
 
         assert_eq!(
-            get_next_version_name(path),
+            get_next_version_name(path, true),
             Some("tests/fixtures/media_dir/collection2/test_collection2-v3.mp4".to_string())
         );
     }
