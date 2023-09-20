@@ -1,13 +1,14 @@
 use crate::domain::models::{CollectionDetails, VideoDetails};
 use crate::domain::traits::Storer;
 use crate::domain::{SearchEngineType, TaskType};
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use tokio::sync::broadcast;
 
 lazy_static! {
     static ref DEFAULT_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 80);
@@ -49,21 +50,47 @@ pub enum RemoteMessage {
     Close(SocketAddr),
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAdded {
+    pub full_path: PathBuf,
+    pub search: Option<String>,
+    pub date: Option<NaiveDate>,
+}
+
+impl MediaAdded {
+    pub fn new(path: &Path, search: Option<String>) -> Self {
+        Self {
+            full_path: PathBuf::from(path),
+            search: search,
+            date: Some(NaiveDate::from(Utc::now().naive_utc())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMoved {
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+}
+
 /*
 This event is generated when a file is downloaded, renamed, deleted and is used to trigger
 copying the file into the MediaStore, metadata generation and notifications to remote clients.
  */
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum MediaEvent {
-    NewLocalMediaAvailable {
-        full_path: PathBuf,
-        search: Option<String>,
-        date: Option<NaiveDate>,
-    },
-    MediaMoved {
-        old_path: PathBuf,
-        new_path: PathBuf,
-    },
+    MediaAvailable(MediaAdded),
+    MediaMoved(MediaMoved),
     MediaDeleted(PathBuf),
+}
+
+impl MediaEvent {
+    pub fn new_media(path: &Path, search: Option<String>) -> Self {
+        Self::MediaAvailable(MediaAdded::new(path, search))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,7 +118,7 @@ impl From<anyhow::Error> for MediaItem {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceivedRemoteMessage {
     pub from_address: SocketAddr,
     pub message: RemoteMessage,
@@ -228,6 +255,13 @@ pub struct TaskState {
     pub task_type: TaskType,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalMessage {
+    Media(MediaEvent),
+    Task(Vec<TaskState>),
+}
+
 fn as_sockaddr(remote_address: &Option<String>) -> SocketAddr {
     match remote_address {
         Some(addr) => match SocketAddr::from_str(&addr) {
@@ -326,3 +360,6 @@ impl ChatGPTMessage {
         }
     }
 }
+
+pub type LocalMessageReceiver = broadcast::Receiver<LocalMessage>;
+pub type LocalMessageSender = broadcast::Sender<LocalMessage>;

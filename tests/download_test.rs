@@ -11,7 +11,7 @@ use tvserver::{domain::messages::Response, entrypoints::Context};
 async fn test_pirate_download() -> Result<()> {
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::from(
+    let context = Context::new(
         get_media_store(),
         searcher,
         MessageExchange::new(),

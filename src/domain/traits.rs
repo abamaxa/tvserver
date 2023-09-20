@@ -39,7 +39,7 @@ pub trait MediaStorer: Send + Sync {
     async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
     async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
-    async fn check_video_information(&self) -> anyhow::Result<()>;
+    async fn check_video_information(&self, repo: Repository) -> anyhow::Result<()>;
     fn as_local_path(&self, collection: &str, video: &str) -> String;
 }
 
@@ -149,3 +149,17 @@ pub trait Databaser: Sync + Send {
 }
 
 pub type Repository = Arc<dyn Databaser>;
+
+#[async_trait]
+pub trait ChannelReceiver<T>: Sync + Send {
+    async fn recv(&mut self) -> anyhow::Result<T>;
+}
+
+pub type Receiver<T> = Arc<dyn ChannelReceiver<T>>;
+
+pub trait ChannelBroadcaster<T>: Sync + Send + Clone {
+    fn subscribe(&self) -> Receiver<T>;
+    fn send(&self, message: T) -> anyhow::Result<()>;
+}
+
+pub type Broadcaster<T> = Arc<dyn ChannelBroadcaster<T>>;

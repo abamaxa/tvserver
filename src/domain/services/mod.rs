@@ -1,3 +1,4 @@
+mod channels;
 mod client_manager;
 mod message_exchange;
 

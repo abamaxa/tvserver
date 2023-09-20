@@ -75,7 +75,7 @@ async fn test_pirate_bay() -> Result<()> {
 }
 
 async fn make_server(searcher: SearchService, port: u16) -> JoinHandle<Result<()>> {
-    let context = entrypoints::Context::from(
+    let context = entrypoints::Context::new(
         get_media_store(),
         searcher,
         MessageExchange::new(),

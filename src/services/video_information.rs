@@ -1,5 +1,9 @@
 use crate::domain::algorithm::get_collection_and_video_from_path;
+use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
+use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender, MediaEvent};
 use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata};
+use crate::domain::traits::Repository;
+use anyhow::anyhow;
 use rand::Rng;
 use serde::Serialize;
 use serde_json::Value;
@@ -12,7 +16,53 @@ use std::process::Stdio;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
+use tokio::task::JoinHandle;
 use tokio::{fs, io::AsyncWriteExt, process::Command};
+
+pub struct MetaDataManager {
+    repo: Repository,
+    receiver: LocalMessageReceiver,
+    sender: LocalMessageSender,
+}
+
+impl MetaDataManager {
+    fn new(repo: Repository, receiver: LocalMessageReceiver, sender: LocalMessageSender) -> Self {
+        Self {
+            repo,
+            receiver,
+            sender,
+        }
+    }
+
+    pub fn consume(
+        repo: Repository,
+        receiver: LocalMessageReceiver,
+        sender: LocalMessageSender,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut manager = Self::new(repo, receiver, sender);
+            manager.event_loop().await
+        })
+    }
+
+    async fn event_loop(&mut self) {
+        while let Ok(msg) = self.receiver.recv().await {
+            match msg {
+                LocalMessage::Media(event) => self.handle_media_event(event).await,
+                _ => continue,
+            }
+        }
+    }
+
+    async fn handle_media_event(&self, event: MediaEvent) {
+        let _ = match event {
+            MediaEvent::MediaAvailable(event) => {
+                store_video_info(event.full_path, self.repo.clone()).await
+            }
+            _ => return,
+        };
+    }
+}
 
 pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
     //let spawner = Arc::new(TokioProcessSpawner::new());
@@ -117,6 +167,10 @@ pub async fn extract_random_frame<P: AsRef<Path>>(
     let mut duration = metadata.duration;
     let random_time;
 
+    if duration < 0.1 {
+        return Ok(());
+    }
+
     // if its longer than 10 minutes skip the last 10 minutes
     if duration > 600.0 {
         duration -= 180.0;
@@ -185,7 +239,8 @@ async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
     Ok(hasher.finish() as i64)
 }
 
-pub async fn store_video_info(thumbnail_dir: PathBuf, path: PathBuf) -> io::Result<()> {
+pub async fn store_video_info(path: PathBuf, repo: Repository) -> anyhow::Result<()> {
+    let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
     let data_file = path.with_extension("json");
     if data_file.exists() {
         return Ok(());
@@ -205,7 +260,13 @@ pub async fn store_video_info(thumbnail_dir: PathBuf, path: PathBuf) -> io::Resu
     let output_path = get_thumbnail_path(&thumbnail_dir, &path);
     let metadata = match get_video_metadata(&path).await {
         Ok(video_info) => video_info,
-        Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+        Err(e) => {
+            tracing::error!("get_video_metadata failed for {:?} - {}", &data_file, e);
+            VideoMetadata {
+                ..Default::default()
+            }
+            // return Err(anyhow!(e.to_string()));
+        }
     };
 
     extract_random_frame(&path, &output_path, metadata.clone()).await?;
@@ -228,8 +289,17 @@ pub async fn store_video_info(thumbnail_dir: PathBuf, path: PathBuf) -> io::Resu
         search_phrase: None,
     };
 
-    // for now just write to a disk file, TODO: use a database
-    write_struct_to_json_file(&details, &data_file).await
+    write_struct_to_json_file(&details, &data_file).await?;
+
+    match repo.save_video(&details).await {
+        Ok(count) => {
+            if count != 1 {
+                tracing::warn!("save details did not change any records: {:?}", details);
+            }
+            Ok(())
+        }
+        Err(err) => Err(anyhow!(err.to_string())),
+    }
 }
 
 pub async fn write_struct_to_json_file<T: Serialize>(data: &T, file_path: &Path) -> io::Result<()> {

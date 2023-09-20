@@ -6,6 +6,7 @@ use common::get_pirate_search;
 use reqwest::{header::RANGE, StatusCode};
 use std::env;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tvserver::adaptors::FileSystemStore;
 use tvserver::domain::config::MOVIE_DIR;
 use tvserver::domain::services::MessageExchange;
@@ -19,13 +20,15 @@ const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
 async fn test_video_stream() -> Result<()> {
     env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
 
+    let (tx, mut rx1) = broadcast::channel(16);
+
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
 
-    let store = Arc::new(MediaStore::from(file_storer));
+    let store = Arc::new(MediaStore::new(file_storer, tx));
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::from(
+    let context = Context::new(
         store,
         searcher,
         MessageExchange::new(),

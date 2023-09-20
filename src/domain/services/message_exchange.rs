@@ -1,50 +1,61 @@
 use super::super::messages::{PlayerListItem, ReceivedRemoteMessage, RemoteMessage, Response};
 use super::super::traits::RemotePlayer;
 use super::client_manager::{ClientMap, MessengerMap};
+use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender};
 use axum::{http::StatusCode, Json};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::{
-    mpsc::{channel, Sender},
-    RwLock,
-};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
-
-type ObserverMap = Arc<RwLock<HashMap<SocketAddr, Vec<SocketAddr>>>>;
-// type WatchMap = Arc<RwLock<HashMap<RemoteMessage, Sender<RemoteMessage>>>>;
 
 #[derive(Clone)]
 pub struct MessageExchange {
     /*
     Tracks clients that are available to play media, e.g. Samsung TVs.
+
+    Queues:
+
+    File available/changed/deleted
+    Remote Message Received
+    Task Started/State/Complete
      */
     client_map: ClientMap,
-    observers: ObserverMap,
-    sender: Sender<ReceivedRemoteMessage>,
+    sender: mpsc::Sender<ReceivedRemoteMessage>,
+    receiver: broadcast::Sender<ReceivedRemoteMessage>,
+    local_sender: LocalMessageSender,
+    local_receiver: Arc<LocalMessageReceiver>,
 }
 
 impl MessageExchange {
     pub fn new() -> Self {
-        let observers = Arc::new(RwLock::new(HashMap::<SocketAddr, Vec<SocketAddr>>::new()));
         let client_map = Arc::new(RwLock::new(MessengerMap::new()));
 
-        let (sender, mut out_rx) = channel::<ReceivedRemoteMessage>(100);
+        let (sender, mut out_rx) = mpsc::channel::<ReceivedRemoteMessage>(100);
 
-        let _ = tokio::spawn((|observers: ObserverMap, client_map: ClientMap| async move {
-            while let Some(msg) = out_rx.recv().await {
-                MessageExchange::on_player_message(
-                    observers.clone(),
-                    client_map.clone(),
-                    msg.from_address,
-                    msg.message,
-                )
-                .await;
-            }
-        })(observers.clone(), client_map.clone()));
+        let (in_tx, _receiver) = broadcast::channel::<ReceivedRemoteMessage>(1);
+
+        let _ = tokio::spawn(
+            (|client_map: ClientMap, broadcast: broadcast::Sender<ReceivedRemoteMessage>| async move {
+                let _hold = Arc::new(_receiver);
+                while let Some(msg) = out_rx.recv().await {
+                    if let Err(e) = broadcast.send(msg.clone()) {
+                        tracing::error!("could not send remote message: {}, {:?}", e, &msg);
+                    }
+
+                    MessageExchange::on_player_message(
+                        client_map.clone(),
+                        msg.from_address,
+                        msg.message,
+                    )
+                    .await;
+                }
+            })(client_map.clone(), in_tx.clone()),
+        );
+
+        let (local_sender, local_receiver) = broadcast::channel::<LocalMessage>(100);
 
         let _ = tokio::spawn((|client_map: ClientMap| async move {
             loop {
@@ -54,8 +65,10 @@ impl MessageExchange {
 
         let exchanger = Self {
             client_map: client_map.clone(),
-            observers: observers.clone(),
+            receiver: in_tx,
+            local_receiver: Arc::new(local_receiver),
             sender,
+            local_sender,
         };
 
         exchanger
@@ -93,19 +106,7 @@ impl MessageExchange {
             .await;
     }
 
-    pub async fn observe_player(&self, player_key: SocketAddr, client_key: SocketAddr) {
-        let mut map = self.observers.write().await;
-        if let Some(observers) = map.get_mut(&player_key) {
-            if !observers.contains(&client_key) {
-                observers.push(client_key);
-            }
-        } else {
-            map.insert(player_key, vec![client_key]);
-        }
-    }
-
     pub async fn on_player_message(
-        _observers: ObserverMap,
         client_map: ClientMap,
         player_key: SocketAddr,
         message: RemoteMessage,
@@ -116,41 +117,16 @@ impl MessageExchange {
             RemoteMessage::SendLastState => {
                 client_map.read().await.send_last_message(player_key).await
             }
-            _ => Self::dispatch_message(_observers, client_map, player_key, message).await,
+            _ => Self::dispatch_message(client_map, player_key, message).await,
         };
     }
 
     async fn dispatch_message(
-        _observers: ObserverMap,
         client_map: ClientMap,
         player_key: SocketAddr,
         message: RemoteMessage,
     ) {
         let mut clients = vec![];
-        /*
-        For now we will push every message received to every
-        other client
-
-        let mut client_keys = None;
-
-        {
-            let mut map = observers.write().await;
-            if let Some(keys) = map.get(&player_key) {
-                client_keys = Some(keys.clone());
-            }
-            map.update_last_message(message);
-        }
-
-        if let Some(keys) = client_keys {
-            {
-                let map = client_map.read().await;
-                for key in keys.iter() {
-                    if let Some(item) = map.get(key) {
-                        clients.push(item.client.clone());
-                    }
-                }
-            }
-        }*/
         {
             let mut map = client_map.write().await;
 
@@ -200,8 +176,20 @@ impl MessageExchange {
         }
     }
 
-    pub fn get_sender(&self) -> Sender<ReceivedRemoteMessage> {
+    pub fn get_sender(&self) -> mpsc::Sender<ReceivedRemoteMessage> {
         self.sender.clone()
+    }
+
+    pub fn get_receiver(&self) -> broadcast::Receiver<ReceivedRemoteMessage> {
+        self.receiver.subscribe()
+    }
+
+    pub fn get_local_sender(&self) -> LocalMessageSender {
+        self.local_sender.clone()
+    }
+
+    pub fn get_local_receiver(&self) -> LocalMessageReceiver {
+        self.local_sender.subscribe()
     }
 }
 
@@ -248,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_channels() {
-        let (tx, mut rx) = watch::channel("hello");
+        let (tx, rx) = watch::channel("hello");
 
         tokio::spawn((|mut rx: Receiver<&'static str>| async move {
             while rx.changed().await.is_ok() {

@@ -21,6 +21,14 @@ const TO_MP4: Conversion = Conversion {
     extension: Some("mp4"),
 };
 
+const REMOVE_PACKED_B_FRAMES: Conversion = Conversion {
+    name: "Remove packed B-Frames",
+    description: "Removes non-standard and wasteful way to store B-frames",
+    exec: "ffmpeg",
+    args: "-i '{source}' -codec copy -bsf:v mpeg4_unpack_bframes '{destination}'",
+    extension: None,
+};
+
 const TO_X265: Conversion = Conversion {
     name: "Encode Video with x265 codec",
     description:
@@ -74,9 +82,10 @@ const TO_VP9_AAC_MKV: Conversion = Conversion {
     extension: Some("mkv"),
 };
 
-pub const AVAILABLE_CONVERSIONS: [Conversion; 7] = [
+pub const AVAILABLE_CONVERSIONS: [Conversion; 8] = [
     TO_MP4,
     TO_X265,
+    REMOVE_PACKED_B_FRAMES,
     INCREASE_VOLUME,
     TO_H264_AAC_MP4,
     TO_H265_AAC_MP4,

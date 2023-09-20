@@ -17,5 +17,6 @@ pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use search::{SearchEngine, SearchEngineMap, SearchService};
 pub use task_manager::TaskManager;
 pub use torrents::TransmissionDaemon;
+pub use video_information::MetaDataManager;
 pub use vlc_player::VLCPlayer;
 pub use youtube::{YoutubeClient, YoutubeFetcher, YoutubeResult};

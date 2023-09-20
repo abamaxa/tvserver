@@ -14,7 +14,7 @@ use tvserver::{domain::messages::Response, entrypoints};
 async fn test_local_play() -> Result<()> {
     let search = get_youtube_search("yt_search.json").await;
 
-    let context = entrypoints::Context::from(
+    let context = entrypoints::Context::new(
         get_media_store(),
         search,
         MessageExchange::new(),
@@ -58,7 +58,7 @@ async fn test_remote_play() -> Result<()> {
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = entrypoints::Context::from(
+    let context = entrypoints::Context::new(
         get_media_store(),
         searcher,
         exchange,

@@ -5,8 +5,8 @@
 //!
 //! provides an implementation of MediaStorer.
 use crate::domain::algorithm::get_collection_and_video_from_path;
-use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
-use crate::domain::messages::MediaItem;
+use crate::domain::config::get_movie_dir;
+use crate::domain::messages::{LocalMessage, LocalMessageSender, MediaEvent, MediaItem};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -15,21 +15,20 @@ use tokio::io;
 use tokio::task::JoinSet;
 
 use crate::domain::models::CollectionDetails;
-use crate::domain::traits::{FileStorer, MediaStorer};
+use crate::domain::traits::{FileStorer, MediaStorer, Repository};
 use crate::services::video_information::store_video_info;
 
 #[derive(Clone)]
 pub struct MediaStore {
     store: FileStorer,
-}
-
-impl From<FileStorer> for MediaStore {
-    fn from(store: FileStorer) -> MediaStore {
-        MediaStore { store }
-    }
+    sender: LocalMessageSender,
 }
 
 impl MediaStore {
+    pub fn new(store: FileStorer, sender: LocalMessageSender) -> MediaStore {
+        MediaStore { store, sender }
+    }
+
     async fn get_new_video_path(&self, path: &Path) -> anyhow::Result<PathBuf> {
         let dest_dir = Path::new(&get_movie_dir()).join("New");
 
@@ -65,16 +64,20 @@ impl MediaStore {
         Ok(())
     }
 
-    async fn store_video_info(&self, path: &Path) -> io::Result<()> {
-        let thumbnail_dir = get_thumbnail_dir(&get_movie_dir());
-        if let Err(err) = store_video_info(thumbnail_dir, PathBuf::from(path)).await {
+    async fn store_video_info(&self, path: &Path) -> anyhow::Result<()> {
+        let event = MediaEvent::new_media(path, None);
+
+        self.sender.send(LocalMessage::Media(event))?;
+
+        /*if let Err(err) = store_video_info(PathBuf::from(path)).await {
             tracing::error!("could not store info for video {:?}, error was: {}", path, err);
-        }
+        }*/
+
         Ok(())
     }
 
     #[async_recursion]
-    async fn process_directory(thumbnail_dir: PathBuf, path: PathBuf) -> io::Result<()> {
+    async fn process_directory(path: PathBuf, repo: Repository) -> io::Result<()> {
         let mut tasks = JoinSet::new();
         let mut read_dir = fs::read_dir(path).await?;
 
@@ -91,12 +94,12 @@ impl MediaStore {
             }
 
             if path.is_dir() {
-                Self::process_directory(thumbnail_dir.clone(), path.clone()).await?;
+                Self::process_directory(path.clone(), repo.clone()).await?;
             } else if let Some(extension) = path.extension() {
                 if extension != "json" {
                     let json_path = path.with_extension("json");
                     if !json_path.exists() {
-                        tasks.spawn(store_video_info(thumbnail_dir.clone(), path.clone()));
+                        tasks.spawn(store_video_info(path.clone(), repo.clone()));
                     }
                 }
             }
@@ -171,10 +174,8 @@ impl MediaStorer for MediaStore {
         self.store.delete(path).await
     }
 
-    async fn check_video_information(&self) -> anyhow::Result<()> {
-        let thumbnail_dir = get_thumbnail_dir(&get_movie_dir());
-
-        Self::process_directory(thumbnail_dir, PathBuf::from(&get_movie_dir())).await?;
+    async fn check_video_information(&self, repo: Repository) -> anyhow::Result<()> {
+        Self::process_directory(PathBuf::from(&get_movie_dir()), repo).await?;
 
         Ok(())
     }
@@ -193,14 +194,18 @@ impl MediaStorer for MediaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adaptors::FileSystemStore;
+    use crate::adaptors::{FileSystemStore, SqlRepository};
     use anyhow::Result;
     use std::sync::Arc;
+    use tokio::sync::broadcast;
 
     #[tokio::test]
     async fn test_video_entry_creation() -> Result<()> {
+        let (tx, mut rx1) = broadcast::channel(16);
+
         let filer: FileStorer = Arc::new(FileSystemStore::new("tests/fixtures/media_dir"));
-        let store = MediaStore::from(filer);
+
+        let store = MediaStore::new(filer, tx);
 
         let results = store.list_collection("").await?;
 
@@ -229,10 +234,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_check_video_info() -> Result<()> {
+        let (tx, mut rx1) = broadcast::channel(16);
         let filer: FileStorer = Arc::new(FileSystemStore::new("/Users/chris2/Movies"));
-        let store = MediaStore::from(filer);
+        let store = MediaStore::new(filer, tx);
+        let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
 
-        store.check_video_information().await?;
+        store.check_video_information(repo).await?;
 
         Ok(())
     }

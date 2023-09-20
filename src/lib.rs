@@ -31,7 +31,7 @@ use crate::domain::{
 };
 use crate::entrypoints::{register, Context};
 use crate::services::{
-    MediaStore, Monitor, SearchService, TaskManager, TransmissionDaemon, VLCPlayer,
+    MediaStore, MetaDataManager, Monitor, SearchService, TaskManager, TransmissionDaemon, VLCPlayer,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -39,12 +39,20 @@ pub async fn run() -> anyhow::Result<()> {
 
     let downloader: Downloader = Arc::new(TransmissionDaemon::new());
 
-    let monitor_handle =
-        Monitor::start(context.get_store(), downloader, context.get_task_manager());
+    let monitor_handle = Monitor::start(
+        context.get_store(),
+        downloader,
+        context.get_task_manager(),
+        context.get_repository(),
+    );
 
     setup_logging();
 
-    context.get_store().check_video_information().await?;
+    let metadata_manager = MetaDataManager::consume(
+        context.get_repository(),
+        context.get_local_receiver(),
+        context.get_local_sender(),
+    );
 
     let app = register(Arc::new(context))
         .nest_service("/", ServeDir::new(get_client_path("app")))
@@ -68,11 +76,14 @@ pub async fn run() -> anyhow::Result<()> {
         .unwrap();
 
     monitor_handle.abort();
+    metadata_manager.abort();
 
     Ok(())
 }
 
 async fn get_dependencies() -> Result<Context, Error> {
+    let messenger = MessageExchange::new();
+
     let repository = adaptors::SqlRepository::new(&get_database_url()).await?;
 
     let player: Option<Arc<dyn Player>> = if enable_vlc_player() {
@@ -85,10 +96,10 @@ async fn get_dependencies() -> Result<Context, Error> {
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
 
-    Ok(Context::from(
-        Arc::new(MediaStore::from(file_storer)),
+    Ok(Context::new(
+        Arc::new(MediaStore::new(file_storer, messenger.get_local_sender())),
         SearchService::new(task_manager.clone()),
-        MessageExchange::new(),
+        messenger,
         player,
         task_manager,
         Arc::new(repository),

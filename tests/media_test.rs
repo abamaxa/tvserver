@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
+use tokio::sync::broadcast;
 use tvserver::adaptors::FileSystemStore;
 use tvserver::domain::messages::Response;
 use tvserver::domain::services::MessageExchange;
@@ -19,11 +20,13 @@ use tvserver::services::MediaStore;
 async fn test_rename_video() -> Result<()> {
     let file_storer: FileStorer = Arc::new(FileSystemStore::new("tests/fixtures/media_dir"));
 
-    let store = Arc::new(MediaStore::from(file_storer));
+    let (tx, mut rx1) = broadcast::channel(16);
+
+    let store = Arc::new(MediaStore::new(file_storer, tx));
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::from(
+    let context = Context::new(
         store,
         searcher,
         MessageExchange::new(),

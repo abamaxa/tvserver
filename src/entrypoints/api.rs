@@ -3,8 +3,9 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::adaptors::RemoteBrowserPlayer;
 use crate::domain::messages::{
-    ClientLogMessage, Command, ConversionRequest, DownloadRequest, LocalCommand, MediaItem,
-    PlayRequest, PlayerList, RenameRequest, Response,
+    ClientLogMessage, Command, ConversionRequest, DownloadRequest, LocalCommand,
+    LocalMessageReceiver, LocalMessageSender, MediaItem, PlayRequest, PlayerList, RenameRequest,
+    Response,
 };
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
 use crate::domain::services::MessageExchange;
@@ -41,7 +42,7 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn from(
+    pub fn new(
         store: Storer,
         search: SearchService,
         messenger: MessageExchange,
@@ -69,6 +70,18 @@ impl Context {
 
     pub fn get_spawner(&self) -> Arc<impl ProcessSpawner> {
         self.task_manager.clone()
+    }
+
+    pub fn get_repository(&self) -> Repository {
+        self.repository.clone()
+    }
+
+    pub fn get_local_sender(&self) -> LocalMessageSender {
+        self.messenger.get_local_sender()
+    }
+
+    pub fn get_local_receiver(&self) -> LocalMessageReceiver {
+        self.messenger.get_local_receiver()
     }
 }
 

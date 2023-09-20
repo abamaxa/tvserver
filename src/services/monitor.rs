@@ -1,4 +1,4 @@
-use crate::domain::traits::{Downloader, Storer, Task};
+use crate::domain::traits::{Downloader, Repository, Storer, Task};
 use crate::services::TaskManager;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
@@ -15,6 +15,7 @@ impl Monitor {
         store: Storer,
         downloads: Downloader,
         task_manager: Arc<TaskManager>,
+        repo: Repository,
     ) -> JoinHandle<()> {
         task::spawn(async move {
             tracing::info!("starting download monitor");
@@ -34,7 +35,7 @@ impl Monitor {
 
                 monitor.task_manager.cleanup(&monitor.store).await;
 
-                if let Err(err) = &monitor.store.check_video_information().await {
+                if let Err(err) = &monitor.store.check_video_information(repo.clone()).await {
                     tracing::error!("error checking video info: {}", err);
                 }
 
@@ -62,6 +63,7 @@ impl Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adaptors::SqlRepository;
     use anyhow::Result;
     use mockall::predicate;
     use tokio::time;
@@ -105,7 +107,9 @@ mod tests {
 
         let task_manager = Arc::new(TaskManager::new(spawner));
 
-        let monitor_handle = Monitor::start(store, downloader, task_manager);
+        let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+
+        let monitor_handle = Monitor::start(store, downloader, task_manager, repo);
 
         // wait for monitor to finish a cycle, if it hasn't finished by then it ought
         // to be a test fail
