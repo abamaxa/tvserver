@@ -114,10 +114,13 @@ fn setup_logging() {
         .with_target(false)
         .compact();
 
+    //const FILTER: &str = "tvserver=debug,tower_http=debug";
+    const FILTER: &str = "tvserver=info,tower_http=debug";
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tvserver=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| FILTER.into()),
         )
         .with(tracing_subscriber::fmt::layer().event_format(format))
         .init();
