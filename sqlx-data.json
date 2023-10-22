@@ -1,5 +1,107 @@
 {
   "db": "SQLite",
+  "28e7de61416b5fd7aeaa53f2cf3757db2e553a2cb5cbad62ceb5f01298a84122": {
+    "describe": {
+      "columns": [
+        {
+          "name": "checksum",
+          "ordinal": 0,
+          "type_info": "Int64"
+        },
+        {
+          "name": "video",
+          "ordinal": 1,
+          "type_info": "Text"
+        },
+        {
+          "name": "collection",
+          "ordinal": 2,
+          "type_info": "Text"
+        },
+        {
+          "name": "description",
+          "ordinal": 3,
+          "type_info": "Text"
+        },
+        {
+          "name": "series_title",
+          "ordinal": 4,
+          "type_info": "Text"
+        },
+        {
+          "name": "season",
+          "ordinal": 5,
+          "type_info": "Text"
+        },
+        {
+          "name": "episode",
+          "ordinal": 6,
+          "type_info": "Text"
+        },
+        {
+          "name": "episode_title",
+          "ordinal": 7,
+          "type_info": "Text"
+        },
+        {
+          "name": "thumbnail",
+          "ordinal": 8,
+          "type_info": "Text"
+        },
+        {
+          "name": "duration",
+          "ordinal": 9,
+          "type_info": "Float"
+        },
+        {
+          "name": "width",
+          "ordinal": 10,
+          "type_info": "Int64"
+        },
+        {
+          "name": "height",
+          "ordinal": 11,
+          "type_info": "Int64"
+        },
+        {
+          "name": "audio_tracks",
+          "ordinal": 12,
+          "type_info": "Int64"
+        },
+        {
+          "name": "search_phrase",
+          "ordinal": 13,
+          "type_info": "Text"
+        },
+        {
+          "name": "added",
+          "ordinal": 14,
+          "type_info": "Datetime"
+        }
+      ],
+      "nullable": [
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "parameters": {
+        "Right": 1
+      }
+    },
+    "query": "\n            SELECT \n                *\n            FROM \n                video_details \n            WHERE \n                collection = ?\n            "
+  },
   "2d19866804b2ad472815c3366873642fa38cc6b1ab46ebd949315308fa1f9f2c": {
     "describe": {
       "columns": [],
