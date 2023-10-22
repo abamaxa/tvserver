@@ -76,6 +76,9 @@ impl Filer for FileStoreObject {
 
     async fn get_metadata(&self) -> Result<VideoDetails> {
         let data_file = self.file.with_extension("json");
+        if !data_file.exists() && self.file.exists() {
+            return Ok(VideoDetails{..Default::default()})
+        }
 
         Self::read_struct_from_json_file(&data_file).await
     }

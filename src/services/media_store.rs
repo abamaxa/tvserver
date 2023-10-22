@@ -12,11 +12,9 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io;
-use tokio::task::JoinSet;
 
 use crate::domain::models::CollectionDetails;
 use crate::domain::traits::{FileStorer, MediaStorer, Repository};
-use crate::services::video_information::store_video_info;
 
 #[derive(Clone)]
 pub struct MediaStore {
@@ -59,26 +57,21 @@ impl MediaStore {
             )
             .await?;
 
-        self.store_video_info(destination).await?;
+        self.store_video_info(destination);
 
         Ok(())
     }
 
-    async fn store_video_info(&self, path: &Path) -> anyhow::Result<()> {
+    fn store_video_info(&self, path: &Path) {
         let event = MediaEvent::new_media(path, None);
 
-        self.sender.send(LocalMessage::Media(event))?;
-
-        /*if let Err(err) = store_video_info(PathBuf::from(path)).await {
-            tracing::error!("could not store info for video {:?}, error was: {}", path, err);
-        }*/
-
-        Ok(())
+        if let Err(e) = self.sender.send(LocalMessage::Media(event)) {
+            tracing::error!("could not queue Media event")
+        }
     }
 
     #[async_recursion]
-    async fn process_directory(path: PathBuf, repo: Repository) -> io::Result<()> {
-        let mut tasks = JoinSet::new();
+    async fn process_directory(&self, path: PathBuf, repo: Repository) -> io::Result<()> {
         let mut read_dir = fs::read_dir(path).await?;
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
@@ -94,19 +87,17 @@ impl MediaStore {
             }
 
             if path.is_dir() {
-                Self::process_directory(path.clone(), repo.clone()).await?;
+                self.process_directory(path.clone(), repo.clone()).await?;
             } else if let Some(extension) = path.extension() {
                 if extension != "json" {
                     let json_path = path.with_extension("json");
                     if !json_path.exists() {
-                        tasks.spawn(store_video_info(path.clone(), repo.clone()));
+                        tracing::warn!("queuing meteadata for {:?}", path);
+                        self.store_video_info(&path);
                     }
                 }
             }
         }
-
-        // Wait for all tasks to complete
-        while let Some(_) = tasks.join_next().await {}
 
         Ok(())
     }
@@ -175,7 +166,7 @@ impl MediaStorer for MediaStore {
     }
 
     async fn check_video_information(&self, repo: Repository) -> anyhow::Result<()> {
-        Self::process_directory(PathBuf::from(&get_movie_dir()), repo).await?;
+        self.process_directory(PathBuf::from(&get_movie_dir()), repo).await?;
 
         Ok(())
     }

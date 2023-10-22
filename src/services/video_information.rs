@@ -41,7 +41,8 @@ impl MetaDataManager {
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut manager = Self::new(repo, receiver, sender);
-            manager.event_loop().await
+            manager.event_loop().await;
+            eprintln!("local event loop exiting");
         })
     }
 
@@ -240,6 +241,7 @@ async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
 }
 
 pub async fn store_video_info(path: PathBuf, repo: Repository) -> anyhow::Result<()> {
+    eprintln!("processing: {}", path.to_str().unwrap());
     let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
     let data_file = path.with_extension("json");
     if data_file.exists() {
@@ -254,18 +256,16 @@ pub async fn store_video_info(path: PathBuf, repo: Repository) -> anyhow::Result
         return Ok(());
     }
 
-    eprintln!("processing: {}", path.to_str().unwrap());
-
     let checksum = calculate_checksum(&path).await?;
     let output_path = get_thumbnail_path(&thumbnail_dir, &path);
     let metadata = match get_video_metadata(&path).await {
         Ok(video_info) => video_info,
         Err(e) => {
             tracing::error!("get_video_metadata failed for {:?} - {}", &data_file, e);
-            VideoMetadata {
+            /*VideoMetadata {
                 ..Default::default()
-            }
-            // return Err(anyhow!(e.to_string()));
+            }*/
+            return Err(anyhow!(e.to_string()));
         }
     };
 
@@ -294,7 +294,7 @@ pub async fn store_video_info(path: PathBuf, repo: Repository) -> anyhow::Result
     match repo.save_video(&details).await {
         Ok(count) => {
             if count != 1 {
-                tracing::warn!("save details did not change any records: {:?}", details);
+                tracing::info!("save details did not change any records: {:?}", details);
             }
             Ok(())
         }

@@ -136,7 +136,7 @@ async fn handle_receiving(
                 }
             }
             Message::Pong(msg) => {
-                tracing::info!("websocket {} pong: {:?}", who, msg);
+                tracing::debug!("websocket {} pong: {:?}", who, msg);
                 let pong_message = RemoteMessage::Pong(who);
                 if let Err(e) = output.send(pong_message).await {
                     tracing::error!("output.send pong message failed: {}", e);

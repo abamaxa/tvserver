@@ -81,6 +81,7 @@ pub struct VideoDetails {
     pub search_phrase: Option<String>,
 }
 
+
 impl SeriesDetails {
     pub fn new(
         series_title: &str,

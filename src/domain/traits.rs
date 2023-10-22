@@ -143,6 +143,7 @@ pub type Spawner = Arc<dyn ProcessSpawner>;
 #[async_trait]
 pub trait Databaser: Sync + Send {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
+    async fn list_collection(&self, collection: &str)  -> Result<Vec<MediaItem>, sqlx::Error>;
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error>;
     async fn update_video(&self, details: &VideoDetails) -> Result<u64, sqlx::Error>;
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;

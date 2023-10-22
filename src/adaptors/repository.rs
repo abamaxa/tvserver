@@ -6,6 +6,7 @@ use std::path;
 use std::path::PathBuf;
 
 use crate::domain::config::get_database_migration_dir;
+use crate::domain::messages::MediaItem;
 use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata};
 use crate::domain::traits::Databaser;
 
@@ -35,6 +36,29 @@ impl SqlRepository {
 
         m.run(pool).await
     }
+
+    /*fn from_record<SqliteRow>(row: SqliteRow) -> VideoDetails {
+        VideoDetails {
+            video: row.video,
+            collection: row.collection,
+            description: row.description.unwrap_or_default(),
+            series: SeriesDetails {
+                series_title: row.series_title.unwrap_or_default(),
+                season: row.season.unwrap_or_default(),
+                episode: row.episode.unwrap_or_default(),
+                episode_title: row.episode_title.unwrap_or_default(),
+            },
+            thumbnail: PathBuf::from(row.thumbnail.unwrap_or_default()),
+            metadata: VideoMetadata {
+                duration: row.duration.unwrap_or_default(),
+                width: row.width.unwrap_or(0) as u32,
+                height: row.height.unwrap_or(0) as u32,
+                audio_tracks: row.audio_tracks.unwrap_or(1) as u32,
+            },
+            checksum: row.checksum,
+            search_phrase: row.search_phrase,
+        }
+    }*/
 }
 
 #[async_trait]
@@ -80,6 +104,49 @@ impl Databaser for SqlRepository {
         .execute(&self.pool)
         .await
         .map(|result| result.last_insert_rowid()) // retrieve ID of last inserted row
+    }
+
+    async fn list_collection(&self, collection: &str)  -> Result<Vec<MediaItem>, sqlx::Error> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT 
+                *
+            FROM 
+                video_details 
+            WHERE 
+                collection = ?
+            "#,
+            collection
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            results.push(MediaItem::Video(VideoDetails {
+                video: row.video,
+                collection: row.collection,
+                description: row.description.unwrap_or_default(),
+                series: SeriesDetails {
+                    series_title: row.series_title.unwrap_or_default(),
+                    season: row.season.unwrap_or_default(),
+                    episode: row.episode.unwrap_or_default(),
+                    episode_title: row.episode_title.unwrap_or_default(),
+                },
+                thumbnail: PathBuf::from(row.thumbnail.unwrap_or_default()),
+                metadata: VideoMetadata {
+                    duration: row.duration.unwrap_or_default(),
+                    width: row.width.unwrap_or(0) as u32,
+                    height: row.height.unwrap_or(0) as u32,
+                    audio_tracks: row.audio_tracks.unwrap_or(1) as u32,
+                },
+                checksum: row.checksum,
+                search_phrase: row.search_phrase,
+            }));
+        }
+
+        Ok(results)
     }
 
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error> {
