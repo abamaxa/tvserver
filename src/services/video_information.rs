@@ -47,10 +47,13 @@ impl MetaDataManager {
     }
 
     async fn event_loop(&mut self) {
-        while let Ok(msg) = self.receiver.recv().await {
-            match msg {
-                LocalMessage::Media(event) => self.handle_media_event(event).await,
-                _ => continue,
+        while true {
+            match self.receiver.recv().await {
+            	Ok(msg) => match msg {
+                        LocalMessage::Media(event) => self.handle_media_event(event).await,
+                        _ => continue,
+                 },
+                 Err(e) => tracing::error!("event loop got an error: {}", e)
             }
         }
     }
@@ -291,7 +294,7 @@ pub async fn store_video_info(path: PathBuf, repo: Repository) -> anyhow::Result
 
     write_struct_to_json_file(&details, &data_file).await?;
 
-    match repo.save_video(&details).await {
+    /*match repo.save_video(&details).await {
         Ok(count) => {
             if count != 1 {
                 tracing::info!("save details did not change any records: {:?}", details);
@@ -299,7 +302,8 @@ pub async fn store_video_info(path: PathBuf, repo: Repository) -> anyhow::Result
             Ok(())
         }
         Err(err) => Err(anyhow!(err.to_string())),
-    }
+    }*/
+    Ok(())
 }
 
 pub async fn write_struct_to_json_file<T: Serialize>(data: &T, file_path: &Path) -> io::Result<()> {
