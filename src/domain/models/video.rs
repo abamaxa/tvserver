@@ -1,14 +1,16 @@
+use chrono::{NaiveDateTime, Local, Duration};
 use mockall::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CollectionDetails {
     pub collection: String,
     pub parent_collection: String,
     pub child_collections: Vec<String>,
-    pub videos: Vec<String>,
+    pub videos: Vec<MediaItem>,
     pub errors: Vec<String>,
 }
 
@@ -16,7 +18,7 @@ impl CollectionDetails {
     pub fn from(
         collection: &str,
         child_collections: Vec<String>,
-        videos: Vec<String>,
+        videos: Vec<MediaItem>,
     ) -> CollectionDetails {
         let mut parent_collection = String::new();
 
@@ -61,11 +63,65 @@ pub struct SeriesDetails {
 }
 
 use thiserror::Error;
+
+use crate::domain::messages::MediaItem;
 #[derive(Error, Debug)]
 #[error("{message:}")]
 pub struct VideoParseError {
     message: String,
 }
+
+#[derive(Default, Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum VideoState {
+    #[default]
+    Ready = 0,
+    NewFile = 1,
+    ZeroFileSize = 2,
+    NoVideoSize = 3,
+    NeedThumbnail = 4,
+    NeedVideoMetaData = 5,
+    NeedDescription = 6,
+    Exception = 10,
+}
+
+fn video_state_from_int<T: Into<i64>>(value: T) -> VideoState {
+    match value.into() {
+        0 => VideoState::Ready,
+        1 => VideoState::NewFile,
+        10 => VideoState::Exception,
+        2 => VideoState::ZeroFileSize,
+        3 => VideoState::NoVideoSize,
+        4 => VideoState::NeedThumbnail,
+        5 => VideoState::NeedVideoMetaData,
+        6 => VideoState::NeedDescription,
+        _ => VideoState::default(),
+    }
+}
+
+impl From<i8> for VideoState {
+    fn from(value: i8) -> Self {
+        video_state_from_int(value)
+    }
+}
+
+impl From<i16> for VideoState {
+    fn from(value: i16) -> Self {
+        video_state_from_int(value)
+    }
+}
+
+impl From<i32> for VideoState {
+    fn from(value: i32) -> Self {
+        video_state_from_int(value)
+    }
+}
+
+impl From<i64> for VideoState {
+    fn from(value: i64) -> Self {
+        video_state_from_int(value)
+    }
+}
+
 
 #[serde_with::skip_serializing_none]
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -79,8 +135,52 @@ pub struct VideoDetails {
     pub metadata: VideoMetadata,
     pub checksum: i64,
     pub search_phrase: Option<String>,
+    pub state: VideoState,
+    pub created_on: NaiveDateTime,
+    pub updated_on: NaiveDateTime,
 }
 
+
+impl VideoDetails {
+    pub fn new(video: String, collection: String, path: &PathBuf) -> Self {
+        let now = Local::now().naive_local();
+        Self {
+            video,
+            collection,
+            description: "".to_string(),
+            series: SeriesDetails::from(path.as_path()),
+            thumbnail: PathBuf::new(),
+            metadata: VideoMetadata{..VideoMetadata::default()},
+            checksum: 0,
+            search_phrase: None,
+            state: VideoState::NewFile,
+            created_on: now,
+            updated_on: now
+        }
+    }
+
+    pub fn should_retry_metadata(&self) -> bool {
+        if self.metadata.duration == 0. || self.metadata.height == 0 {
+            return !Self::is_older_than_x_hours(self.updated_on, 6);
+        }
+        false
+    }
+
+    pub fn should_delete(&self) -> bool {
+        if self.metadata.duration == 0. || self.metadata.height == 0 {
+            return Self::is_older_than_x_hours(self.updated_on, 24);
+        }
+        false
+    }
+
+    fn is_older_than_x_hours(given_datetime: NaiveDateTime, num_hours: i64) -> bool {
+        let current_datetime = Local::now().naive_utc();
+        let duration_since_given = current_datetime.signed_duration_since(given_datetime);
+    
+        duration_since_given >= Duration::hours(num_hours)
+    }
+    
+}
 
 impl SeriesDetails {
     pub fn new(

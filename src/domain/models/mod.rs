@@ -7,7 +7,7 @@ mod youtube;
 pub use conversion::{Conversion, AVAILABLE_CONVERSIONS};
 pub use search_results::{DownloadableItem, SearchResults};
 pub use torrent::{FileDetails, TaskListResults, TorrentTask};
-pub use video::{CollectionDetails, SeriesDetails, VideoDetails, VideoMetadata};
+pub use video::{CollectionDetails, SeriesDetails, VideoDetails, VideoState, VideoMetadata};
 pub use youtube::{Id, Item, Snippet, YoutubeResponse};
 
 #[cfg(test)]

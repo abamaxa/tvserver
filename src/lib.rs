@@ -11,31 +11,23 @@ pub mod domain;
 pub mod entrypoints;
 pub mod services;
 
-use sqlx::Error;
 use std::{net::SocketAddr, sync::Arc};
-
-use crate::adaptors::{FileSystemStore, TokioProcessSpawner};
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::domain::config::{get_database_url, get_thumbnail_dir};
-use crate::domain::services::MessageExchange;
-use crate::domain::traits::{Downloader, FileStorer};
-use crate::domain::{
-    config::{enable_vlc_player, get_client_path, get_movie_dir},
-    traits::Player,
-};
-use crate::entrypoints::{register, Context};
+use crate::{domain::traits::Downloader, services::{setup_logging, TVSERVER_LOG}};
+use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
+use crate::entrypoints::create_context;
+use crate::entrypoints::register;
 use crate::services::{
-    MediaStore, MetaDataManager, Monitor, SearchService, TaskManager, TransmissionDaemon, VLCPlayer,
+    MetaDataManager, Monitor, TransmissionDaemon,
 };
 
 pub async fn run() -> anyhow::Result<()> {
-    let context = get_dependencies().await?;
+    let context = create_context().await?;
 
     let downloader: Downloader = Arc::new(TransmissionDaemon::new());
 
@@ -43,10 +35,9 @@ pub async fn run() -> anyhow::Result<()> {
         context.get_store(),
         downloader,
         context.get_task_manager(),
-        context.get_repository(),
     );
 
-    setup_logging();
+    setup_logging(TVSERVER_LOG);
 
     let metadata_manager = MetaDataManager::consume(
         context.get_repository(),
@@ -79,49 +70,4 @@ pub async fn run() -> anyhow::Result<()> {
     metadata_manager.abort();
 
     Ok(())
-}
-
-async fn get_dependencies() -> Result<Context, Error> {
-    let messenger = MessageExchange::new();
-
-    let repository = adaptors::SqlRepository::new(&get_database_url()).await?;
-
-    let player: Option<Arc<dyn Player>> = if enable_vlc_player() {
-        Some(Arc::new(VLCPlayer::start()))
-    } else {
-        None
-    };
-
-    let task_manager = Arc::new(TaskManager::new(Arc::new(TokioProcessSpawner::new())));
-
-    let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
-
-    Ok(Context::new(
-        Arc::new(MediaStore::new(file_storer, messenger.get_local_sender())),
-        SearchService::new(task_manager.clone()),
-        messenger,
-        player,
-        task_manager,
-        Arc::new(repository),
-    ))
-}
-
-fn setup_logging() {
-    let format = fmt::format()
-        .with_ansi(false)
-        .without_time()
-        .with_level(true)
-        .with_target(false)
-        .compact();
-
-    //const FILTER: &str = "tvserver=debug,tower_http=debug";
-    const FILTER: &str = "tvserver=info,tower_http=debug";
-
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| FILTER.into()),
-        )
-        .with(tracing_subscriber::fmt::layer().event_format(format))
-        .init();
 }

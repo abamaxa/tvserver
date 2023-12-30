@@ -21,7 +21,8 @@ impl FileSystemStore {
     }
 
     fn get_real_path(&self, path: &str) -> PathBuf {
-        if path.chars().nth(0) == Some('/') || path.starts_with(&self.root) {
+        let first_char = path.chars().nth(0);
+        if first_char == Some('/') || path.starts_with(&self.root) {
             PathBuf::from(path)
         } else {
             Path::new(&self.root).join(path)
@@ -143,7 +144,10 @@ impl FileStore for FileSystemStore {
     }
 
     async fn rename(&self, _old_path: &str, _new_path: &str) -> Result<()> {
-        let old_path = self.get_real_path(_old_path);
+        let mut old_path = PathBuf::from(_old_path);
+        if !old_path.exists() {
+            old_path = self.get_real_path(_old_path);
+        }
         let new_path = self.get_real_path(_new_path);
 
         if let Err(_) = fs::rename(&old_path, &new_path).await {

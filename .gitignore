@@ -14,5 +14,5 @@ Cargo.lock
 client_src
 docs/.lock
 .DS_Store
-*.sqlite
+*.sqlite*
 .vscode

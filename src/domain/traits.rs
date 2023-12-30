@@ -39,7 +39,7 @@ pub trait MediaStorer: Send + Sync {
     async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
     async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
-    async fn check_video_information(&self, repo: Repository) -> anyhow::Result<()>;
+    async fn check_video_information(&self) -> anyhow::Result<()>;
     fn as_local_path(&self, collection: &str, video: &str) -> String;
 }
 
@@ -143,9 +143,10 @@ pub type Spawner = Arc<dyn ProcessSpawner>;
 #[async_trait]
 pub trait Databaser: Sync + Send {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
-    async fn list_collection(&self, collection: &str)  -> Result<Vec<MediaItem>, sqlx::Error>;
+    async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
+    async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error>;
-    async fn update_video(&self, details: &VideoDetails) -> Result<u64, sqlx::Error>;
+    async fn retrieve_video_by_name_and_collection(&self, name: &str, collection: &str) -> Result<VideoDetails, sqlx::Error>;
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;
 }
 

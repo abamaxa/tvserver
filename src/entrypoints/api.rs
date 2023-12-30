@@ -8,7 +8,7 @@ use crate::domain::messages::{
     Response,
 };
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
-use crate::domain::services::MessageExchange;
+use crate::domain::messagebus::MessageExchange;
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Repository, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
 use crate::services::{stream_video, SearchService, TaskManager, TransmissionDaemon};

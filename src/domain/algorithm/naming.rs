@@ -88,6 +88,22 @@ pub fn get_collection_and_video(path: &str) -> (String, String) {
     }
 }*/
 
+pub fn get_collection_from_path(path: &Path) -> String {
+    let short_path = match path.strip_prefix(&get_movie_dir()) {
+        Ok(p) => PathBuf::from(p),
+        _ => PathBuf::from(path),
+    };
+
+    if path.is_dir() {
+        return short_path.to_str().unwrap_or_default().to_string();
+    }
+
+    match short_path.parent() {
+        Some(parent) => parent.to_str().unwrap_or_default().to_string(),
+        _ => String::new(),
+    }
+}
+
 pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
     let short_path = match path.strip_prefix(&get_movie_dir()) {
         Ok(p) => PathBuf::from(p),

@@ -4,25 +4,34 @@ use crate::common::{get_repository, get_task_manager};
 use anyhow::Result;
 use common::get_pirate_search;
 use reqwest::StatusCode;
+use tvserver::domain::config::MOVIE_DIR;
 use std::collections::HashMap;
+use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::broadcast;
-use tvserver::adaptors::FileSystemStore;
+use tvserver::adaptors::{FileSystemStore, SqlRepository};
 use tvserver::domain::messages::Response;
-use tvserver::domain::services::MessageExchange;
-use tvserver::domain::traits::FileStorer;
+use tvserver::domain::messagebus::MessageExchange;
+use tvserver::domain::traits::{FileStorer, Repository};
 use tvserver::entrypoints::Context;
 use tvserver::services::MediaStore;
 
+const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
+
+
 #[tokio::test]
 async fn test_rename_video() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+    
     let file_storer: FileStorer = Arc::new(FileSystemStore::new("tests/fixtures/media_dir"));
 
-    let (tx, mut rx1) = broadcast::channel(16);
+    let (tx, _rx1) = broadcast::channel(16);
 
-    let store = Arc::new(MediaStore::new(file_storer, tx));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+
+    let store = Arc::new(MediaStore::new(file_storer, repo, tx));
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 

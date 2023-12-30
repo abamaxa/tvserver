@@ -5,7 +5,7 @@ use crate::common::{
 };
 use anyhow::Result;
 use tokio::task::JoinHandle;
-use tvserver::domain::services::MessageExchange;
+use tvserver::domain::messagebus::MessageExchange;
 use tvserver::services::SearchService;
 use tvserver::{
     domain::models::{DownloadableItem, SearchResults},

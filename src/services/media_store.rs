@@ -4,27 +4,29 @@
 //! to some sort of cloud storage like AWS S3.
 //!
 //! provides an implementation of MediaStorer.
-use crate::domain::algorithm::get_collection_and_video_from_path;
+use crate::domain::algorithm::{get_collection_and_video_from_path, get_collection_from_path};
 use crate::domain::config::get_movie_dir;
 use crate::domain::messages::{LocalMessage, LocalMessageSender, MediaEvent, MediaItem};
+use crate::domain::services::calculate_checksum;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io;
 
-use crate::domain::models::CollectionDetails;
+use crate::domain::models::{CollectionDetails, VideoDetails};
 use crate::domain::traits::{FileStorer, MediaStorer, Repository};
 
 #[derive(Clone)]
 pub struct MediaStore {
     store: FileStorer,
+    repo: Repository,
     sender: LocalMessageSender,
 }
 
 impl MediaStore {
-    pub fn new(store: FileStorer, sender: LocalMessageSender) -> MediaStore {
-        MediaStore { store, sender }
+    pub fn new(store: FileStorer, repo: Repository, sender: LocalMessageSender) -> MediaStore {
+        MediaStore { store, repo, sender }
     }
 
     async fn get_new_video_path(&self, path: &Path) -> anyhow::Result<PathBuf> {
@@ -42,7 +44,6 @@ impl MediaStore {
             || name.ends_with(".json")
             || name.ends_with(".png")
             || name.ends_with(".jpg")
-            || name.starts_with(".")
     }
 
     async fn rename_or_copy_and_delete(
@@ -66,70 +67,129 @@ impl MediaStore {
         let event = MediaEvent::new_media(path, None);
 
         if let Err(e) = self.sender.send(LocalMessage::Media(event)) {
-            tracing::error!("could not queue Media event")
+            tracing::error!("could not queue Media event: {}", e.to_string())
         }
     }
 
     #[async_recursion]
-    async fn process_directory(&self, path: PathBuf, repo: Repository) -> io::Result<()> {
+    async fn process_directory(&self, path: PathBuf) -> anyhow::Result<()> {
+        let collection = get_collection_from_path(&path);
+
+        let mut current_videos = self.repo.list_videos(&collection).await?;
+
         let mut read_dir = fs::read_dir(path).await?;
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
 
-            if Self::skip_file(
-                path.file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap_or_default(),
-            ) {
+            let filename = path.file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default();
+
+            if Self::skip_file(filename) {
                 continue;
             }
 
             if path.is_dir() {
-                self.process_directory(path.clone(), repo.clone()).await?;
-            } else if let Some(extension) = path.extension() {
-                if extension != "json" {
-                    let json_path = path.with_extension("json");
-                    if !json_path.exists() {
-                        tracing::warn!("queuing meteadata for {:?}", path);
+                self.process_directory(path.clone()).await?;
+                continue;
+            } 
+
+            let mut existing = current_videos
+                .iter()
+                .filter_map(|item| if item.video == filename { Some((item.checksum, item)) } else {None})
+                .collect::<HashMap<_, _>>();
+
+            if existing.len() == 0 {
+                self.store_video_info(&path);
+                continue;
+            }
+
+            if existing.len() > 1 {
+                let checksum = match calculate_checksum(&path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("could not calculate checksum for {:?}: {}", &path, e.to_string());
+                        continue;
+                    }
+                };
+                
+                match existing.get(&checksum) {
+                    Some(item) => existing = HashMap::from([(item.checksum, *item)]),
+                    None => {
                         self.store_video_info(&path);
+                        continue;
                     }
                 }
             }
+
+            let (_, current) = existing.iter().next().unwrap();
+            if current.should_retry_metadata() {
+                self.store_video_info(&path);
+            }
+
+            let checksum = current.checksum;
+            current_videos = current_videos.into_iter().filter(
+                |item| item.checksum != checksum || item.video != filename
+            ).collect();
         }
+
+        self.delete_orphaned_records(current_videos).await;
 
         Ok(())
     }
 
-    async fn list_collection(&self, collection: &str) -> anyhow::Result<CollectionDetails> {
-        let (raw_collections, raw_videos) = self.store.list_folder(collection).await?;
+    async fn delete_orphaned_records(&self, videos: Vec<VideoDetails>) {
+        for video in videos {
+            if let Err(err) = self.repo.delete_video(video.checksum).await {
+                tracing::error!("error deleting record {}: {} - {}", video.video, video.checksum, err.to_string());
+            }
+        }
+    }
 
-        let collections = raw_collections
-            .into_iter()
-            .filter(|f| !Self::skip_file(f))
-            .collect();
+    async fn list_from_repo(&self, collection: &str) -> anyhow::Result<CollectionDetails> {
 
-        let videos = raw_videos
+        let items = self.repo.list_videos(collection).await?;
+
+        let collections = self.repo.list_collection(collection).await?;
+
+        let videos = items
             .into_iter()
-            .filter(|f| !Self::skip_file(f))
+            .map(|i| MediaItem::Video(i))
             .collect();
 
         Ok(CollectionDetails::from(collection, collections, videos))
     }
+
 }
 
 #[async_trait]
 impl MediaStorer for MediaStore {
     async fn list(&self, collection: &str) -> anyhow::Result<MediaItem> {
-        let item = self.store.get(collection).await?;
-        if item.is_dir() {
-            let details = self.list_collection(collection).await?;
-            Ok(MediaItem::Collection(details))
-        } else {
-            let details = item.get_metadata().await?;
-            Ok(MediaItem::Video(details))
+        fn split_at_last_slash(s: &str) -> (String, String) {
+            match s.rfind('/') {
+                Some(index) => {
+                    let (first, last) = s.split_at(index);
+                    (first.to_string(), last[1..].to_string())
+                },
+                None => (String::new(), s.to_string()), // Handle the case where there is no slash
+            }
         }
+
+        let (parent, name) = split_at_last_slash(collection);
+
+        if let Ok(video) = self.repo.retrieve_video_by_name_and_collection(&name, &parent).await {
+            return Ok(MediaItem::Video(video));
+        }
+
+        let details = self.list_from_repo(collection).await?;
+
+        if details.videos.len() == 1 {
+            return Ok(details.videos.get(0).unwrap().to_owned());
+        } 
+        
+        Ok(MediaItem::Collection(details))
     }
 
     async fn add_file(&self, path: &Path) -> anyhow::Result<()> {
@@ -165,8 +225,8 @@ impl MediaStorer for MediaStore {
         self.store.delete(path).await
     }
 
-    async fn check_video_information(&self, repo: Repository) -> anyhow::Result<()> {
-        self.process_directory(PathBuf::from(&get_movie_dir()), repo).await?;
+    async fn check_video_information(&self) -> anyhow::Result<()> {
+        self.process_directory(PathBuf::from(&get_movie_dir())).await?;
 
         Ok(())
     }
@@ -190,22 +250,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
-    #[tokio::test]
-    async fn test_video_entry_creation() -> Result<()> {
-        let (tx, mut rx1) = broadcast::channel(16);
-
-        let filer: FileStorer = Arc::new(FileSystemStore::new("tests/fixtures/media_dir"));
-
-        let store = MediaStore::new(filer, tx);
-
-        let results = store.list_collection("").await?;
-
-        assert_eq!(results.child_collections, vec!["collection1", "collection2"]);
-        assert_eq!(results.videos, vec!["empty.mp4", "test.mp4"]);
-
-        Ok(())
-    }
-
     #[test]
     fn test_skip_file() {
         let test_cases = [
@@ -225,12 +269,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_check_video_info() -> Result<()> {
-        let (tx, mut rx1) = broadcast::channel(16);
+        let (tx, _rx1) = broadcast::channel(16);
         let filer: FileStorer = Arc::new(FileSystemStore::new("/Users/chris2/Movies"));
-        let store = MediaStore::new(filer, tx);
         let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+        let store = MediaStore::new(filer, repo, tx);
 
-        store.check_video_information(repo).await?;
+        store.check_video_information().await?;
 
         Ok(())
     }

@@ -4,10 +4,12 @@ pub mod algorithm;
 pub mod config;
 mod enums;
 pub mod messages;
+pub mod messagebus;
 pub mod models;
+pub mod services;
 pub mod traits;
 pub use enums::*;
-pub mod services;
+
 #[cfg(test)]
 mod test_util;
 

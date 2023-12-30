@@ -13,11 +13,15 @@ CREATE TABLE IF NOT EXISTS video_details (
     height INTEGER,
     audio_tracks INTEGER,
     search_phrase TEXT,
-    added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    state INTEGER DEFAULT 0,
+    created_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_collection ON video_details(collection, video);
+
 CREATE TABLE IF NOT EXISTS history (
-    path TEXT PRIMARY KEY NOT NULL,
+    checksum INTEGER PRIMARY KEY NOT NULL,
     started TIMESTAMP,
     stopped TIMESTAMP
 );

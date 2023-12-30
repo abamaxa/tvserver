@@ -1,5 +1,3 @@
-mod channels;
-mod client_manager;
-mod message_exchange;
+mod video_metadata;
 
-pub use message_exchange::MessageExchange;
+pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum};

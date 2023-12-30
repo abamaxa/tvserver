@@ -7,10 +7,10 @@ use reqwest::{header::RANGE, StatusCode};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tvserver::adaptors::FileSystemStore;
+use tvserver::adaptors::{FileSystemStore, SqlRepository};
 use tvserver::domain::config::MOVIE_DIR;
-use tvserver::domain::services::MessageExchange;
-use tvserver::domain::traits::FileStorer;
+use tvserver::domain::messagebus::MessageExchange;
+use tvserver::domain::traits::{FileStorer, Repository};
 use tvserver::entrypoints::Context;
 use tvserver::services::MediaStore;
 
@@ -20,11 +20,13 @@ const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
 async fn test_video_stream() -> Result<()> {
     env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
 
-    let (tx, mut rx1) = broadcast::channel(16);
+    let (tx, _rx1) = broadcast::channel(16);
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
 
-    let store = Arc::new(MediaStore::new(file_storer, tx));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+
+    let store = Arc::new(MediaStore::new(file_storer, repo, tx));
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 

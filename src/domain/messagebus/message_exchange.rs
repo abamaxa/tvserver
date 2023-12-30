@@ -26,7 +26,7 @@ pub struct MessageExchange {
     sender: mpsc::Sender<ReceivedRemoteMessage>,
     receiver: broadcast::Sender<ReceivedRemoteMessage>,
     local_sender: LocalMessageSender,
-    local_receiver: Arc<LocalMessageReceiver>,
+    _local_receiver: Arc<LocalMessageReceiver>,
 }
 
 impl MessageExchange {
@@ -66,7 +66,7 @@ impl MessageExchange {
         let exchanger = Self {
             client_map: client_map.clone(),
             receiver: in_tx,
-            local_receiver: Arc::new(local_receiver),
+            _local_receiver: Arc::new(local_receiver),
             sender,
             local_sender,
         };

@@ -43,7 +43,7 @@ const INCREASE_VOLUME: Conversion = Conversion {
     description:
         "Increases the volume of all audio streams by 10dB, video streams are copied unchanged",
     exec: "ffmpeg",
-    args: "-i '{source}' -filter:a volume=volume=10dB -y '{destination}'",
+    args: "-i '{source}' -c:v copy -filter:a volume=volume=10dB -y '{destination}'",
     extension: None,
 };
 

@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tvserver::domain::services::MessageExchange;
+use tvserver::domain::messagebus::MessageExchange;
 use tvserver::{domain::messages::Response, entrypoints};
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use crate::domain::traits::{Downloader, Repository, Storer, Task};
+use crate::domain::traits::{Downloader, Storer, Task};
 use crate::services::TaskManager;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
@@ -14,8 +14,7 @@ impl Monitor {
     pub fn start(
         store: Storer,
         downloads: Downloader,
-        task_manager: Arc<TaskManager>,
-        repo: Repository,
+        task_manager: Arc<TaskManager>
     ) -> JoinHandle<()> {
         task::spawn(async move {
             tracing::info!("starting download monitor");
@@ -35,7 +34,7 @@ impl Monitor {
 
                 monitor.task_manager.cleanup(&monitor.store).await;
 
-                if let Err(err) = &monitor.store.check_video_information(repo.clone()).await {
+                if let Err(err) = &monitor.store.check_video_information().await {
                     tracing::error!("error checking video info: {}", err);
                 }
 
@@ -49,7 +48,7 @@ impl Monitor {
             if let Err(e) = item.cleanup(&self.store, false).await {
                 // TODO: distinguish between genuine problems and policy delays in
                 // reaping completed tasks
-                tracing::debug!("could not move videos: {}", e);
+                tracing::info!("could not move videos: {}", e);
             } else {
                 println!("key: {}", item.get_key());
                 if let Err(e) = self.downloads.remove(&item.get_key(), true).await {
@@ -63,7 +62,6 @@ impl Monitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adaptors::SqlRepository;
     use anyhow::Result;
     use mockall::predicate;
     use tokio::time;
@@ -107,9 +105,7 @@ mod tests {
 
         let task_manager = Arc::new(TaskManager::new(spawner));
 
-        let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
-
-        let monitor_handle = Monitor::start(store, downloader, task_manager, repo);
+        let monitor_handle = Monitor::start(store, downloader, task_manager);
 
         // wait for monitor to finish a cycle, if it hasn't finished by then it ought
         // to be a test fail

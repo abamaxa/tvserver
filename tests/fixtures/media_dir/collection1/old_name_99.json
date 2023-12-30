@@ -1,0 +1,19 @@
+{
+  "video": "new_name_123.mp4",
+  "collection": "collection1",
+  "description": "",
+  "series": {
+    "seriesTitle": "",
+    "season": "",
+    "episode": "",
+    "episodeTitle": ""
+  },
+  "thumbnail": "",
+  "metadata": {
+    "duration": 0.0,
+    "width": 0,
+    "height": 0,
+    "audioTracks": 0
+  },
+  "checksum": 0
+}

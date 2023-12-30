@@ -4,7 +4,7 @@ use crate::common::{get_media_store, get_pirate_search, get_repository, get_task
 use anyhow::Result;
 use reqwest::StatusCode;
 use std::collections::HashMap;
-use tvserver::domain::services::MessageExchange;
+use tvserver::domain::messagebus::MessageExchange;
 use tvserver::{domain::messages::Response, entrypoints::Context};
 
 #[tokio::test]

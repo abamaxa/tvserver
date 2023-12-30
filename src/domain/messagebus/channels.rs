@@ -10,9 +10,9 @@ pub struct MessageSender<T> {
 }
 
 impl<T> MessageSender<T> {
-    fn new(value: broadcast::Sender<T>) -> Self {
+    /*fn new(value: broadcast::Sender<T>) -> Self {
         Self { sender: value }
-    }
+    }*/
 }
 
 pub struct MessageReceiver<T> {
