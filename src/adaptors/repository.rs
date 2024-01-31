@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use sqlx::{Error, Sqlite, Row};
-use sqlx::migrate::{MigrateDatabase, MigrateError, Migrator};
+use sqlx::migrate::{
+    MigrateDatabase, 
+    MigrateError, Migrator
+};
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use std::path;
 use std::path::PathBuf;

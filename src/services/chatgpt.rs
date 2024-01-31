@@ -1,4 +1,4 @@
-/*use crate::domain::messages::{ChatGPTMessage, ChatGPTRequest, ChatGPTResponse};
+use crate::domain::messages::{ChatGPTMessage, ChatGPTRequest, ChatGPTResponse};
 use crate::domain::models::SeriesDetails;
 use crate::domain::traits::JsonFetcher;
 use anyhow::anyhow;
@@ -231,4 +231,3 @@ mod tests {
         Ok(())
     }
 }
-*/

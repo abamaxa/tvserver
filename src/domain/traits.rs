@@ -88,9 +88,6 @@ pub trait RemotePlayer: Send + Sync {
 #[async_trait]
 pub trait Filer: Sync + Send {
     fn is_dir(&self) -> bool;
-    /*async fn read(&self, count: usize) -> anyhow::Result<Vec<u8>>;
-    async fn write(&self, data: Vec<u8>) -> anyhow::Result<()>;
-    async fn close(&self);*/
     async fn get_metadata(&self) -> anyhow::Result<VideoDetails>;
     async fn save_metadata(&self, details: VideoDetails) -> anyhow::Result<()>;
 }
