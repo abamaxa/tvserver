@@ -64,6 +64,10 @@ impl MediaStore {
     }
 
     fn store_video_info(&self, path: &Path) {
+        if self.sender.len() >= 100 {
+            tracing::info!("local queue has more than 100 entries, will process {:?} later", path);
+            return;
+        }
         let event = MediaEvent::new_media(path, None);
 
         if let Err(e) = self.sender.send(LocalMessage::Media(event)) {

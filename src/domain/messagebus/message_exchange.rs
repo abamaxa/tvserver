@@ -26,7 +26,6 @@ pub struct MessageExchange {
     sender: mpsc::Sender<ReceivedRemoteMessage>,
     receiver: broadcast::Sender<ReceivedRemoteMessage>,
     local_sender: LocalMessageSender,
-    _local_receiver: Arc<LocalMessageReceiver>,
 }
 
 impl MessageExchange {
@@ -55,7 +54,7 @@ impl MessageExchange {
             })(client_map.clone(), in_tx.clone()),
         );
 
-        let (local_sender, local_receiver) = broadcast::channel::<LocalMessage>(100);
+        let (local_sender, _) = broadcast::channel::<LocalMessage>(100);
 
         let _ = tokio::spawn((|client_map: ClientMap| async move {
             loop {
@@ -66,7 +65,6 @@ impl MessageExchange {
         let exchanger = Self {
             client_map: client_map.clone(),
             receiver: in_tx,
-            _local_receiver: Arc::new(local_receiver),
             sender,
             local_sender,
         };
