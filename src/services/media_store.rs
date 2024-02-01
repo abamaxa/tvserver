@@ -191,8 +191,15 @@ impl MediaStorer for MediaStore {
 
         let details = self.list_from_repo(collection).await?;
 
-        if details.videos.len() == 1 {
-            return Ok(details.videos.get(0).unwrap().to_owned());
+        if details.videos.len() == 1 && name != "Poirot" {
+            match details.videos.get(0) {
+                Some(MediaItem::Video(video)) => {
+                    if video.video == name {
+                        return Ok(MediaItem::Video(video.to_owned()))
+                    }
+                },
+                _ => (),
+            }
         } 
         
         Ok(MediaItem::Collection(details))

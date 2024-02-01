@@ -1,15 +1,5 @@
 {
   "db": "SQLite",
-  "153ddd83d3ce01c2fd7aabc70ff591587741a3ae6870fb72b4d19ec0c9269862": {
-    "describe": {
-      "columns": [],
-      "nullable": [],
-      "parameters": {
-        "Right": 15
-      }
-    },
-    "query": "\n            INSERT INTO video_details (\n                checksum, \n                video, \n                collection, \n                description, \n                series_title, \n                season, \n                episode, \n                episode_title, \n                thumbnail, \n                duration, \n                width, \n                height, \n                audio_tracks, \n                search_phrase,\n                state\n            )\n            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ON CONFLICT(checksum) DO UPDATE SET\n                video = excluded.video, \n                collection = excluded.collection, \n                description = excluded.description, \n                series_title = excluded.series_title, \n                season = excluded.season, \n                episode = excluded.episode, \n                episode_title = excluded.episode_title, \n                thumbnail = excluded.thumbnail, \n                duration = excluded.duration, \n                width = excluded.width, \n                height = excluded.height, \n                audio_tracks = excluded.audio_tracks, \n                search_phrase = excluded.search_phrase,\n                state = state,\n                updated_on = CURRENT_TIMESTAMP\n            WHERE\n                (\n                    video != excluded.video OR\n                    collection != excluded.collection OR\n                    description != excluded.description OR\n                    series_title != excluded.series_title  OR\n                    season != excluded.season OR \n                    episode != excluded.episode OR \n                    episode_title != excluded.episode_title OR \n                    thumbnail != excluded.thumbnail OR\n                    duration != excluded.duration OR\n                    width != excluded.width OR\n                    height != excluded.height OR\n                    audio_tracks != excluded.audio_tracks OR\n                    state != excluded.state\n                ) AND (\n                    excluded.width != 0 AND\n                    excluded.height != 0 AND\n                    excluded.duration != 0\n                )\n            "
-  },
   "2d19866804b2ad472815c3366873642fa38cc6b1ab46ebd949315308fa1f9f2c": {
     "describe": {
       "columns": [],
@@ -19,5 +9,15 @@
       }
     },
     "query": "\n            DELETE FROM video_details \n            WHERE checksum = ?\n            "
+  },
+  "827363e18a6af78208e7abae056cdc29d0ee9cf5c8d2a66a05ffce2ea162ab78": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Right": 17
+      }
+    },
+    "query": "\n            INSERT INTO video_details (\n                checksum, \n                video, \n                collection, \n                description, \n                series_title, \n                season, \n                episode, \n                episode_title, \n                thumbnail, \n                duration, \n                width, \n                height, \n                aspect_width, \n                aspect_height, \n                audio_tracks, \n                search_phrase,\n                state\n            )\n            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ON CONFLICT(checksum) DO UPDATE SET\n                video = excluded.video, \n                collection = excluded.collection, \n                description = excluded.description, \n                series_title = excluded.series_title, \n                season = excluded.season, \n                episode = excluded.episode, \n                episode_title = excluded.episode_title, \n                thumbnail = excluded.thumbnail, \n                duration = excluded.duration, \n                width = excluded.width, \n                height = excluded.height, \n                aspect_width = excluded.aspect_width, \n                aspect_height = excluded.aspect_height, \n                audio_tracks = excluded.audio_tracks, \n                search_phrase = excluded.search_phrase,\n                state = state,\n                updated_on = CURRENT_TIMESTAMP\n            WHERE\n                (\n                    video != excluded.video OR\n                    collection != excluded.collection OR\n                    description != excluded.description OR\n                    series_title != excluded.series_title  OR\n                    season != excluded.season OR \n                    episode != excluded.episode OR \n                    episode_title != excluded.episode_title OR \n                    thumbnail != excluded.thumbnail OR\n                    duration != excluded.duration OR\n                    width != excluded.width OR\n                    height != excluded.height OR\n                    aspect_width != excluded.aspect_width OR\n                    aspect_height != excluded.aspect_height OR\n                    audio_tracks != excluded.audio_tracks OR\n                    state != excluded.state\n                ) AND (\n                    excluded.width != 0 AND\n                    excluded.height != 0 AND\n                    excluded.duration != 0\n                )\n            "
   }
 }

@@ -4,6 +4,7 @@ use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
+use tvserver::domain::messages::PlayRequest;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -27,14 +28,19 @@ async fn test_local_play() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    let mut map = HashMap::new();
-    map.insert("collection", "some collection");
-    map.insert("video", "video.mp4");
-    map.insert("remote_address", "");
+    let request = PlayRequest{
+        collection: "some collection".to_string(),
+        video: "video.mp4".to_string(),
+        remote_address: None,
+        width: 1920,
+        height: 1080,
+        aspect_width: 1920,
+        aspect_height: 1080,
+    };
 
     let body = client
         .post("http://localhost:57181/api/vlc/play")
-        .json(&map)
+        .json(&request)
         .send()
         .await?
         .text()
@@ -71,14 +77,19 @@ async fn test_remote_play() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    let mut map = HashMap::new();
-    map.insert("collection", "");
-    map.insert("video", "test.mp4");
-    map.insert("remote_address", "");
+    let request = PlayRequest{
+        collection: "".to_string(),
+        video: "test.mp4".to_string(),
+        remote_address: None,
+        width: 1920,
+        height: 1080,
+        aspect_width: 1920,
+        aspect_height: 1080,
+    };
 
     let body = client
         .post("http://localhost:57182/api/remote/play")
-        .json(&map)
+        .json(&request)
         .send()
         .await?
         .text()

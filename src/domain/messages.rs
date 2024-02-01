@@ -33,6 +33,10 @@ pub enum RemoteMessage {
         url: String,
         collection: String,
         video: String,
+        width: i32,
+        height: i32,
+        aspectWidth: i32,
+        aspectHeight: i32,
     },
     Seek {
         interval: i32,
@@ -142,10 +146,15 @@ impl Command {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlayRequest {
     pub collection: String,
     pub video: String,
     pub remote_address: Option<String>,
+    pub width: i32,
+    pub height: i32,
+    pub aspect_width: i32,
+    pub aspect_height: i32,
 }
 
 impl PlayRequest {
@@ -160,6 +169,10 @@ impl PlayRequest {
             url,
             collection: self.collection.clone(),
             video: self.video.clone(),
+            width: self.width,
+            height: self.height,
+            aspectWidth: self.aspect_width,
+            aspectHeight: self.aspect_height,
         }
     }
 

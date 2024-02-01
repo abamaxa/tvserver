@@ -59,6 +59,8 @@ impl SqlRepository {
                 duration: row.get::<Option<f64>, _>("duration").unwrap_or_default(),
                 width: row.get::<Option<i32>, _>("width").unwrap_or(0) as u32,
                 height: row.get::<Option<i32>, _>("height").unwrap_or(0) as u32,
+                aspect_width: row.get::<Option<i32>, _>("aspect_width").unwrap_or(0) as u32,
+                aspect_height: row.get::<Option<i32>, _>("aspect_height").unwrap_or(0) as u32,
                 audio_tracks: row.get::<Option<i32>, _>("audio_tracks").unwrap_or(1) as u32,
             },
             checksum: row.get("checksum"),
@@ -91,11 +93,13 @@ impl Databaser for SqlRepository {
                 duration, 
                 width, 
                 height, 
+                aspect_width, 
+                aspect_height, 
                 audio_tracks, 
                 search_phrase,
                 state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(checksum) DO UPDATE SET
                 video = excluded.video, 
                 collection = excluded.collection, 
@@ -108,6 +112,8 @@ impl Databaser for SqlRepository {
                 duration = excluded.duration, 
                 width = excluded.width, 
                 height = excluded.height, 
+                aspect_width = excluded.aspect_width, 
+                aspect_height = excluded.aspect_height, 
                 audio_tracks = excluded.audio_tracks, 
                 search_phrase = excluded.search_phrase,
                 state = state,
@@ -125,6 +131,8 @@ impl Databaser for SqlRepository {
                     duration != excluded.duration OR
                     width != excluded.width OR
                     height != excluded.height OR
+                    aspect_width != excluded.aspect_width OR
+                    aspect_height != excluded.aspect_height OR
                     audio_tracks != excluded.audio_tracks OR
                     state != excluded.state
                 ) AND (
@@ -145,6 +153,8 @@ impl Databaser for SqlRepository {
             details.metadata.duration,
             details.metadata.width,
             details.metadata.height,
+            details.metadata.aspect_width,
+            details.metadata.aspect_height,
             details.metadata.audio_tracks,
             details.search_phrase,
             state
@@ -308,6 +318,8 @@ mod tests {
                 duration: 120.0,
                 width: 1920,
                 height: 1080,
+                aspect_width: 1920,
+                aspect_height: 1080,
                 audio_tracks: 2,
             },
             checksum: 1234,

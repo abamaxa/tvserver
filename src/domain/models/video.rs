@@ -50,6 +50,8 @@ pub struct VideoMetadata {
     pub duration: f64,
     pub width: u32,
     pub height: u32,
+    pub aspect_width: u32,
+    pub aspect_height: u32,
     pub audio_tracks: u32,
 }
 

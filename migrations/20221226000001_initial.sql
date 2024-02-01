@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS video_details (
     duration REAL,
     width INTEGER,
     height INTEGER,
+    aspect_width INTEGER,
+    aspect_height INTEGER,
     audio_tracks INTEGER,
     search_phrase TEXT,
     state INTEGER DEFAULT 0,

@@ -257,10 +257,23 @@ async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Bo
         .and_then(Value::as_u64)
         .ok_or("No height found")? as u32;
 
+    let (aspect_width, aspect_height) = match video_stream.get("display_aspect_ratio") {
+        Some(Value::String(aspect_ratio)) => {
+            let aspect_ratio_parts: Vec<&str> = aspect_ratio.splitn(2, ":").collect();
+            match aspect_ratio_parts.as_slice() {
+                [width, height] => (width.parse::<u32>()?, height.parse::<u32>()?),
+                _ => (width, height),
+            }
+        }
+        _ => (width, height),
+    };
+
     Ok(VideoMetadata {
         duration,
         width,
         height,
+        aspect_width,
+        aspect_height,
         audio_tracks: audio_track_count,
     })
 }
