@@ -6,7 +6,7 @@ use tower_http::{
 };
 
 use anyhow::Result;
-use tokio::{task::JoinHandle, time};
+use tokio::{net::TcpListener, task::JoinHandle, time};
 
 use tvserver::{
     domain::config::get_client_path,
@@ -20,12 +20,8 @@ pub async fn create_server(context: Context, port: u16) -> JoinHandle<Result<()>
             .nest_service("/player", ServeDir::new(get_client_path("player")))
             .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()));
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .unwrap();
+        let listener = TcpListener::bind(("0, 0, 0, 0", port)).await?;
+        axum::serve(listener, app).await?;
 
         Ok(())
     });

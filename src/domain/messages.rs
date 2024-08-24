@@ -29,6 +29,7 @@ pub enum RemoteMessage {
     Command {
         command: String,
     },
+    #[allow(non_snake_case)]
     Play {
         url: String,
         collection: String,

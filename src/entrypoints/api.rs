@@ -11,12 +11,11 @@ use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABL
 use crate::domain::messagebus::MessageExchange;
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Repository, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
-use crate::services::{stream_video, SearchService, TaskManager, TransmissionDaemon};
+use crate::services::{SearchService, TaskManager, TransmissionDaemon};
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
     extract::{ConnectInfo, Path, Query, State},
-    headers::HeaderMap,
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -105,7 +104,6 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/remote/play", post(remote_play))
         .route("/api/remote/ws", get(ws_player_handler))
         .route("/api/control/ws", get(ws_control_handler))
-        .route("/api/alt-stream/*path", get(video))
         .route("/api/search/pirate", get(pirate_search))
         .route("/api/search/youtube", get(youtube_search))
         .route("/api/conversion", get(list_conversions))
@@ -273,17 +271,6 @@ pub async fn ws_control_handler(
 }
 
 #[debug_handler]
-async fn video(
-    State(state): State<SharedState>,
-    Path(video_path): Path<String>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let video_file = state.store.as_local_path("", &video_path);
-
-    stream_video(&video_file, headers).await
-}
-
-#[debug_handler]
 async fn remote_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
     let key = payload.address();
     state
@@ -302,7 +289,6 @@ async fn remote_command(
         .execute(payload.address(), payload.message)
         .await
 }
-
 #[debug_handler]
 async fn list_player(State(state): State<SharedState>) -> (StatusCode, Json<PlayerList>) {
     let players = PlayerList::new(state.messenger.list_players().await);

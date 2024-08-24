@@ -5,7 +5,6 @@ use crate::common::{
 };
 use anyhow::Result;
 use tvserver::domain::messages::PlayRequest;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use tvserver::domain::messagebus::MessageExchange;

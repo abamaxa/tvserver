@@ -62,6 +62,7 @@ impl SqlRepository {
                 aspect_width: row.get::<Option<i32>, _>("aspect_width").unwrap_or(0) as u32,
                 aspect_height: row.get::<Option<i32>, _>("aspect_height").unwrap_or(0) as u32,
                 audio_tracks: row.get::<Option<i32>, _>("audio_tracks").unwrap_or(1) as u32,
+                probe_data: row.get::<Option<String>, _>("probe_data"),
             },
             checksum: row.get("checksum"),
             search_phrase: row.get("search_phrase"),
@@ -96,10 +97,11 @@ impl Databaser for SqlRepository {
                 aspect_width, 
                 aspect_height, 
                 audio_tracks, 
+                probe_data,
                 search_phrase,
                 state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(checksum) DO UPDATE SET
                 video = excluded.video, 
                 collection = excluded.collection, 
@@ -115,6 +117,7 @@ impl Databaser for SqlRepository {
                 aspect_width = excluded.aspect_width, 
                 aspect_height = excluded.aspect_height, 
                 audio_tracks = excluded.audio_tracks, 
+                probe_data = excluded.probe_data,
                 search_phrase = excluded.search_phrase,
                 state = state,
                 updated_on = CURRENT_TIMESTAMP
@@ -134,6 +137,7 @@ impl Databaser for SqlRepository {
                     aspect_width != excluded.aspect_width OR
                     aspect_height != excluded.aspect_height OR
                     audio_tracks != excluded.audio_tracks OR
+                    probe_data != excluded.probe_data OR
                     state != excluded.state
                 ) AND (
                     excluded.width != 0 AND
@@ -156,6 +160,7 @@ impl Databaser for SqlRepository {
             details.metadata.aspect_width,
             details.metadata.aspect_height,
             details.metadata.audio_tracks,
+            details.metadata.probe_data,
             details.search_phrase,
             state
         )
@@ -321,6 +326,7 @@ mod tests {
                 aspect_width: 1920,
                 aspect_height: 1080,
                 audio_tracks: 2,
+                probe_data: None,
             },
             checksum: 1234,
             search_phrase: None,

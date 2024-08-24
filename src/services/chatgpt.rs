@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::domain::messages::{ChatGPTMessage, ChatGPTRequest, ChatGPTResponse};
 use crate::domain::models::SeriesDetails;
 use crate::domain::traits::JsonFetcher;

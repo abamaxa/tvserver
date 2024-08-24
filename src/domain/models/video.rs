@@ -53,6 +53,7 @@ pub struct VideoMetadata {
     pub aspect_width: u32,
     pub aspect_height: u32,
     pub audio_tracks: u32,
+    pub probe_data: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -157,7 +158,7 @@ impl VideoDetails {
             search_phrase: None,
             state: VideoState::NewFile,
             created_on: now,
-            updated_on: now
+            updated_on: now,
         }
     }
 

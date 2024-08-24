@@ -32,6 +32,8 @@ impl MetaDataManager {
 
     async fn event_loop(&mut self) {
         loop {
+            let queue_len = self.receiver.len();
+            eprintln!("local queue has {} entries", queue_len);
             match self.receiver.recv().await {
                 Ok(msg) => match msg {
                         LocalMessage::Media(event) => self.handle_media_event(event).await,

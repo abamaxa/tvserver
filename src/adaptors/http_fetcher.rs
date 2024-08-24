@@ -85,6 +85,7 @@ mod tests {
     use axum::extract::Query;
     use axum::routing::get;
     use axum::{Json, Router};
+    use tokio::net::TcpListener;
     use std::collections::HashMap;
     use tokio::task::JoinHandle;
     use tokio::time;
@@ -235,9 +236,8 @@ mod tests {
 
     async fn setup_http_server(app: Router, host: &'static str) -> JoinHandle<Result<()>> {
         let task = tokio::spawn(async move {
-            axum::Server::bind(&host.parse().unwrap())
-                .serve(app.into_make_service())
-                .await?;
+            let listener = TcpListener::bind(host).await?;
+            axum::serve(listener, app).await?;
             Ok(())
         });
 

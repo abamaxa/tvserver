@@ -11,7 +11,8 @@ pub mod domain;
 pub mod entrypoints;
 pub mod services;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
+use tokio::net::TcpListener;
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -59,12 +60,9 @@ pub async fn run() -> anyhow::Result<()> {
                 .make_span_with(DefaultMakeSpan::default().include_headers(false)),
         );
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 80));
-    tracing::info!("listening on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
+    let listener = TcpListener::bind("0.0.0.0:80").await.unwrap();
+    tracing::info!("listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
 
     monitor_handle.abort();
     metadata_manager.abort();

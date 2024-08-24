@@ -24,7 +24,7 @@ pub struct MessageExchange {
      */
     client_map: ClientMap,
     sender: mpsc::Sender<ReceivedRemoteMessage>,
-    receiver: broadcast::Sender<ReceivedRemoteMessage>,
+    //receiver: broadcast::Sender<ReceivedRemoteMessage>,
     local_sender: LocalMessageSender,
 }
 
@@ -34,15 +34,15 @@ impl MessageExchange {
 
         let (sender, mut out_rx) = mpsc::channel::<ReceivedRemoteMessage>(100);
 
-        let (in_tx, _receiver) = broadcast::channel::<ReceivedRemoteMessage>(1);
+        //let (in_tx, _receiver) = broadcast::channel::<ReceivedRemoteMessage>(1);
 
         let _ = tokio::spawn(
-            (|client_map: ClientMap, broadcast: broadcast::Sender<ReceivedRemoteMessage>| async move {
-                let _hold = Arc::new(_receiver);
+            (|client_map: ClientMap/*, broadcast: broadcast::Sender<ReceivedRemoteMessage>*/| async move {
+                //let _hold = Arc::new(_receiver);
                 while let Some(msg) = out_rx.recv().await {
-                    if let Err(e) = broadcast.send(msg.clone()) {
+                    /*if let Err(e) = broadcast.send(msg.clone()) {
                         tracing::error!("could not send remote message: {}, {:?}", e, &msg);
-                    }
+                    }*/
 
                     MessageExchange::on_player_message(
                         client_map.clone(),
@@ -51,7 +51,7 @@ impl MessageExchange {
                     )
                     .await;
                 }
-            })(client_map.clone(), in_tx.clone()),
+            })(client_map.clone(), /*in_tx.clone()*/),
         );
 
         let (local_sender, _) = broadcast::channel::<LocalMessage>(100);
@@ -64,7 +64,7 @@ impl MessageExchange {
 
         let exchanger = Self {
             client_map: client_map.clone(),
-            receiver: in_tx,
+            //receiver: in_tx,
             sender,
             local_sender,
         };
@@ -178,9 +178,9 @@ impl MessageExchange {
         self.sender.clone()
     }
 
-    pub fn get_receiver(&self) -> broadcast::Receiver<ReceivedRemoteMessage> {
+    /*pub fn get_receiver(&self) -> broadcast::Receiver<ReceivedRemoteMessage> {
         self.receiver.subscribe()
-    }
+    }*/
 
     pub fn get_local_sender(&self) -> LocalMessageSender {
         self.local_sender.clone()
