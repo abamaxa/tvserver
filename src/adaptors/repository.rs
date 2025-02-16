@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::NaiveDateTime;
 use sqlx::{Error, Sqlite, Row};
 use sqlx::migrate::{
     MigrateDatabase, 
@@ -62,15 +63,19 @@ impl SqlRepository {
                 aspect_width: row.get::<Option<i32>, _>("aspect_width").unwrap_or(0) as u32,
                 aspect_height: row.get::<Option<i32>, _>("aspect_height").unwrap_or(0) as u32,
                 audio_tracks: row.get::<Option<i32>, _>("audio_tracks").unwrap_or(1) as u32,
+                probe_data: row.get::<Option<String>, _>("probe_data"),
             },
             checksum: row.get("checksum"),
             search_phrase: row.get("search_phrase"),
             state: row.get::<i32,_>("state").into(),
             created_on: row.get("created_on"),
             updated_on: row.get("updated_on"),
+            play_from: row.get::<Option<f32>, _>("play_from"),
+            last_viewed: row.get::<Option<NaiveDateTime>, _>("last_viewed"),
         }
     }
 }
+
 
 #[async_trait]
 impl Databaser for SqlRepository {

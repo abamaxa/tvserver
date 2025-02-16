@@ -1,10 +1,13 @@
 mod common;
 
+use std::env;
+
 use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
 use tokio::task::JoinHandle;
+use tvserver::domain::config::MOVIE_DIR;
 use tvserver::domain::messagebus::MessageExchange;
 use tvserver::services::SearchService;
 use tvserver::{
@@ -15,6 +18,8 @@ use tvserver::{
 
 #[tokio::test]
 async fn test_youtube() -> Result<()> {
+    env::set_var(MOVIE_DIR, "");
+    
     let searcher = get_youtube_search("yt_search.json").await;
 
     let server = make_server(searcher, 57179).await;

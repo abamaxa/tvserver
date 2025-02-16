@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            DELETE FROM video_details \n            WHERE checksum = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2d19866804b2ad472815c3366873642fa38cc6b1ab46ebd949315308fa1f9f2c"
+}

@@ -46,23 +46,25 @@ pub async fn run() -> anyhow::Result<()> {
     );
 
     let app = register(Arc::new(context))
-        .nest_service("/", ServeDir::new(get_client_path("app")))
+        //.nest_service("/", ServeDir::new(get_client_path("app")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
         .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
         .nest_service(
             "/api/thumbnails",
             ServeDir::new(get_thumbnail_dir(&get_movie_dir())),
         )
+        .fallback_service(ServeDir::new(get_client_path("app")))
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(false)),
         );
 
+
+
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     tracing::info!("listening on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+    axum::serve(tokio::net::TcpListener::bind(&addr).await?, app)
         .await
         .unwrap();
 

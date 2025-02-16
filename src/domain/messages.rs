@@ -35,8 +35,10 @@ pub enum RemoteMessage {
         video: String,
         width: i32,
         height: i32,
-        aspectWidth: i32,
-        aspectHeight: i32,
+        #[serde(rename = "aspectWidth")]
+        aspect_width: i32,
+        #[serde(rename = "aspectHeight")]
+        aspect_height: i32,
     },
     Seek {
         interval: i32,
@@ -171,8 +173,8 @@ impl PlayRequest {
             video: self.video.clone(),
             width: self.width,
             height: self.height,
-            aspectWidth: self.aspect_width,
-            aspectHeight: self.aspect_height,
+            aspect_width: self.aspect_width,
+            aspect_height: self.aspect_height,
         }
     }
 

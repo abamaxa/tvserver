@@ -3,12 +3,18 @@ mod common;
 use crate::common::{get_media_store, get_pirate_search, get_repository, get_task_manager};
 use anyhow::Result;
 use reqwest::StatusCode;
+use tvserver::domain::config::MOVIE_DIR;
 use std::collections::HashMap;
+use std::env;
 use tvserver::domain::messagebus::MessageExchange;
 use tvserver::{domain::messages::Response, entrypoints::Context};
 
+const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
+
 #[tokio::test]
 async fn test_pirate_download() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+    
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
     let context = Context::new(

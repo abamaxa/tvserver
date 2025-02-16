@@ -7,7 +7,6 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::Hasher;
-use std::os::unix::ffi::OsStrExt;
 use std::{io, fmt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -177,7 +176,7 @@ pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
     }
 
     if total_read == 0 {
-        hasher.write(path.as_ref().as_os_str().as_bytes());
+        hasher.write(path.as_ref().as_os_str().as_encoded_bytes());
     }
 
     Ok(hasher.finish() as i64)
@@ -275,6 +274,7 @@ async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Bo
         aspect_width,
         aspect_height,
         audio_tracks: audio_track_count,
+        probe_data: Some(output_str),
     })
 }
 

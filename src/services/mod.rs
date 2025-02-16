@@ -1,7 +1,6 @@
 mod chatgpt;
 mod logging;
 mod media_store;
-mod media_stream;
 mod monitor;
 mod pirate_bay;
 mod search;
@@ -13,7 +12,6 @@ mod youtube;
 
 pub use logging::{TVSERVER_LOG, DBTOOL_LOG, setup_logging};
 pub use media_store::MediaStore;
-pub use media_stream::stream_video;
 pub use monitor::Monitor;
 pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use search::{SearchEngine, SearchEngineMap, SearchService};

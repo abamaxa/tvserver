@@ -87,7 +87,7 @@ async fn handle_sending(
         };
 
         let result = match message {
-            RemoteMessage::Ping(n) => sender.send(Message::Ping(n.to_be_bytes().to_vec())).await,
+            RemoteMessage::Ping(n) => sender.send(Message::Ping(n.to_be_bytes().to_vec().into())).await,
             _ => {
                 let as_bytes: Vec<u8> = match serde_json::to_vec(&message) {
                     Ok(result) => result,

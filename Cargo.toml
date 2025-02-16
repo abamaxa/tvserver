@@ -14,25 +14,25 @@ keywords = ["transmission", "torrent", "youtube", "ffmpeg"]
 anyhow = "1.0.59"
 async-recursion = "1.0.4"
 async-trait = "0.1.64"
-axum = { version = "0.6.6", features = ["headers", "ws", "macros", "tokio"]}
+axum = { version = "0.8.1", features = ["ws", "macros", "tokio"]}
 bytesize = {version = "1.1.0", features = ["serde"]}
 chrono = {version = "0.4.25", features=["serde"]}
-futures = "0.3"
+futures = "0.3" 
 html-escape = "0.2.13"
 mockall = "0.11.3"
 rand = "0.8.5"
 regex = "1.7.1"
-reqwest = { version = "0.11.14", features = ["json"] }
+reqwest = { version = "0.11.20", features = ["json"] }
 scraper = "0.15.0"
 serde = { version = "1.0.138", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.0.0"
-sqlx = { version = "0.6.3", features = ["runtime-tokio-rustls", "chrono", "sqlite", "migrate", "json", "offline"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "chrono", "sqlite", "migrate", "json"] }
 thiserror = "1.0.40"
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.25.0", features = ["full"] }
 tokio-util = "0.7.4"
-tower-http = { version = "0.4.0", features = ["fs", "trace", "cors"] }
-tower = { version = "0.4.10", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+# tower = { version = "0.4.13", features = ["util"] }
 titlecase = "2.2.1"
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
@@ -40,12 +40,9 @@ transmission-rpc = "0.4.1"
 urlencoding = "2.1.2"
 itertools = "0.11.0"
 
-
-[patch.crates-io]
-http = {git = "https://github.com/abamaxa/http"}
-
 [profile.release]
 strip = "debuginfo"
 
 [features]
 vlc = []
+ai-descriptions = []

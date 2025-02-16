@@ -4,8 +4,9 @@ use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
+use tvserver::domain::config::MOVIE_DIR;
 use tvserver::domain::messages::PlayRequest;
-use std::collections::HashMap;
+use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use tvserver::domain::messagebus::MessageExchange;
@@ -13,6 +14,7 @@ use tvserver::{domain::messages::Response, entrypoints};
 
 #[tokio::test]
 async fn test_local_play() -> Result<()> {
+    env::set_var(MOVIE_DIR, "");
     let search = get_youtube_search("yt_search.json").await;
 
     let context = entrypoints::Context::new(

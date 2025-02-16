@@ -1,27 +1,39 @@
+#[cfg(feature = "ai-descriptions")]
 use crate::domain::messages::{ChatGPTMessage, ChatGPTRequest, ChatGPTResponse};
+#[cfg(feature = "ai-descriptions")]
 use crate::domain::models::SeriesDetails;
+#[cfg(feature = "ai-descriptions")]
 use crate::domain::traits::JsonFetcher;
+#[cfg(feature = "ai-descriptions")]
 use anyhow::anyhow;
+#[cfg(feature = "ai-descriptions")]
 use std::sync::Arc;
 
+#[cfg(feature = "ai-descriptions")]
 pub type ChatFetcher = Arc<dyn for<'a> JsonFetcher<'a, ChatGPTResponse, ChatGPTRequest>>;
 
+#[cfg(feature = "ai-descriptions")]
 pub struct ChatGPT {
     client: ChatFetcher,
 }
 
+#[cfg(feature = "ai-descriptions")]
 const CHAT_MODEL: &str = "gpt-4";
 
+#[cfg(feature = "ai-descriptions")]
 const CHAT_URL: &str = "https://api.openai.com/v1/chat/completions";
 
+#[cfg(feature = "ai-descriptions")]
 const PARSE_SYSTEM_MSG: &str = "Parse Series Title, Season, Episode and
 Episode Title of TV series from a file name, giving the response as machine
 readable JSON list.";
 
+#[cfg(feature = "ai-descriptions")]
 const PARSE_SAMPLE_REQUEST: &str = "Line Of Duty/Line Of Duty S02E02.mp4
 Only Fools and Horses/Specials/S00E03 - Diamonds Are for Heather.mkv
 Your a boat john [jLKJOL8&*UYG].webm";
 
+#[cfg(feature = "ai-descriptions")]
 const PARSE_SAMPLE_RESPONSE: &str = "[
     {
         \"seriesTitle\": \"Line Of Duty\",
@@ -43,6 +55,7 @@ const PARSE_SAMPLE_RESPONSE: &str = "[
     }
 ]";
 
+#[cfg(feature = "ai-descriptions")]
 impl ChatGPT {
     pub fn new(client: ChatFetcher) -> Self {
         Self { client }
@@ -99,6 +112,7 @@ impl ChatGPT {
     }
 }
 
+#[cfg(feature = "ai-descriptions")]
 fn strip_file_paths(response: &str) -> String {
     let lines: Vec<&str> = response.trim().split('\n').collect();
     let mut new_lines: Vec<String> = Vec::new();
@@ -129,7 +143,7 @@ fn strip_file_paths(response: &str) -> String {
     format!("[\n{}\n]", new_lines)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ai-descriptions"))]
 mod tests {
     use super::*;
     use crate::adaptors::HTTPClient;

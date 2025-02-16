@@ -53,7 +53,9 @@ pub struct VideoMetadata {
     pub aspect_width: u32,
     pub aspect_height: u32,
     pub audio_tracks: u32,
+    pub probe_data: Option<String>,
 }
+
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -140,7 +142,11 @@ pub struct VideoDetails {
     pub state: VideoState,
     pub created_on: NaiveDateTime,
     pub updated_on: NaiveDateTime,
+    pub play_from: Option<f32>,
+    pub last_viewed: Option<NaiveDateTime>,
 }
+
+
 
 
 impl VideoDetails {
@@ -157,9 +163,12 @@ impl VideoDetails {
             search_phrase: None,
             state: VideoState::NewFile,
             created_on: now,
-            updated_on: now
+            updated_on: now,
+            play_from: None,
+            last_viewed: None,
         }
     }
+
 
     pub fn should_retry_metadata(&self) -> bool {
         if self.metadata.duration == 0. || self.metadata.height == 0 {

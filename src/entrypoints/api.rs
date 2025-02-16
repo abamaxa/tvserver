@@ -11,12 +11,12 @@ use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABL
 use crate::domain::messagebus::MessageExchange;
 use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Repository, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
-use crate::services::{stream_video, SearchService, TaskManager, TransmissionDaemon};
+use crate::services::{SearchService, TaskManager, TransmissionDaemon};
+use axum::routing::any;
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
     extract::{ConnectInfo, Path, Query, State},
-    headers::HeaderMap,
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -89,6 +89,7 @@ pub type SharedState = Arc<Context>;
 
 pub fn register(shared_state: SharedState) -> Router {
     Router::new()
+        .without_v07_checks()  
         .route("/api/tasks", post(tasks_add))
         .route("/api/tasks", get(tasks_list))
         .route("/api/tasks/:type/*path", delete(tasks_delete))
@@ -103,8 +104,8 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/remote", get(list_player))
         .route("/api/remote/control", post(remote_command))
         .route("/api/remote/play", post(remote_play))
-        .route("/api/remote/ws", get(ws_player_handler))
-        .route("/api/control/ws", get(ws_control_handler))
+        .route("/api/remote/ws", any(ws_player_handler))
+        .route("/api/control/ws", any(ws_control_handler))
         .route("/api/alt-stream/*path", get(video))
         .route("/api/search/pirate", get(pirate_search))
         .route("/api/search/youtube", get(youtube_search))
@@ -258,6 +259,7 @@ pub async fn ws_player_handler(
     response
 }
 
+#[debug_handler]
 pub async fn ws_control_handler(
     state: State<SharedState>,
     ws: WebSocketUpgrade,
@@ -272,16 +274,6 @@ pub async fn ws_control_handler(
     response
 }
 
-#[debug_handler]
-async fn video(
-    State(state): State<SharedState>,
-    Path(video_path): Path<String>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let video_file = state.store.as_local_path("", &video_path);
-
-    stream_video(&video_file, headers).await
-}
 
 #[debug_handler]
 async fn remote_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
@@ -360,4 +352,8 @@ async fn list_conversions() -> (StatusCode, Json<SearchResults<Conversion>>) {
 
 fn std_error(code: StatusCode, message: String) -> StdResponse {
     (code, Json(Response::error(message)))
+}
+
+async fn video() -> impl IntoResponse {
+    // Implementation here
 }

@@ -164,11 +164,13 @@ mod test {
 
     #[test]
     fn test_get_next_version_name() {
-        let path = "tests/fixtures/media_dir/collection2/test_collection2-v1.mkv";
+        let input_path = PathBuf::from("tests/fixtures/media_dir/collection2/test_collection2-v1.mkv");
+        let expected_path = PathBuf::from("tests/fixtures/media_dir/collection2")
+            .join("test_collection2-v3.mp4");
 
         assert_eq!(
-            get_next_version_name(path, Some("mp4")),
-            Some("tests/fixtures/media_dir/collection2/test_collection2-v3.mp4".to_string())
+            get_next_version_name(input_path.to_str().unwrap(), Some("mp4")),
+            Some(expected_path.to_str().unwrap().to_string())
         );
     }
 }

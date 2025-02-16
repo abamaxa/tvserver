@@ -112,7 +112,7 @@ impl Conversion {
         }
     }
 
-    fn make_args<'a>(&'a self, source: &'a str, destination: &'a str) -> Vec<&str> {
+    fn make_args<'a>(&'a self, source: &'a str, destination: &'a str) -> Vec<&'a str> {
         self.args
             .split(' ')
             .map(|arg| match arg {
