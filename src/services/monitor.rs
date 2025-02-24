@@ -1,27 +1,30 @@
-use crate::domain::traits::{Downloader, Storer, Task};
+use crate::domain::traits::{Downloader, Checker, Task, Storer};
 use crate::services::TaskManager;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
 use tokio::time::{sleep, Duration};
 
 pub struct Monitor {
-    store: Storer,
+    checker: Checker,
     downloads: Downloader,
     task_manager: Arc<TaskManager>,
+    store: Storer,
 }
 
 impl Monitor {
     pub fn start(
-        store: Storer,
+        checker: Checker,
         downloads: Downloader,
-        task_manager: Arc<TaskManager>
+        task_manager: Arc<TaskManager>,
+        store: Storer,
     ) -> JoinHandle<()> {
         task::spawn(async move {
             tracing::info!("starting download monitor");
             let monitor = Self {
-                store,
+                checker,
                 downloads,
                 task_manager,
+                store,
             };
 
             loop {
@@ -34,11 +37,11 @@ impl Monitor {
 
                 monitor.task_manager.cleanup(&monitor.store).await;
 
-                if let Err(err) = &monitor.store.check_video_information().await {
+                if let Err(err) = &monitor.checker.check_video_information().await {
                     tracing::error!("error checking video info: {}", err);
                 }
 
-                sleep(Duration::from_secs(10)).await;
+                sleep(Duration::from_secs(60)).await;
             }
         })
     }
@@ -68,7 +71,7 @@ mod tests {
 
     use crate::domain::models::test::torrents_from_fixture;
     use crate::domain::models::TorrentTask;
-    use crate::domain::traits::{MockMediaDownloader, MockMediaStorer, Task};
+    use crate::domain::traits::{MockMediaChecker, MockMediaDownloader, MockMediaStorer, Task};
     use crate::domain::NoSpawner;
 
     #[tokio::test]
@@ -95,17 +98,19 @@ mod tests {
 
         let downloader: Downloader = Arc::new(mock_downloader);
 
-        let mut mock_store = MockMediaStorer::new();
+        let mut mock_storer = MockMediaStorer::new();
 
-        mock_store.expect_add_file().times(1).returning(|_| Ok(()));
+        mock_storer.expect_add_file().times(1).returning(|_| Ok(()));
 
-        let store: Storer = Arc::new(mock_store);
+        let store: Storer = Arc::new(mock_storer);
 
         let spawner = Arc::new(NoSpawner::new());
 
         let task_manager = Arc::new(TaskManager::new(spawner));
 
-        let monitor_handle = Monitor::start(store, downloader, task_manager);
+        let checker = Arc::new(MockMediaChecker::new());
+
+        let monitor_handle = Monitor::start(checker, downloader, task_manager, store);
 
         // wait for monitor to finish a cycle, if it hasn't finished by then it ought
         // to be a test fail

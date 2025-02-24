@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT series_title, MIN(thumbnail) as thumbnail\n            FROM video_details\n            GROUP BY series_title\n            ORDER BY series_title\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "series_title",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "thumbnail",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "0381ecf3b5871864c291882c5d8be4b5a17b7e4291b4a9d95733f45625c72e5c"
+}

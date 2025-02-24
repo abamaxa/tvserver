@@ -4,10 +4,10 @@ use std::sync::Arc;
 use crate::adaptors::{FileSystemStore, SqlRepository, TokioProcessSpawner};
 use crate::domain::config::{get_database_url, get_movie_dir};
 use crate::domain::messagebus::MessageExchange;
-use crate::domain::traits::{ FileStorer, Player};
-use crate::domain::config::enable_vlc_player;
+use crate::domain::services::MediaCheck;
+use crate::domain::traits::FileStorer;
 use crate::services::{
-    MediaStore, SearchService, TaskManager, VLCPlayer,
+    MediaStore, SearchService, TaskManager,
 };
 
 use super::api::Context;
@@ -17,22 +17,17 @@ pub async fn create_context() -> Result<Context, Error> {
 
     let repository = Arc::new(SqlRepository::new(&get_database_url()).await?);
 
-    let player: Option<Arc<dyn Player>> = if enable_vlc_player() {
-        Some(Arc::new(VLCPlayer::start()))
-    } else {
-        None
-    };
-
     let task_manager = Arc::new(TaskManager::new(Arc::new(TokioProcessSpawner::new())));
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
 
+    let checker = Arc::new(MediaCheck::new(file_storer.clone(), repository.clone(), messenger.get_local_sender()));
     Ok(Context::new(
-        Arc::new(MediaStore::new(file_storer, repository.clone(), messenger.get_local_sender())),
+        Arc::new(MediaStore::new(file_storer, repository.clone())),
         SearchService::new(task_manager.clone()),
         messenger,
-        player,
         task_manager,
         repository,
+        checker,
     ))
 }

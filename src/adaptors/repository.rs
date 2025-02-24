@@ -10,7 +10,7 @@ use std::path;
 use std::path::PathBuf;
 
 use crate::domain::config::get_database_migration_dir;
-use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata};
+use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata, CollectionItem};
 use crate::domain::traits::Databaser;
 use itertools::Itertools;
 
@@ -70,9 +70,18 @@ impl SqlRepository {
             state: row.get::<i32,_>("state").into(),
             created_on: row.get("created_on"),
             updated_on: row.get("updated_on"),
-            play_from: row.get::<Option<f32>, _>("play_from"),
-            last_viewed: row.get::<Option<NaiveDateTime>, _>("last_viewed"),
+            play_from: None,
+            last_viewed: None,
         }
+    }
+
+    fn from_record_with_last_seen(row: &SqliteRow) -> VideoDetails {
+        let mut video_details = Self::from_record(row);
+
+        video_details.last_viewed = row.get::<Option<NaiveDateTime>, _>("last_viewed");
+        video_details.play_from = row.get::<Option<f32>, _>("play_from");
+
+        video_details
     }
 }
 
@@ -172,12 +181,16 @@ impl Databaser for SqlRepository {
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
-            SELECT 
-                *
-            FROM 
-                video_details 
-            WHERE 
-                collection = ?
+		SELECT
+			vd.*, 
+	   		h.updated_on as last_viewed, 
+	   		h.stopped as play_from
+   		FROM 
+	   		video_details vd 
+	   		LEFT JOIN history h 
+	   		ON vd.checksum = h.checksum  
+		WHERE 
+			collection = ?
             "#,
         )
         .bind(collection)
@@ -187,7 +200,7 @@ impl Databaser for SqlRepository {
         let mut results = Vec::with_capacity(rows.len());
 
         for row in rows {
-            results.push(Self::from_record(&row));
+            results.push(Self::from_record_with_last_seen(&row));
         }
 
         Ok(results)
@@ -241,6 +254,94 @@ impl Databaser for SqlRepository {
 
     }
 
+    async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error> {
+        // Execute the SQL query to retrieve series titles along with a representative thumbnail.
+        let rows = sqlx::query!(
+            r#"
+            SELECT series_title, MIN(thumbnail) as thumbnail
+            FROM video_details
+            GROUP BY series_title
+            ORDER BY series_title
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        
+        let mut series = Vec::new();
+        for row in rows {
+            // Convert the JSON string in the thumbnail column to a Vec<String>.
+            // If the thumbnail is null or invalid, default to an empty Vec.
+            let thumbnails: Vec<String> = match row.thumbnail {
+                Some(ts) => serde_json::from_str(&ts).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            
+            // Create a new CollectionItem and add it to the result list.
+            series.push(CollectionItem {
+                collection: row.series_title.unwrap_or_default(),
+                thumbnail: thumbnails,
+            });
+        }
+        Ok(series)
+    }
+
+    async fn list_series_details(
+        &self,
+        series: &str,
+        season: Option<&str>,
+    ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+        // Build the SQL query based on whether `season` is provided.
+        let query = if let Some(season_value) = season {
+            sqlx::query(
+                "
+                SELECT
+                    vd.*, 
+                    h.updated_on AS last_viewed, 
+                    h.stopped AS play_from
+                FROM 
+                    video_details vd 
+                    LEFT JOIN history h ON vd.checksum = h.checksum
+                WHERE 
+                    series_title = ? AND season = ?
+                ORDER BY
+                    episode, episode_title
+                ",
+            )
+            .bind(series)
+            .bind(season_value)
+        } else {
+            sqlx::query(
+                "
+                SELECT
+                    vd.*, 
+                    h.updated_on AS last_viewed, 
+                    h.stopped AS play_from
+                FROM 
+                    video_details vd 
+                    LEFT JOIN history h ON vd.checksum = h.checksum
+                WHERE 
+                    series_title = ?
+                ORDER BY
+                    season, episode, episode_title
+                ",
+            )
+            .bind(series)
+        };
+
+        // Execute the query asynchronously and await the results.
+        let rows = query.fetch_all(&self.pool).await?;
+
+        // Process each returned row using `from_record_with_last_seen`
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            // Assume that from_record_with_last_seen returns a Result<VideoDetail, Error>
+            let video_detail = Self::from_record_with_last_seen(&row);
+            results.push(video_detail);
+        }
+
+        Ok(results)
+    }
+
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error> {
         let row = sqlx::query(
             r#"
@@ -290,6 +391,68 @@ impl Databaser for SqlRepository {
         .await
         .map(|result| result.rows_affected()) // return number of rows affected
     }
+
+    async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error> {
+        let query = r#"
+            INSERT INTO history (
+                checksum,
+                started,
+                stopped
+            ) VALUES (
+                ?,
+                ?,
+                ?
+            )
+            ON CONFLICT(checksum) DO UPDATE SET
+                started = MIN(started, ?),
+                stopped = ?,
+                updated_on = CURRENT_TIMESTAMP
+            WHERE checksum = ?
+        "#;
+
+        sqlx::query(query)
+            .bind(checksum)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(checksum)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error> {
+        let query = r#"
+            SELECT
+                vd.*, 
+                h.updated_on as last_viewed, 
+                h.stopped as play_from
+            FROM 
+                video_details vd 
+                INNER JOIN history h 
+                    ON vd.checksum = h.checksum 
+            ORDER BY    
+                h.updated_on DESC
+            LIMIT ?
+            OFFSET ?
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut history = Vec::with_capacity(rows.len());
+        for row in rows {
+            // Assume from_record_with_last_seen takes the row and returns a Result<VideoDetails, _>
+            let video_details = Self::from_record_with_last_seen(&row);
+            history.push(video_details);
+        }
+        Ok(history)
+    }
 }
 
 #[cfg(test)]
@@ -326,12 +489,15 @@ mod tests {
                 aspect_width: 1920,
                 aspect_height: 1080,
                 audio_tracks: 2,
+                probe_data: None,
             },
             checksum: 1234,
             search_phrase: None,
             state: VideoState::Ready,
             created_on: now,
             updated_on: now,
+            play_from: None,
+            last_viewed: None,
         };
 
         // Save the VideoDetails instance.

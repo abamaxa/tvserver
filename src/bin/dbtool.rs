@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
         context.get_local_sender(),
     );
 
-    if let Err(err) = context.get_store().check_video_information().await {
+    if let Err(err) = context.get_checker().check_video_information().await {
         tracing::error!("error checking video info: {}", err);
     }
 

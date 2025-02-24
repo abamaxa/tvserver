@@ -9,6 +9,3 @@ pub use object_store::FileSystemStore;
 pub use repository::SqlRepository;
 pub use subprocess::TokioProcessSpawner;
 pub use websocket::RemoteBrowserPlayer;
-
-#[cfg(feature = "vlc")]
-pub use vlc_player::{Player, VLCPlayer};

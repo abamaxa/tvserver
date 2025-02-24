@@ -2,6 +2,7 @@ mod common;
 
 use crate::common::{get_media_store, get_pirate_search, get_repository, get_task_manager};
 use anyhow::Result;
+use common::get_checker;
 use reqwest::StatusCode;
 use tvserver::domain::config::MOVIE_DIR;
 use std::collections::HashMap;
@@ -21,9 +22,9 @@ async fn test_pirate_download() -> Result<()> {
         get_media_store(),
         searcher,
         MessageExchange::new(),
-        None,
         get_task_manager(),
         get_repository().await,
+        get_checker(),
     );
 
     let server = common::create_server(context, 57185).await;

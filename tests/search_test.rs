@@ -6,6 +6,7 @@ use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
+use common::get_checker;
 use tokio::task::JoinHandle;
 use tvserver::domain::config::MOVIE_DIR;
 use tvserver::domain::messagebus::MessageExchange;
@@ -84,9 +85,9 @@ async fn make_server(searcher: SearchService, port: u16) -> JoinHandle<Result<()
         get_media_store(),
         searcher,
         MessageExchange::new(),
-        None,
         get_task_manager(),
         get_repository().await,
+        get_checker(),
     );
 
     common::create_server(context, port).await

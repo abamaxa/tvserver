@@ -3,13 +3,13 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::adaptors::RemoteBrowserPlayer;
 use crate::domain::messages::{
-    ClientLogMessage, Command, ConversionRequest, DownloadRequest, LocalCommand,
+    ClientLogMessage, Command, ConversionRequest, DownloadRequest,
     LocalMessageReceiver, LocalMessageSender, MediaItem, PlayRequest, PlayerList, RenameRequest,
     Response,
 };
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
 use crate::domain::messagebus::MessageExchange;
-use crate::domain::traits::{MediaDownloader, Player, ProcessSpawner, Repository, Storer};
+use crate::domain::traits::{Checker, MediaDownloader, ProcessSpawner, Repository, Storer};
 use crate::domain::{SearchEngineType, Searcher, TaskType};
 use crate::services::{SearchService, TaskManager, TransmissionDaemon};
 use axum::routing::any;
@@ -34,9 +34,9 @@ const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
 #[derive(Clone)]
 pub struct Context {
     store: Storer,
+    checker: Checker,
     search: SearchService,
     messenger: MessageExchange,
-    player: Option<Arc<dyn Player>>,
     task_manager: Arc<TaskManager>,
     repository: Repository,
 }
@@ -46,15 +46,15 @@ impl Context {
         store: Storer,
         search: SearchService,
         messenger: MessageExchange,
-        player: Option<Arc<dyn Player>>,
         task_manager: Arc<TaskManager>,
         repository: Repository,
+        checker: Checker,
     ) -> Context {
         Context {
             store,
+            checker,
             search,
             messenger,
-            player,
             task_manager,
             repository,
         }
@@ -83,30 +83,30 @@ impl Context {
     pub fn get_local_receiver(&self) -> LocalMessageReceiver {
         self.messenger.get_local_receiver()
     }
+
+    pub fn get_checker(&self) -> Checker {
+        self.checker.clone()
+    }
 }
 
 pub type SharedState = Arc<Context>;
 
 pub fn register(shared_state: SharedState) -> Router {
     Router::new()
-        .without_v07_checks()  
         .route("/api/tasks", post(tasks_add))
         .route("/api/tasks", get(tasks_list))
-        .route("/api/tasks/:type/*path", delete(tasks_delete))
+        .route("/api/tasks/{type}/{*path}", delete(tasks_delete))
         .route("/api/log", post(log_client_message))
         .route("/api/media", get(list_root_collection))
-        .route("/api/media/*media", get(list_collection))
-        .route("/api/media/*media", delete(delete_video))
-        .route("/api/media/*media", put(rename_video))
-        .route("/api/media/*media", post(convert_video))
-        .route("/api/vlc/control", post(local_command))
-        .route("/api/vlc/play", post(local_play))
+        .route("/api/media/{*media}", get(list_collection))
+        .route("/api/media/{*media}", delete(delete_video))
+        .route("/api/media/{*media}", put(rename_video))
+        .route("/api/media/{*media}", post(convert_video))
         .route("/api/remote", get(list_player))
         .route("/api/remote/control", post(remote_command))
         .route("/api/remote/play", post(remote_play))
         .route("/api/remote/ws", any(ws_player_handler))
         .route("/api/control/ws", any(ws_control_handler))
-        .route("/api/alt-stream/*path", get(video))
         .route("/api/search/pirate", get(pirate_search))
         .route("/api/search/youtube", get(youtube_search))
         .route("/api/conversion", get(list_conversions))
@@ -178,44 +178,6 @@ async fn do_search(client: &Searcher, params: &QueryParams) -> impl IntoResponse
     }
 }
 
-#[debug_handler]
-async fn local_command(
-    state: State<SharedState>,
-    payload: Json<LocalCommand>,
-) -> impl IntoResponse {
-    call_local_player(&state, |_, player| -> StdResponse {
-        match player.send_command(&payload.command, 0) {
-            Ok(result) => (OK, Json(Response::success(result))),
-            Err(e) => (INTERNAL_SERVER_ERROR, Json(Response::error(e))),
-        }
-    })
-    .await
-}
-
-#[debug_handler]
-async fn local_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
-    call_local_player(&state, |context, player| -> StdResponse {
-        if let Err(err) = player.send_command("clear", 1) {
-            tracing::warn!("{:?}", err);
-        }
-
-        match player.send_command(&payload.make_local_command(&context.store), 0) {
-            Ok(result) => (OK, Json(Response::success(result))),
-            Err(e) => (INTERNAL_SERVER_ERROR, Json(Response::error(e))),
-        }
-    })
-    .await
-}
-
-async fn call_local_player<F>(state: &SharedState, f: F) -> StdResponse
-where
-    F: FnOnce(&Context, &Arc<dyn Player>) -> StdResponse,
-{
-    match &state.player {
-        Some(player) => f(state, player),
-        _ => (OK, Json(Response::success("no local player".to_string()))),
-    }
-}
 
 #[debug_handler]
 async fn list_root_collection(state: State<SharedState>) -> impl IntoResponse {
@@ -352,8 +314,4 @@ async fn list_conversions() -> (StatusCode, Json<SearchResults<Conversion>>) {
 
 fn std_error(code: StatusCode, message: String) -> StdResponse {
     (code, Json(Response::error(message)))
-}
-
-async fn video() -> impl IntoResponse {
-    // Implementation here
 }

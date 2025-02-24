@@ -36,16 +36,17 @@ impl MetaDataManager {
                 Ok(msg) => match msg {
                         LocalMessage::Media(event) => self.handle_media_event(event).await,
                         _ => continue,
-                 },
-                 Err(e) => tracing::error!("event loop got an error: {}", e)
+                },
+                Err(e) => tracing::error!("event loop got an error: {}", e)
             }
+            //tracing::info!("event loop receiver len: {}", self.receiver.len());
         }
     }
 
     async fn handle_media_event(&self, event: MediaEvent) {
         let _ = match event {
             MediaEvent::MediaAvailable(event) => {
-                if let Err(err) = generate_video_metadatas(event.full_path, self.repo.clone()).await {
+                if let Err(err) = generate_video_metadatas(event.full_path, self.repo.clone(), event.search).await {
                     match err.code {
                         // MetaDataErrorCode::ZeroFileSize => ,
                         _ => tracing::error!("processing MediaAvailable: {}", err)

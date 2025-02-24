@@ -1,5 +1,4 @@
 pub mod api;
-pub mod handlers;
 mod context;
 
 pub use api::{register, Context, SharedState};

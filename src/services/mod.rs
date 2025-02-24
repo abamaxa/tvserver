@@ -7,7 +7,6 @@ mod search;
 mod task_manager;
 mod torrents;
 mod video_information;
-mod vlc_player;
 mod youtube;
 
 pub use logging::{TVSERVER_LOG, DBTOOL_LOG, setup_logging};
@@ -18,5 +17,4 @@ pub use search::{SearchEngine, SearchEngineMap, SearchService};
 pub use task_manager::TaskManager;
 pub use torrents::TransmissionDaemon;
 pub use video_information::MetaDataManager;
-pub use vlc_player::VLCPlayer;
 pub use youtube::{YoutubeClient, YoutubeFetcher, YoutubeResult};

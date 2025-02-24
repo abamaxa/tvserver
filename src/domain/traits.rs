@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::domain::messages::{MediaItem, RemoteMessage, TaskState};
-use crate::domain::models::{SearchResults, VideoDetails};
+use super::messages::{MediaItem, RemoteMessage, TaskState};
+use super::models::{CollectionItem, SearchResults, VideoDetails};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -10,18 +10,11 @@ use mockall::automock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+
 /*
 The following are higher level traits that provide polymorphism
 at the service layer.
  */
-
-/// This trait is used to provide an interface to allow the VLC player to be controlled,
-/// which was the original video player. Unlike the RemotePlayer interface it doesn't
-/// provide an async interface and will be removed in the future.
-#[automock]
-pub trait Player: Send + Sync {
-    fn send_command(&self, command: &str, wait_secs: i32) -> Result<String, String>;
-}
 
 /// Interface to a allow searching of a media source, currently implemented
 /// for the Youtube Data API and a PirateBay proxy scrapper.
@@ -39,11 +32,19 @@ pub trait MediaStorer: Send + Sync {
     async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
     async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
-    async fn check_video_information(&self) -> anyhow::Result<()>;
     fn as_local_path(&self, collection: &str, video: &str) -> String;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
+
+/// Provides methods for checking the integrity of a video file.
+#[automock]
+#[async_trait]
+pub trait MediaChecker: Send + Sync {
+    async fn check_video_information(&self) -> anyhow::Result<()>;
+}
+
+pub type Checker = Arc<dyn MediaChecker>;
 
 /// Provides methods for retrieving content, for instance downloading a torrent, or a URL
 #[automock]
@@ -142,9 +143,13 @@ pub trait Databaser: Sync + Send {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
     async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;
+    async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error>;
+    async fn list_series_details(&self, series: &str, season: Option<&str>) -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error>;
     async fn retrieve_video_by_name_and_collection(&self, name: &str, collection: &str) -> Result<VideoDetails, sqlx::Error>;
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;
+    async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
+    async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
 }
 
 pub type Repository = Arc<dyn Databaser>;

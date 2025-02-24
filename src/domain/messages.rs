@@ -130,11 +130,6 @@ pub struct ReceivedRemoteMessage {
     pub message: RemoteMessage,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct LocalCommand {
-    pub command: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Command {
     pub remote_address: Option<String>,
@@ -222,6 +217,7 @@ pub struct DownloadRequest {
     pub name: String,
     pub link: String,
     pub engine: SearchEngineType,
+    pub series: Option<String>,
 }
 
 #[serde_with::skip_serializing_none]

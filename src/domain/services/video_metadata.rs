@@ -62,7 +62,7 @@ impl MetaDataError {
     }
 }
 
-pub async fn generate_video_metadatas(path: PathBuf, repo: Repository) -> Result<Option<VideoDetails>, MetaDataError> {
+pub async fn generate_video_metadatas(path: PathBuf, repo: Repository, suggested_series: Option<String>) -> Result<Option<VideoDetails>, MetaDataError> {
     eprintln!("processing: {}", path.to_str().unwrap());
     let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
     if !thumbnail_dir.exists() {
@@ -76,7 +76,7 @@ pub async fn generate_video_metadatas(path: PathBuf, repo: Repository) -> Result
         return Ok(None);
     }
 
-    let (details, err) = match make_video_metadatas(&path).await {
+    let (details, err) = match make_video_metadatas(&path, suggested_series).await {
         Ok(details) => (details, None),
         Err(err) => (err.video_details.clone(), Some(err))
     };
@@ -94,11 +94,11 @@ pub async fn generate_video_metadatas(path: PathBuf, repo: Repository) -> Result
 }
 
 
-async fn make_video_metadatas(path: &PathBuf) -> Result<VideoDetails, MetaDataError> {
+async fn make_video_metadatas(path: &PathBuf, suggested_series: Option<String>) -> Result<VideoDetails, MetaDataError> {
 
     let (collection, video) = get_collection_and_video_from_path(&path);
 
-    let mut details: VideoDetails = VideoDetails::new(video, collection, &path);
+    let mut details: VideoDetails = VideoDetails::new(video, collection, suggested_series);
 
     details.checksum = match calculate_checksum(&path).await {
         Ok(checksum) => checksum,

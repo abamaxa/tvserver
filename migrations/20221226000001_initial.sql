@@ -1,3 +1,12 @@
+CREATE TABLE IF NOT EXISTS collections (
+    name TEXT PRIMARY KEY NOT NULL,
+    path TEXT NOT NULL,
+    description TEXT,
+    thumbnail TEXT,
+    created_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS video_details (
     checksum INTEGER PRIMARY KEY NOT NULL,
     video TEXT NOT NULL,

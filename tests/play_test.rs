@@ -4,6 +4,7 @@ use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
+use common::get_checker;
 use tvserver::domain::config::MOVIE_DIR;
 use tvserver::domain::messages::PlayRequest;
 use std::env;
@@ -21,9 +22,9 @@ async fn test_local_play() -> Result<()> {
         get_media_store(),
         search,
         MessageExchange::new(),
-        Some(common::get_player()),
         get_task_manager(),
         get_repository().await,
+        get_checker(),
     );
 
     let server = common::create_server(context, 57181).await;
@@ -70,9 +71,9 @@ async fn test_remote_play() -> Result<()> {
         get_media_store(),
         searcher,
         exchange,
-        None,
         get_task_manager(),
         get_repository().await,
+        get_checker(),
     );
 
     let server = common::create_server(context, 57182).await;

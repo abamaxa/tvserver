@@ -1,38 +1,43 @@
 use chrono::{NaiveDateTime, Local, Duration};
-use mockall::lazy_static;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{collections::HashMap, path::{Path, PathBuf}};
+use crate::domain::algorithm::{title_case, parse_file_path};
 
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CollectionItem {
+    pub collection: String,
+    pub thumbnail: Vec<String>,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CollectionDetails {
     pub collection: String,
     pub parent_collection: String,
-    pub child_collections: Vec<String>,
+    pub child_collections: Vec<CollectionItem>,
+    pub series: HashMap<String, Vec<VideoDetails>>,
     pub videos: Vec<MediaItem>,
     pub errors: Vec<String>,
 }
 
 impl CollectionDetails {
-    pub fn from(
-        collection: &str,
-        child_collections: Vec<String>,
-        videos: Vec<MediaItem>,
-    ) -> CollectionDetails {
-        let mut parent_collection = String::new();
-
-        if collection.find('/').is_some() {
-            let v: Vec<&str> = collection.rsplitn(2, '/').collect();
-            parent_collection = v[1].to_string();
-        }
+    pub fn new(
+        collection: String,
+        child_collections: Vec<CollectionItem>,
+        items: Vec<VideoDetails>,
+    ) -> Self {
+        // Convert `VideoDetails` items into `MediaItem`s.
+        let videos: Vec<MediaItem> = items.iter().cloned().map(MediaItem::Video).collect();
+        // Group VideoDetails by series.
+        let series = Self::group_by_series(&items);
 
         CollectionDetails {
-            collection: collection.to_string(),
-            parent_collection,
+            collection: collection.clone(),
+            parent_collection: Self::parent_collection(&collection),
             child_collections,
             videos,
-            ..Default::default()
+            series,
+            errors: Vec::new(),
         }
     }
 
@@ -41,6 +46,25 @@ impl CollectionDetails {
             errors: vec![error],
             ..Default::default()
         }
+    }
+
+    /// Helper function to extract the parent collection from a collection string.
+    /// If the string contains a '/', it returns the part before the slash; otherwise, an empty string.
+    fn parent_collection(collection: &str) -> String {
+        if let Some(pos) = collection.find('/') {
+            collection[..pos].to_string()
+        } else {
+            "".to_string()
+        }
+    }
+
+    fn group_by_series(items: &Vec<VideoDetails>) -> HashMap<String, Vec<VideoDetails>> {
+        // For demonstration purposes, we return an empty HashMap.
+        let mut series = HashMap::new();
+        for item in items {
+            series.entry(item.series.series_title.clone()).or_insert(Vec::new()).push(item.clone());
+        }
+        series
     }
 }
 
@@ -147,16 +171,15 @@ pub struct VideoDetails {
 }
 
 
-
-
 impl VideoDetails {
-    pub fn new(video: String, collection: String, path: &PathBuf) -> Self {
+    pub fn new(video: String, collection: String, suggested_series: Option<String>) -> Self {
         let now = Local::now().naive_local();
+        let series = SeriesDetails::parse_collection_video(&collection, &video, suggested_series);
         Self {
             video,
             collection,
             description: "".to_string(),
-            series: SeriesDetails::from(path.as_path()),
+            series,
             thumbnail: PathBuf::new(),
             metadata: VideoMetadata{..VideoMetadata::default()},
             checksum: 0,
@@ -208,6 +231,40 @@ impl SeriesDetails {
         }
     }
 
+    pub fn parse_collection_video(collection: &str, video: &str, suggested_series: Option<String>) -> Self {
+
+        // Clean and check if collection path is absolute
+        let clean_collection = Path::new(collection).to_string_lossy().into_owned();
+        if clean_collection.len() != 1 && Path::new(&clean_collection).is_absolute() {
+            return Self::parse_file_name_with_series(video, suggested_series);
+        }
+
+        let path = if !collection.is_empty() {
+            format!("{}/{}", collection, video)
+        } else {
+            video.to_string()
+        };
+
+        Self::parse_file_name_with_series(&path, suggested_series)
+    }
+
+    pub fn parse_file_name_with_series(file_name: &str, suggested_series: Option<String>) -> Self {
+        let result = parse_file_path(file_name);
+        
+        let series_title = if let Some(series) = suggested_series {
+            title_case(&series)
+        } else {
+            result.series_details.series_title
+        };
+
+        Self {
+            series_title,
+            season: result.series_details.season,
+            episode: result.series_details.episode,
+            episode_title: result.series_details.episode_title,
+        }
+    }
+
     pub fn full_title(&self) -> String {
         let mut title = self.series_title.clone();
 
@@ -224,102 +281,6 @@ impl SeriesDetails {
         }
 
         title
-    }
-
-    fn parse_file_name(file_name: &str) -> Option<Self> {
-        lazy_static! {
-            static ref PARSER_EX: [Regex; 7] = [
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/Series (?P<season>\d+)/S[\d]+E(?P<episode>\d+) - (?P<episode_title>[^\\/\n]+)").unwrap(),
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/Series (?P<season>\d+)/.*\d+-(?P<episode>\d+) (?P<episode_title>[^\\/\n]+)").unwrap(),
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/(?P<season>[^\\/\n]+)/S[\d]+E(?P<episode>\d+) - (?P<episode_title>[^\\/\n]+)").unwrap(),
-                Regex::new(r"^(?P<series_title>[^\\/\n]+) (?P<season>\d+)-(?P<episode>\d+) (?P<episode_title>[^\\/\n]+)$").unwrap(),
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/.*S(?P<season>\d+)E(?P<episode>\d+)").unwrap(),
-                Regex::new(r"^(?P<series_title>[^\\/\n]+) S(?P<season>\d+)E(?P<episode>\d+)").unwrap(),
-                Regex::new(r"^S(?P<season>\d+)E(?P<episode>\d+) - (?P<series_title>[^\\/\n]+)").unwrap(),
-            ];
-        }
-
-        let file_name = &file_name[..file_name.find('.').unwrap_or(file_name.len())];
-
-        PARSER_EX
-            .iter()
-            .find_map(|regex| Self::parse_tv_series_info(file_name, regex))
-    }
-
-    fn parse_tv_series_info(file_name: &str, regex: &Regex) -> Option<Self> {
-        let captures = regex.captures(&file_name)?;
-
-        let series_title = captures.name("series_title")?.as_str().to_string();
-        let season_str = captures.name("season")?.as_str();
-        let episode_str = captures.name("episode")?.as_str();
-
-        let season = match season_str.parse::<u32>() {
-            Ok(s) => s.to_string(),
-            _ => season_str.to_string(),
-        };
-
-        let episode = match episode_str.parse::<u32>() {
-            Ok(s) => s.to_string(),
-            _ => episode_str.to_string(),
-        };
-
-        // allow failure to map episode name
-        let episode_title = captures
-            .name("episode_title")
-            .map_or(String::new(), |m| m.as_str().to_string());
-
-        Some(Self {
-            series_title,
-            season,
-            episode,
-            episode_title,
-        })
-    }
-}
-
-impl TryFrom<&str> for SeriesDetails {
-    type Error = VideoParseError;
-
-    fn try_from(value: &str) -> Result<Self, VideoParseError> {
-        match Self::parse_file_name(value) {
-            Some(details) => Ok(details),
-            _ => Err(VideoParseError {
-                message: format!("could not parse name: {}", value),
-            }),
-        }
-    }
-}
-
-impl From<&Path> for SeriesDetails {
-    fn from(value: &Path) -> Self {
-        let binding = value.with_extension("");
-        let file_name = binding
-            .file_name()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default();
-
-        // Create an iterator over the path components
-        let mut components = binding.iter();
-
-        // Loop until there are no more components left
-        while let Some(_) = components.next() {
-            // Create a new PathBuf from the remaining components
-            let new_path = components.clone().collect::<PathBuf>();
-
-            if new_path.parent().is_none() {
-                break;
-            }
-
-            if let Some(details) = Self::parse_file_name(file_name) {
-                return details;
-            }
-        }
-
-        Self {
-            series_title: file_name.to_string(),
-            ..Default::default()
-        }
     }
 }
 
@@ -358,9 +319,8 @@ pub mod test {
         assert_eq!(tests.len(), expected_results.len());
 
         for (test, expected) in zip(tests, expected_results) {
-            let result = SeriesDetails::try_from(test);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), expected);
+            let result = SeriesDetails::parse_file_name_with_series(test, None);
+            assert_eq!(result, expected);
         }
     }
 }
