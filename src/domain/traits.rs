@@ -57,6 +57,16 @@ pub trait MediaDownloader: Send + Sync {
 
 pub type Downloader = Arc<dyn MediaDownloader>;
 
+/// Provides an interface to observe the progress of a download
+#[automock]
+#[async_trait]
+pub trait DownloadProgress: Send + Sync {
+    fn terminate(&self);
+    async fn observe(&self) -> Receiver<super::messages::DownloadInfo>;
+}
+
+pub type DownloadProgressMonitor = Arc<dyn DownloadProgress>;
+
 /*
 The following are low level traits implemented at the adaptor layer
  */

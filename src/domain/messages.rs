@@ -220,6 +220,20 @@ pub struct DownloadRequest {
     pub series: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadInfo {
+    pub request: DownloadRequest,
+    // All in MB, MB/s
+    pub total_size: Option<i64>,
+    pub downloaded_size: i64,
+    pub uploaded_size: Option<i64>,
+    pub finished: bool,
+    pub error_message: String,
+    pub progress_message: String,
+    pub files: Vec<String>,
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlayerListItem {
