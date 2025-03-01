@@ -62,7 +62,9 @@ lazy_static! {
     ];
 
     static ref FILENAME_REGEX: Vec<Regex> = vec![
+        Regex::new(r"^[Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,2})\s*[-]+\s*(?P<series_title>[\s\w',]+)(?:\s|$)").unwrap(),
         Regex::new(r"^(?P<series_title>[^\\/\n]+) [Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,2})[\-\s]+(?P<episode_title>[\w\s]+)").unwrap(),
+        Regex::new(r"^(?P<series_title>[^\\/\n]+) (?P<season>\d{1,2})-(?P<episode>\d{1,2})[\-\s]+(?P<episode_title>[\w\s]+)").unwrap(),
         Regex::new(r"^(?P<series_title>[^\\/\n]+) [Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,2})").unwrap(),
         Regex::new(r"^(?P<series_title>[\s\w',]+)\s*[-]+\s*(?P<episode>\d{1,2})$").unwrap(),
         Regex::new(r"^(?P<series_title>[\s\w',]+)\s*[-]+\s*(?P<episode>\d{1,2})\D+").unwrap(),

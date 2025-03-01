@@ -1,6 +1,6 @@
 use chrono::{NaiveDateTime, Local, Duration};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::{Path, PathBuf}};
+use std::{collections::HashMap, path::Path};
 use crate::domain::algorithm::{title_case, parse_file_path};
 
 
@@ -62,7 +62,7 @@ impl CollectionDetails {
         // For demonstration purposes, we return an empty HashMap.
         let mut series = HashMap::new();
         for item in items {
-            series.entry(item.series.series_title.clone()).or_insert(Vec::new()).push(item.clone());
+            series.entry(item.series.season.clone()).or_insert(Vec::new()).push(item.clone());
         }
         series
     }
@@ -159,7 +159,7 @@ pub struct VideoDetails {
     pub collection: String,
     pub description: String,
     pub series: SeriesDetails,
-    pub thumbnail: PathBuf,
+    pub thumbnail: Vec<String>,
     pub metadata: VideoMetadata,
     pub checksum: i64,
     pub search_phrase: Option<String>,
@@ -180,7 +180,7 @@ impl VideoDetails {
             collection,
             description: "".to_string(),
             series,
-            thumbnail: PathBuf::new(),
+            thumbnail: Vec::new(),
             metadata: VideoMetadata{..VideoMetadata::default()},
             checksum: 0,
             search_phrase: None,
@@ -288,31 +288,31 @@ impl SeriesDetails {
 pub mod test {
     use super::*;
     use std::iter::zip;
-
+    use std::path::PathBuf;
     #[test]
     fn test_parse_file_name() {
         let tests = [
             "S00E07 - The Frog's Legacy.mkv",
             "Line Of Duty S02E03",
-            "Line Of Duty S02E03.mp4",
-            &PathBuf::from("Line of Duty").join("Line Of Duty S02E03.mp4").to_string_lossy().to_string(),
+            "Line Of Duty S04E05.mp4",
+            &PathBuf::from("Line of Duty").join("Line Of Duty S06E07.mp4").to_string_lossy().to_string(),
             &PathBuf::from("Only Fools and Horses").join("Specials").join("S00E07 - The Frog's Legacy.mkv").to_string_lossy().to_string(),
-            "The Sweeney 4-01 Messenger Of The Gods.mkv",
+            "The Sweeney 5-02 Messenger Of The Gods.mkv",
             &PathBuf::from("The Sweeney").join("Series 4").join("The Sweeney 4-01 Messenger Of The Gods.mkv").to_string_lossy().to_string(),
         ];
 
         let expected_results = [
-            SeriesDetails::new("The Frog's Legacy", "0", "07", None),
+            SeriesDetails::new("The Frog's Legacy", "", "07", None),
             SeriesDetails::new("Line Of Duty", "2", "03", None),
-            SeriesDetails::new("Line Of Duty", "2", "03", None),
-            SeriesDetails::new("Line Of Duty", "2", "03", None),
+            SeriesDetails::new("Line Of Duty", "4", "05", None),
+            SeriesDetails::new("Line of Duty", "6", "07", None),
             SeriesDetails::new(
                 "Only Fools and Horses",
-                "Specials",
+                "0",
                 "07",
                 Some("The Frog's Legacy"),
             ),
-            SeriesDetails::new("The Sweeney", "4", "01", Some("Messenger Of The Gods")),
+            SeriesDetails::new("The Sweeney", "5", "02", Some("Messenger Of The Gods")),
             SeriesDetails::new("The Sweeney", "4", "01", Some("Messenger Of The Gods")),
         ];
 

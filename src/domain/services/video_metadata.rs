@@ -129,17 +129,13 @@ async fn make_video_metadatas(path: &PathBuf, suggested_series: Option<String>) 
     };
     
     details.state = VideoState::NeedThumbnail;
-    let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
-    let output_path = get_thumbnail_path(&thumbnail_dir, &path);
 
-    if let Err(err) = extract_random_frame(path, &output_path, details.metadata.clone()).await {
-        return Err(MetaDataError::from_error(MetaDataErrorCode::ExtractFrame, &err, &path, details));
-    }
-
-    details.thumbnail = match output_path.strip_prefix(&thumbnail_dir) {
-        Ok(thumbnail) => PathBuf::from(thumbnail),
-        _ => PathBuf::new(),
+    let thumbnails = match extract_random_frame(path, &details.metadata).await {
+        Ok(thumbnails) => thumbnails,
+        Err(err) => return Err(MetaDataError::from_error(MetaDataErrorCode::ExtractFrame, &err, &path, details))
     };
+
+    details.thumbnail = thumbnails;
 
     details.state = VideoState::Ready;
 
@@ -180,16 +176,6 @@ pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
     }
 
     Ok(hasher.finish() as i64)
-}
-
-fn get_thumbnail_path<P: AsRef<Path>>(thumbnail_dir: &PathBuf, video: P) -> PathBuf {
-    let input_filename = video
-        .as_ref()
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let output_filename = format!("{}_thumbnail.jpg", input_filename);
-    thumbnail_dir.join(output_filename)
 }
 
 async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
@@ -280,61 +266,86 @@ async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Bo
 
 async fn extract_random_frame<P: AsRef<Path>>(
     input_path: P,
-    output_path: P,
-    metadata: VideoMetadata,
-) -> io::Result<()> {
+    metadata: &VideoMetadata,
+) -> io::Result<Vec<String>> {
     // Get video duration
     let mut duration = metadata.duration;
-    let random_time;
-
+    
     if duration < 0.1 {
-        return Ok(());
+        return Ok(vec![]); // Early return if the duration is too short
     }
 
-    // if its longer than 10 minutes skip the last 10 minutes
+    // Skip the last 3 minutes if longer than 10 minutes
     if duration > 600.0 {
         duration -= 180.0;
     }
 
     // Generate a random timestamp for the final 1/4 of the video
-    {
+    let random_time = {
         let mut rng = rand::thread_rng();
-        random_time = rng.gen_range((3. * duration / 4.0)..duration);
+        rng.gen_range((3.0 * duration / 4.0)..duration)
+    };
+
+    let sizes = [
+        (720, 450),
+        (480, 300),
+        (360, 225),
+        (160, 100),
+    ];
+
+    let thumbnail_dir = get_thumbnail_dir(&get_movie_dir());
+    let mut paths = Vec::with_capacity(sizes.len());
+
+    for (width, height) in sizes {
+        let output_path = get_thumbnail_path_with_size(&thumbnail_dir, &input_path, width);
+        
+        // Create scale parameter for ffmpeg
+        let scale = format!("scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}", 
+                           width, height, width, height);
+
+        let output = Command::new("ffmpeg")
+            .arg("-ss")
+            .arg(format!("{}", random_time))
+            .arg("-i")
+            .arg(input_path.as_ref().as_os_str())
+            .arg("-vf")
+            .arg(scale)
+            .arg("-vframes")
+            .arg("1")
+            .arg("-q:v")
+            .arg("2")
+            .arg("-y")
+            .arg(&output_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8(output.stderr).unwrap_or_default();
+            tracing::error!("could not generate thumbnail: {}", stderr);
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ffmpeg exited with an error",
+            ));
+        }
+
+        // Add the filename to paths
+        if let Some(filename) = output_path.file_name() {
+            paths.push(filename.to_string_lossy().to_string());
+        }
     }
 
-    // "scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2"
-    // "scale=-1:480"
-    // Run ffmpeg command
-    let output = Command::new("ffmpeg")
-        .arg("-ss")
-        .arg(format!("{}", random_time))
-        .arg("-i")
-        .arg(input_path.as_ref().as_os_str())
-        .arg("-vf")
-        .arg("scale=640:480:force_original_aspect_ratio=decrease,pad=640:480:(ow-iw)/2:(oh-ih)/2")
-        .arg("-vframes")
-        .arg("1")
-        .arg("-q:v")
-        .arg("2")
-        .arg("-y")
-        .arg(output_path.as_ref().as_os_str())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8(output.stdout).unwrap_or_default();
-        let stderr = String::from_utf8(output.stderr).unwrap_or_default();
-        eprintln!("{}", stdout);
-        eprintln!("{}", stderr);
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "ffmpeg exited with an error",
-        ));
-    }
-
-    Ok(())
+    Ok(paths)
 }
 
-
+// Helper function to create a thumbnail path with a specific width
+fn get_thumbnail_path_with_size<P: AsRef<Path>>(thumbnail_dir: &PathBuf, video: P, width: u32) -> PathBuf {
+    let input_filename = video
+        .as_ref()
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let output_filename = format!("{}_thumbnail_{}.jpg", input_filename, width);
+    thumbnail_dir.join(output_filename)
+}

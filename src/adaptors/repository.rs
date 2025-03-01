@@ -7,7 +7,7 @@ use sqlx::migrate::{
 };
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 use std::path;
-use std::path::PathBuf;
+use serde_json;
 
 use crate::domain::config::get_database_migration_dir;
 use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata, CollectionItem};
@@ -45,6 +45,10 @@ impl SqlRepository {
     }
 
     fn from_record(row: &SqliteRow) -> VideoDetails {
+        // Parse thumbnail JSON string into Vec<String>
+        let thumbnail_str = row.get::<Option<String>, _>("thumbnail").unwrap_or_default();
+        let thumbnail: Vec<String> = serde_json::from_str(&thumbnail_str).unwrap_or_default();
+
         VideoDetails {
             video: row.get("video"),
             collection: row.get("collection"),
@@ -55,7 +59,7 @@ impl SqlRepository {
                 episode: row.get::<Option<String>, _>("episode").unwrap_or_default(),
                 episode_title: row.get::<Option<String>, _>("episode_title").unwrap_or_default(),
             },
-            thumbnail: PathBuf::from(row.get::<Option<String>, _>("thumbnail").unwrap_or_default()),
+            thumbnail,
             metadata: VideoMetadata {
                 duration: row.get::<Option<f64>, _>("duration").unwrap_or_default(),
                 width: row.get::<Option<i32>, _>("width").unwrap_or(0) as u32,
@@ -89,7 +93,8 @@ impl SqlRepository {
 #[async_trait]
 impl Databaser for SqlRepository {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
-        let thumbnail = details.thumbnail.to_str().unwrap();
+        // Convert Vec<String> to JSON string
+        let thumbnail = serde_json::to_string(&details.thumbnail).unwrap_or_default();
         let state: i32 = details.state as i32;
 
         sqlx::query!(
@@ -462,7 +467,6 @@ mod tests {
     use crate::domain::models::VideoState;
 
     use super::*;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_save_video_details() {
@@ -481,7 +485,7 @@ mod tests {
                 episode: "test_episode".to_string(),
                 episode_title: "test_episode_title".to_string(),
             },
-            thumbnail: PathBuf::from("test_path"),
+            thumbnail: vec!["test_path".to_string()],
             metadata: VideoMetadata {
                 duration: 120.0,
                 width: 1920,
