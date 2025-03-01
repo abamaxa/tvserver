@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::messages::{MediaItem, RemoteMessage, TaskState};
-use super::models::{CollectionItem, SearchResults, VideoDetails};
+use super::models::{CollectionItem, DownloadableItem, SearchResults, VideoDetails};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -22,6 +22,8 @@ at the service layer.
 pub trait MediaSearcher<T>: Send + Sync {
     async fn search(&self, query: &str) -> anyhow::Result<SearchResults<T>>;
 }
+
+pub type Searcher = Arc<dyn MediaSearcher<DownloadableItem>>;
 
 /// Interface to a repository of available media files, currently implemented
 /// for the file system but could also support an S3 object store for instance.
@@ -46,26 +48,25 @@ pub trait MediaChecker: Send + Sync {
 
 pub type Checker = Arc<dyn MediaChecker>;
 
-/// Provides methods for retrieving content, for instance downloading a torrent, or a URL
-#[automock]
-#[async_trait]
-pub trait MediaDownloader: Send + Sync {
-    async fn fetch(&self, name: &str, link: &str) -> Result<String, String>;
-    async fn list_in_progress(&self) -> Result<Vec<Task>, String>;
-    async fn remove(&self, id: &str, delete_local_data: bool) -> Result<(), String>;
-}
-
-pub type Downloader = Arc<dyn MediaDownloader>;
 
 /// Provides an interface to observe the progress of a download
 #[automock]
 #[async_trait]
 pub trait DownloadProgress: Send + Sync {
     fn terminate(&self);
-    async fn observe(&self) -> Receiver<super::messages::DownloadInfo>;
+    async fn observe(&self) -> super::messages::DownloadInfo;
 }
 
 pub type DownloadProgressMonitor = Arc<dyn DownloadProgress>;
+
+
+#[automock]
+#[async_trait]
+pub trait Download: Send + Sync {
+    async fn download(&self, request: super::messages::DownloadRequest) -> Result<DownloadProgressMonitor, anyhow::Error>;
+}
+
+pub type Downloader = Arc<dyn Download>;
 
 /*
 The following are low level traits implemented at the adaptor layer

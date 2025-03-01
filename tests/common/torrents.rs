@@ -4,8 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::fs;
 use transmission_rpc::types::Torrent;
 
-use tvserver::domain::models::TorrentTask;
-use tvserver::domain::traits::{Downloader, MockMediaDownloader, Task};
+use tvserver::domain::{messages::DownloadInfo, traits::{Downloader, MockDownload, MockDownloadProgress}};
 
 #[derive(Deserialize)]
 pub struct TorrentGetResult {
@@ -13,23 +12,24 @@ pub struct TorrentGetResult {
 }
 
 pub async fn get_torrent_downloader(fixture: &str) -> Downloader {
-    let mut fetcher = MockMediaDownloader::new();
-    let list_results = results_from_fixture(fixture).await.unwrap();
+    let mut fetcher = MockDownload::new();
+    let mut downloader = MockDownloadProgress::new();
 
+    let download_info = results_from_fixture(fixture).await.unwrap();
+
+    downloader.expect_observe().returning(move || download_info.clone());
+
+    let downloader = Arc::new(downloader);
+    
     fetcher
-        .expect_fetch()
-        .returning(|_, _| Ok("response: ok".to_string()));
-
-    fetcher
-        .expect_list_in_progress()
-        .returning(move || Ok(list_results.clone()));
-
-    fetcher.expect_remove().return_const(Ok(()));
+        .expect_download()
+        .returning(move |_| Ok(downloader.clone()));
 
     Arc::new(fetcher)
 }
 
-async fn results_from_fixture(name: &str) -> Result<Vec<Task>> {
+
+async fn results_from_fixture(name: &str) -> Result<DownloadInfo> {
     let mut path = PathBuf::from("tests/fixtures");
     path.push(name);
 
@@ -37,11 +37,22 @@ async fn results_from_fixture(name: &str) -> Result<Vec<Task>> {
 
     let result: TorrentGetResult = serde_json::from_slice(&data)?;
 
-    let items = result
+    let items: Vec<DownloadInfo> = result
         .torrents
         .iter()
-        .map(|t| Arc::new(TorrentTask::from(t)) as Task)
+        .map(|t| {
+            DownloadInfo {
+                //request: DownloadRequest::new(t.name.clone(), t.magnet_link.clone()),
+                total_size: t.total_size,
+                downloaded_size: 0,
+                uploaded_size: Some(0),
+                finished: false,
+                error_message: t.error_string.clone().unwrap_or("".to_string()),
+                progress_message: "".to_string(),
+                files: vec![],
+            }
+        })
         .collect();
 
-    Ok(items)
+    Ok(items.get(0).unwrap().clone())
 }

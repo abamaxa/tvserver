@@ -292,28 +292,28 @@ pub mod test {
     #[test]
     fn test_parse_file_name() {
         let tests = [
+            "S00E07 - The Frog's Legacy.mkv",
             "Line Of Duty S02E03",
             "Line Of Duty S02E03.mp4",
-            "Line of Duty/Line Of Duty S02E03.mp4",
-            "S00E07 - The Frog's Legacy.mkv",
-            "Only Fools and Horses/Specials/S00E07 - The Frog's Legacy.mkv",
+            &PathBuf::from("Line of Duty").join("Line Of Duty S02E03.mp4").to_string_lossy().to_string(),
+            &PathBuf::from("Only Fools and Horses").join("Specials").join("S00E07 - The Frog's Legacy.mkv").to_string_lossy().to_string(),
             "The Sweeney 4-01 Messenger Of The Gods.mkv",
-            "The Sweeney/Series 4/The Sweeney 4-01 Messenger Of The Gods.mkv",
+            &PathBuf::from("The Sweeney").join("Series 4").join("The Sweeney 4-01 Messenger Of The Gods.mkv").to_string_lossy().to_string(),
         ];
 
         let expected_results = [
-            SeriesDetails::new("Line Of Duty", "2", "3", None),
-            SeriesDetails::new("Line Of Duty", "2", "3", None),
-            SeriesDetails::new("Line of Duty", "2", "3", None),
-            SeriesDetails::new("The Frog's Legacy", "0", "7", None),
+            SeriesDetails::new("The Frog's Legacy", "0", "07", None),
+            SeriesDetails::new("Line Of Duty", "2", "03", None),
+            SeriesDetails::new("Line Of Duty", "2", "03", None),
+            SeriesDetails::new("Line Of Duty", "2", "03", None),
             SeriesDetails::new(
                 "Only Fools and Horses",
                 "Specials",
-                "7",
+                "07",
                 Some("The Frog's Legacy"),
             ),
-            SeriesDetails::new("The Sweeney", "4", "1", Some("Messenger Of The Gods")),
-            SeriesDetails::new("The Sweeney", "4", "1", Some("Messenger Of The Gods")),
+            SeriesDetails::new("The Sweeney", "4", "01", Some("Messenger Of The Gods")),
+            SeriesDetails::new("The Sweeney", "4", "01", Some("Messenger Of The Gods")),
         ];
 
         assert_eq!(tests.len(), expected_results.len());

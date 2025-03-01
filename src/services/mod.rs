@@ -5,7 +5,6 @@ mod monitor;
 mod pirate_bay;
 mod search;
 mod task_manager;
-mod torrents;
 mod video_information;
 mod youtube;
 
@@ -15,6 +14,5 @@ pub use monitor::Monitor;
 pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use search::{SearchEngine, SearchEngineMap, SearchService};
 pub use task_manager::TaskManager;
-pub use torrents::TransmissionDaemon;
 pub use video_information::MetaDataManager;
 pub use youtube::{YoutubeClient, YoutubeFetcher, YoutubeResult};

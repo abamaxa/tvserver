@@ -212,7 +212,7 @@ pub struct ClientLogMessage {
     pub messages: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub name: String,
     pub link: String,
@@ -223,7 +223,6 @@ pub struct DownloadRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadInfo {
-    pub request: DownloadRequest,
     // All in MB, MB/s
     pub total_size: Option<i64>,
     pub downloaded_size: i64,

@@ -1,4 +1,4 @@
-use crate::domain::models::youtube::Item;
+use crate::domain::{messages::TaskState, models::youtube::Item};
 use crate::domain::SearchEngineType;
 use crate::domain::SearchEngineType::YouTube;
 use html_escape::decode_html_entities;
@@ -44,3 +44,5 @@ impl From<&Item> for DownloadableItem {
         }
     }
 }
+
+pub type TaskListResults = SearchResults<TaskState>;

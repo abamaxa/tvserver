@@ -18,22 +18,19 @@ use tower_http::{
     trace::{DefaultMakeSpan, TraceLayer},
 };
 
-use crate::{domain::traits::Downloader, services::{setup_logging, TVSERVER_LOG}};
+use crate::services::{setup_logging, TVSERVER_LOG};
 use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
 use crate::entrypoints::create_context;
 use crate::entrypoints::register;
 use crate::services::{
-    MetaDataManager, Monitor, TransmissionDaemon,
+    MetaDataManager, Monitor,
 };
 
 pub async fn run() -> anyhow::Result<()> {
     let context = create_context().await?;
 
-    let downloader: Downloader = Arc::new(TransmissionDaemon::new());
-
     let monitor_handle = Monitor::start(
-        context.get_checker(),
-        downloader,
+        context.get_checker(),      
         context.get_task_manager(),
         context.get_store(),
     );

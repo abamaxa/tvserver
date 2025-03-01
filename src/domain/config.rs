@@ -49,7 +49,7 @@ pub fn get_database_migration_dir() -> String {
     env::var(DATABASE_MIGRATION_DIR).unwrap_or_else(|_| String::from(DEFAULT_MIGRATIONS_DIR))
 }
 
-pub fn get_torrent_dir(default: Option<&String>) -> String {
+pub fn get_downloads_dir(default: Option<&String>) -> String {
     env::var(TORRENT_DIR).unwrap_or_else(|_| {
         default
             .expect("TORRENT_DIR not set and default available")
