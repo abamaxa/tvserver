@@ -28,7 +28,7 @@ impl DownloadProgress for YoutubeTask {
 
 impl YoutubeTask {
     pub fn new(spawner: Spawner, request: DownloadRequest) -> Self {
-        let destination = PathBuf::from(get_downloads_dir(None))
+        let destination = PathBuf::from(get_downloads_dir())
             .join("YouTube")
             .join(format!("{}.mp4", request.name));
 

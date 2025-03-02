@@ -10,7 +10,7 @@ const DATABASE_MIGRATION_DIR: &str = "DATABASE_MIGRATION_DIR";
 const ENABLE_VLC: &str = "ENABLE_VLC";
 pub const GOOGLE_KEY: &str = "GOOGLE_KEY";
 pub const MOVIE_DIR: &str = "MOVIE_DIR";
-const TORRENT_DIR: &str = "TORRENT_DIR";
+const DOWNLOAD_DIR: &str = "DOWNLOAD_DIR";
 const TRANSMISSION_USER: &str = "TRANSMISSION_USER";
 const TRANSMISSION_PWD: &str = "TRANSMISSION_PWD";
 const TRANSMISSION_URL: &str = "TRANSMISSION_URL";
@@ -26,6 +26,7 @@ const DEFAULT_TRANSMISSION_URL: &str = "http://higo.abamaxa.com:9091/transmissio
 const DEFAULT_CLIENT_DIR: &str = "client";
 const DEFAULT_PB_URL: &str = "https://thehiddenbay.com";
 const DEFAULT_DELAY_REAPING_TASKS_SECS: i64 = 60;
+const DEFAULT_DOWNLOAD_DIR: &str = ".downloads";
 
 pub fn get_movie_dir() -> String {
     env::var(MOVIE_DIR).expect("MOVIE_DIR environment variable is not set")
@@ -49,11 +50,9 @@ pub fn get_database_migration_dir() -> String {
     env::var(DATABASE_MIGRATION_DIR).unwrap_or_else(|_| String::from(DEFAULT_MIGRATIONS_DIR))
 }
 
-pub fn get_downloads_dir(default: Option<&String>) -> String {
-    env::var(TORRENT_DIR).unwrap_or_else(|_| {
-        default
-            .expect("TORRENT_DIR not set and default available")
-            .clone()
+pub fn get_downloads_dir() -> String {
+    env::var(DOWNLOAD_DIR).unwrap_or_else(|_| {
+        PathBuf::from(get_movie_dir()).join(DEFAULT_DOWNLOAD_DIR).to_string_lossy().to_string()
     })
 }
 

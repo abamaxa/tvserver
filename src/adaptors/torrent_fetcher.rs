@@ -93,7 +93,7 @@ impl Download for TorrentFetcher {
 impl TorrentFetcher {
     #[allow(clippy::new_without_default)]
     pub async fn new() -> Self {
-        let client = Session::new(PathBuf::from(config::get_downloads_dir(None)))
+        let client = Session::new(PathBuf::from(config::get_downloads_dir()))
             .await
             .unwrap();
         TorrentFetcher {client}
