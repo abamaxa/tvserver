@@ -93,7 +93,9 @@ impl Download for TorrentFetcher {
 impl TorrentFetcher {
     #[allow(clippy::new_without_default)]
     pub async fn new() -> Self {
-        let client = Session::new(PathBuf::from(config::get_downloads_dir()))
+        let downloads_dir = config::get_downloads_dir();
+        tracing::info!("Downloads directory: {}", downloads_dir);
+        let client = Session::new(PathBuf::from(downloads_dir))
             .await
             .unwrap();
         TorrentFetcher {client}
@@ -101,7 +103,9 @@ impl TorrentFetcher {
 
     async fn get_handle(&self, link: &str) -> Result<Arc<ManagedTorrent>, anyhow::Error> {
         // Add the torrent to the session
-        match self.client
+        tracing::info!("Attempting to add torrent from link: {}", link);
+        
+        let result = self.client
             .add_torrent(
                 AddTorrent::from_url(link),
                 Some(AddTorrentOptions {
@@ -110,12 +114,25 @@ impl TorrentFetcher {
                     ..Default::default()
                 }),
             )
-            .await
-            .context("error adding torrent")?
-        {
-            AddTorrentResponse::Added(_, handle) => Ok(handle),
-            // For a brand new session other variants won't happen.
-            _ => unreachable!(),
+            .await;
+        
+        match result {
+            Ok(response) => {
+                match response {
+                    AddTorrentResponse::Added(_, handle) => {
+                        tracing::info!("Torrent added successfully");
+                        Ok(handle)
+                    },
+                    _ => {
+                        tracing::error!("Unexpected response from add_torrent");
+                        anyhow::bail!("Unexpected response from add_torrent")
+                    }
+                }
+            },
+            Err(err) => {
+                tracing::error!("Failed to add torrent from {}: {}", link, err);
+                Err(err).context(format!("error adding torrent from link: {}", link))
+            }
         }
     }
 }

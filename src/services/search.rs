@@ -72,6 +72,8 @@ impl SearchService {
         
         // Create a new download monitor task
         let task = DownloadMonitor::new(request, progresser);
+
+        task.monitor().await;
         
         // Add the task to the task manager
         self.task_manager.add(Arc::new(task)).await;
