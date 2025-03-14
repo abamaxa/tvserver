@@ -166,7 +166,7 @@ pub struct VideoDetails {
     pub state: VideoState,
     pub created_on: NaiveDateTime,
     pub updated_on: NaiveDateTime,
-    pub play_from: Option<f32>,
+    pub play_from: Option<NaiveDateTime>,
     pub last_viewed: Option<NaiveDateTime>,
 }
 

@@ -71,12 +71,12 @@ impl SearchService {
         let progresser = search_engine.downloader.download(request.clone()).await?;
         
         // Create a new download monitor task
-        let task = DownloadMonitor::new(request, progresser);
+        let task = Arc::new(DownloadMonitor::new(request, progresser));
 
-        task.monitor().await;
+        DownloadMonitor::monitor(task.clone());
         
         // Add the task to the task manager
-        self.task_manager.add(Arc::new(task)).await;
+        self.task_manager.add(task.clone()).await;
         
         Ok(())
     }

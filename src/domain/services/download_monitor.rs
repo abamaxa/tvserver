@@ -58,12 +58,12 @@ impl DownloadMonitor {
         }
     }
     
-    pub fn monitor(self/* , ctx: &tokio::sync::broadcast::Receiver<()>*/) 
+    pub fn monitor(this: Arc<Self>/* , ctx: &tokio::sync::broadcast::Receiver<()>*/) 
         -> mpsc::Receiver<TaskState> {
         let (sender, receiver) = mpsc::channel(10);
         //let this = Arc::clone(self);
-        let downloader = self.downloader.clone();
-        let done = self.done.clone();
+        let downloader = this.downloader.clone();
+        let done = this.done.clone();
         //let mut ctx = ctx.resubscribe();
         
         task::spawn(async move {
@@ -73,18 +73,18 @@ impl DownloadMonitor {
                     //    break;
                     //}
                     info = downloader.observe() => {
-                        let send_media_message = self.update_state(&info);
+                        let send_media_message = this.update_state(&info);
                         if !send_media_message {
                             continue;
                         }
-                        let state = self.get_state().await;
+                        let state = this.get_state().await;
                         
                         // Send the state message
                         if sender.send(state).await.is_err() {
                             break;
                         }
                         
-                        if info.finished || self.has_finished() {
+                        if info.finished || this.has_finished() {
                             break;
                         }
                     }
