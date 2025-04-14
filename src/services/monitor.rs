@@ -1,3 +1,4 @@
+use crate::domain::messages::{LocalMessage, LocalMessageSender};
 use crate::domain::traits::{Checker, Storer};
 use crate::services::TaskManager;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ pub struct Monitor {
     checker: Checker,
     task_manager: Arc<TaskManager>,
     store: Storer,
+    sender: LocalMessageSender,
 }
 
 impl Monitor {
@@ -15,6 +17,7 @@ impl Monitor {
         checker: Checker,
         task_manager: Arc<TaskManager>,
         store: Storer,
+        sender: LocalMessageSender,
     ) -> JoinHandle<()> {
         task::spawn(async move {
             tracing::info!("starting download monitor");
@@ -22,33 +25,35 @@ impl Monitor {
                 checker,
                 task_manager,
                 store,
+                sender,
             };
 
+            let mut counter: i64 = 0;
             loop {
-                monitor.task_manager.cleanup(&monitor.store).await;
+                if counter % 10 == 0 {
+                    monitor.task_manager.cleanup(&monitor.store).await;
 
-                if let Err(err) = &monitor.checker.check_video_information().await {
-                    tracing::error!("error checking video info: {}", err);
+                    if let Err(err) = &monitor.checker.check_video_information().await {
+                        tracing::error!("error checking video info: {}", err);
+                    }
                 }
 
-                sleep(Duration::from_secs(60)).await;
+                monitor.send_task_state().await;
+
+                sleep(Duration::from_secs(3)).await;
+                counter += 1;
             }
         })
     }
 
-    /*async fn move_completed_downloads(&self, items: &[Task]) {
-        for item in items.iter().filter(|item| item.has_finished()) {
-            if let Err(e) = item.cleanup(&self.store, false).await {
-                // TODO: distinguish between genuine problems and policy delays in
-                // reaping completed tasks
-                tracing::info!("could not move videos: {}", e);
-            } else {
-                println!("key: {}", item.get_key());
-                if let Err(e) = self.downloads.remove(&item.get_key(), true).await {
-                    tracing::error!("could not remove video: {}: {}", item.get_key(), e);
-                }
-            }
+    async fn send_task_state(&self) {
+        let current_state = self.task_manager.get_current_state().await;
+        if current_state.len() > 0 {
+            tracing::info!("Sending task state: {:?}", current_state);
         }
-    }*/
+        if let Err(e) = self.sender.send(LocalMessage::Task(current_state)).await {
+            tracing::error!("could not send task state: {}", e.to_string());
+        }
+    }
 }
 

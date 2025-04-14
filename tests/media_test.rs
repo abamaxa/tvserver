@@ -1,6 +1,6 @@
 mod common;
 
-use crate::common::{get_repository, get_task_manager};
+use crate::common::{get_context, get_repository, get_task_manager};
 use anyhow::Result;
 use common::{get_checker, get_pirate_search};
 use reqwest::StatusCode;
@@ -12,9 +12,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tvserver::adaptors::{FileSystemStore, SqlRepository};
 use tvserver::domain::messages::Response;
-use tvserver::domain::messagebus::MessageExchange;
 use tvserver::domain::traits::{FileStorer, Repository};
-use tvserver::entrypoints::Context;
 use tvserver::services::MediaStore;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
@@ -32,14 +30,13 @@ async fn test_rename_video() -> Result<()> {
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
-    let context = Context::new(
+    let context = get_context(
         store,
         searcher,
-        MessageExchange::new(),
         get_task_manager(),
         get_repository().await,
-        get_checker(),
-    );
+        get_checker()
+    ).await?;
 
     let server = common::create_server(context, 57190).await;
 

@@ -4,11 +4,10 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use bytesize::ByteSize;
 use tokio::fs;
-use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::domain::algorithm::generate_display_name;
-use crate::domain::messages::{DownloadInfo, DownloadRequest, TaskState};
+use crate::domain::algorithm::{generate_display_name, skip_file};
+use crate::domain::messages::{DownloadInfo, DownloadRequest, LocalMessageSender, TaskState};
 use crate::domain::TaskType;
 use crate::domain::traits::{DownloadProgressMonitor, Storer, TaskMonitor};
 
@@ -58,33 +57,28 @@ impl DownloadMonitor {
         }
     }
     
-    pub fn monitor(this: Arc<Self>/* , ctx: &tokio::sync::broadcast::Receiver<()>*/) 
-        -> mpsc::Receiver<TaskState> {
-        let (sender, receiver) = mpsc::channel(10);
-        //let this = Arc::clone(self);
+    pub fn monitor(this: Arc<Self>, sender: LocalMessageSender) {
         let downloader = this.downloader.clone();
         let done = this.done.clone();
-        //let mut ctx = ctx.resubscribe();
+
+        tracing::info!("Starting download monitor of {}", this.request.link);
         
         task::spawn(async move {
             loop {
                 tokio::select! {
-                    //_ = ctx.recv() => {
-                    //    break;
-                    //}
                     info = downloader.observe() => {
-                        let send_media_message = this.update_state(&info);
-                        if !send_media_message {
-                            continue;
-                        }
+                        let is_finished = this.update_state(&info);
                         let state = this.get_state().await;
+
+                        tracing::info!("Current state: {} {}", state.display_name, state.size_details);
                         
                         // Send the state message
-                        if sender.send(state).await.is_err() {
+                        /*if sender.send(state).await.is_err() {
                             break;
-                        }
+                        }*/
                         
-                        if info.finished || this.has_finished() {
+                        if info.finished || this.has_finished() || is_finished {
+                            info.send_media_messages(&sender, skip_file, this.request.series.clone()).await;
                             break;
                         }
                     }
@@ -93,9 +87,8 @@ impl DownloadMonitor {
             }
             
             done.notify_one();
+            tracing::info!("Download monitor of {} finished", this.request.link);
         });
-        
-        receiver
     }
     
     fn humanize_bytes(bytes: i64) -> String {

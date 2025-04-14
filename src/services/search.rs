@@ -1,6 +1,6 @@
-use crate::domain::messages::DownloadRequest;
+use crate::domain::messages::{DownloadRequest, LocalMessageSender};
 use crate::domain::services::DownloadMonitor;
-use crate::domain::traits::{Downloader, Searcher, Spawner};
+use crate::domain::traits::{Downloader, Searcher};
 use crate::domain::SearchEngineType;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub type SearchEngineMap = HashMap<SearchEngineType, Arc<SearchEngine>>;
 #[derive(Clone)]
 pub struct SearchService {
     engines: SearchEngineMap,
-    task_manager: TaskManager,
+    task_manager: Arc<TaskManager>,
 }
 
 impl SearchEngine {
@@ -33,7 +33,7 @@ impl SearchEngine {
 }
 
 impl SearchService {
-    pub fn new(spawner: Spawner, engines: Vec<Arc<SearchEngine>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>, engines: Vec<Arc<SearchEngine>>) -> Self {
         let mut engines_map = HashMap::new();
         
         for engine in engines {
@@ -42,7 +42,7 @@ impl SearchService {
         
         Self {
             engines: engines_map,
-            task_manager: TaskManager::new(spawner),
+            task_manager: task_manager,
         }
     }
 
@@ -62,7 +62,7 @@ impl SearchService {
             .downloader
     }
     
-    pub async fn download(&self, request: DownloadRequest) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn download(&self, request: DownloadRequest, sender: LocalMessageSender) -> Result<(), Box<dyn std::error::Error>> {
         // Get the search engine from the map
         let search_engine = self.engines.get(&request.engine)
             .ok_or_else(|| "unknown search engine".to_string())?;
@@ -73,7 +73,7 @@ impl SearchService {
         // Create a new download monitor task
         let task = Arc::new(DownloadMonitor::new(request, progresser));
 
-        DownloadMonitor::monitor(task.clone());
+        DownloadMonitor::monitor(task.clone(), sender);
         
         // Add the task to the task manager
         self.task_manager.add(task.clone()).await;

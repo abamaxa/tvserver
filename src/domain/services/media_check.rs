@@ -28,16 +28,18 @@ impl MediaCheck {
         MediaCheck { store, repo, sender }
     }
 
-    fn store_video_info(&self, path: &Path) {
-        let queue_len = self.sender.len();
+    async fn store_video_info(&self, path: &Path) {
+        /*let queue_len = self.sender.len();
         if queue_len >= 100 {
             tracing::info!("local queue has more than 100 entries, will process {:?} later, {} receivers", path, self.sender.receiver_count());
             return;
-        }
+        }*/
 
         let event = MediaEvent::new_media(path, None);
 
-        if let Err(e) = self.sender.send(LocalMessage::Media(event)) {
+        tracing::info!("Storing video info: {:?}", event);
+
+        if let Err(e) = self.sender.send(LocalMessage::Media(event)).await {
             tracing::error!("could not queue Media event: {}", e.to_string())
         }
     }
@@ -78,7 +80,7 @@ impl MediaCheck {
                 .collect::<HashMap<_, _>>();
 
             if existing.len() == 0 {
-                self.store_video_info(&full_path);
+                self.store_video_info(&full_path).await;
                 continue;
             }
 
@@ -94,7 +96,7 @@ impl MediaCheck {
                 match existing.get(&checksum) {
                     Some(item) => existing = HashMap::from([(item.checksum, *item)]),
                     None => {
-                        self.store_video_info(&full_path);
+                        self.store_video_info(&full_path).await;
                         continue;
                     }
                 }
@@ -102,7 +104,7 @@ impl MediaCheck {
 
             let (_, current) = existing.iter().next().unwrap();
             if current.should_retry_metadata() {
-                self.store_video_info(&full_path);
+                self.store_video_info(&full_path).await;
             }
 
             let checksum = current.checksum;
@@ -155,13 +157,13 @@ mod tests {
     use crate::adaptors::{FileSystemStore, SqlRepository};
     use anyhow::Result;
     use std::sync::Arc;
-    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
 
 
     #[tokio::test]
     #[ignore]
     async fn test_check_video_info() -> Result<()> {
-        let (tx, _rx1) = broadcast::channel(16);
+        let (tx, _rx1) = mpsc::channel(16);
         let filer: FileStorer = Arc::new(FileSystemStore::new("/Users/chris2/Movies"));
         let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
         let store = MediaCheck::new(filer, repo, tx);

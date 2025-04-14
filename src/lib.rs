@@ -12,6 +12,7 @@ pub mod entrypoints;
 pub mod services;
 
 use std::{net::SocketAddr, sync::Arc};
+use domain::messagebus::MessageFilter;
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -33,13 +34,14 @@ pub async fn run() -> anyhow::Result<()> {
         context.get_checker(),      
         context.get_task_manager(),
         context.get_store(),
+        context.get_local_sender(),
     );
 
     setup_logging(TVSERVER_LOG);
 
     let metadata_manager = MetaDataManager::consume(
         context.get_repository(),
-        context.get_local_receiver(),
+        context.listen_for_messages("MetaDataManager", MessageFilter::All).await.unwrap(),
         context.get_local_sender(),
     );
 

@@ -11,6 +11,8 @@ mod task_manager;
 mod text_fetcher;
 mod torrents;
 mod media_checker;
+mod context;
+
 pub use json_fetcher::get_json_fetcher;
 #[allow(unused_imports)]
 pub use media_store::get_media_store;
@@ -26,3 +28,4 @@ pub use task_manager::get_task_manager;
 pub use text_fetcher::get_text_fetcher;
 pub use torrents::get_torrent_downloader;
 pub use media_checker::get_checker;
+pub use context::get_context;

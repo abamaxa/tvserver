@@ -4,13 +4,13 @@ use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
-use common::get_checker;
+use common::{get_checker, get_context};
 use tvserver::domain::config::MOVIE_DIR;
 use tvserver::domain::messages::PlayRequest;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tvserver::domain::messagebus::MessageExchange;
+use tvserver::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
 use tvserver::{domain::messages::Response, entrypoints};
 
 #[tokio::test]
@@ -18,14 +18,13 @@ async fn test_local_play() -> Result<()> {
     env::set_var(MOVIE_DIR, "");
     let search = get_youtube_search("yt_search.json").await;
 
-    let context = entrypoints::Context::new(
+    let context = get_context(
         get_media_store(),
         search,
-        MessageExchange::new(),
         get_task_manager(),
         get_repository().await,
         get_checker(),
-    );
+    ).await?;
 
     let server = common::create_server(context, 57181).await;
 
@@ -59,7 +58,11 @@ async fn test_local_play() -> Result<()> {
 
 #[tokio::test]
 async fn test_remote_play() -> Result<()> {
-    let exchange = MessageExchange::new();
+    let local_exchange = LocalMessageExchange::new();
+    let exchange = MessageExchange::new(
+        local_exchange.new_sender(),
+        local_exchange.listen_for_messages("MessageExchange", MessageFilter::All).await?
+    );
 
     let key = SocketAddr::from_str("0.0.0.0:456").unwrap();
 
@@ -74,6 +77,7 @@ async fn test_remote_play() -> Result<()> {
         get_task_manager(),
         get_repository().await,
         get_checker(),
+        local_exchange,
     );
 
     let server = common::create_server(context, 57182).await;

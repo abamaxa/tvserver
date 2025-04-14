@@ -1,19 +1,107 @@
+use axum::http::StatusCode;
+use axum::Json;
 use sqlx::Error;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::adaptors::{FileSystemStore, HTTPClient, SqlRepository, TokioProcessSpawner, TorrentFetcher, YoutubeFetcher};
 use crate::domain::config::{get_database_url, get_google_key, get_movie_dir};
-use crate::domain::messagebus::MessageExchange;
+use crate::domain::messagebus::{LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter};
+use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender, RemoteMessage, Response};
 use crate::domain::services::MediaCheck;
 use crate::domain::traits::FileStorer;
 use crate::domain::SearchEngineType;
 use crate::services::{
     MediaStore, PirateClient, SearchEngine, SearchService, TaskManager, YoutubeClient
 };
+use crate::domain::traits::{Checker, ProcessSpawner, Repository, Storer};
 
-use super::api::Context;
+#[derive(Clone)]
+pub struct Context {
+    store: Storer,
+    checker: Checker,
+    search: SearchService,
+    messenger: MessageExchange,
+    task_manager: Arc<TaskManager>,
+    repository: Repository,
+    local_message_exchange: LocalMessageExchange,
+}   
+
+impl Context {
+    pub fn new(
+        store: Storer,
+        search: SearchService,
+        messenger: MessageExchange,
+        task_manager: Arc<TaskManager>,
+        repository: Repository,
+        checker: Checker,
+        local_message_exchange: LocalMessageExchange,
+    ) -> Context {
+        Context {
+            store,
+            checker,
+            search,
+            messenger,
+            task_manager,
+            repository,
+            local_message_exchange,
+        }
+    }
+
+    pub fn get_store(&self) -> Storer {
+        self.store.clone()
+    }
+
+    pub fn get_task_manager(&self) -> Arc<TaskManager> {
+        self.task_manager.clone()
+    }
+
+    pub fn get_spawner(&self) -> Arc<impl ProcessSpawner> {
+        self.task_manager.clone()
+    }
+
+    pub fn get_repository(&self) -> Repository {
+        self.repository.clone()
+    }
+
+    pub fn get_local_sender(&self) -> LocalMessageSender {
+        self.local_message_exchange.new_sender()
+    }
+
+    pub async fn listen_for_messages(
+        &self,
+        key: &str,
+        filter: MessageFilter,
+    ) -> Result<LocalMessageReceiver, LocalMessageExchangeError> {
+        self.local_message_exchange.listen_for_messages(key, filter).await
+    }
+
+    pub fn get_checker(&self) -> Checker {
+        self.checker.clone()
+    }
+
+    pub fn get_storer(&self) -> Storer {
+        self.store.clone()
+    }
+
+    pub fn get_search(&self) -> SearchService {
+        self.search.clone()
+    }
+
+    pub async fn execute(&self, key: SocketAddr, command: RemoteMessage) -> (StatusCode, Json<Response>) {
+        self.messenger.execute(key, command).await
+    }
+
+    pub fn get_messenger(&self) -> &MessageExchange {
+        &self.messenger
+    }
+    
+    
+}
 
 pub async fn create_context() -> Result<Context, Error> {
+    let local_message_exchange = LocalMessageExchange::new();
+    
     let spawner = Arc::new(TokioProcessSpawner::new());
 
     let web_fetcher = Arc::new(HTTPClient::new());
@@ -45,13 +133,21 @@ pub async fn create_context() -> Result<Context, Error> {
         vec![torrent_search, youtube_search]
     );
 
-    let messenger = MessageExchange::new();
+    let messenger = MessageExchange::new(
+        local_message_exchange.new_sender(), 
+        local_message_exchange.listen_for_messages("MessageExchange", MessageFilter::All).await.unwrap()
+    );
 
     let repository = Arc::new(SqlRepository::new(&get_database_url()).await?);
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
 
-    let checker = Arc::new(MediaCheck::new(file_storer.clone(), repository.clone(), messenger.get_local_sender()));
+    let checker = Arc::new(
+        MediaCheck::new(file_storer.clone(), 
+        repository.clone(), 
+        local_message_exchange.new_sender())
+    );
+    
     Ok(Context::new(
         Arc::new(MediaStore::new(file_storer, repository.clone())),
         search,
@@ -59,5 +155,6 @@ pub async fn create_context() -> Result<Context, Error> {
         task_manager,
         repository,
         checker,
+        local_message_exchange,
     ))
 }

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentMetadata};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -24,8 +24,13 @@ impl DownloadProgress for TorrentDownload {
     async fn observe(&self) -> DownloadInfo {
         let stats = self.handle.stats();
         let metadata = self.metadata.read().await;  
+        let download_dir = config::get_downloads_dir();
         let files = match metadata.as_ref() {
-            Some(metadata) => metadata.file_infos.iter().map(|f| f.relative_filename.to_string_lossy().to_string()).collect(),
+            Some(m) => {
+                m.file_infos.iter().map(|f| {
+                    Path::new(&download_dir).join(PathBuf::from(m.name.clone().unwrap_or_else(String::new))).join(&f.relative_filename).to_string_lossy().to_string()
+                }).collect()
+            },
             None => vec![],
         };
 
@@ -51,9 +56,12 @@ impl TorrentDownload {
     }
 
     pub async fn download(&self) -> Result<(), anyhow::Error> {
-        self.handle.with_metadata(|r| {
-            tracing::info!("Details: {:?}", &r.info);
-        })?;
+        {
+            let mut meta_data_store = self.metadata.write().await;
+            self.handle.with_metadata(|r| {
+                meta_data_store.replace(r.clone());
+            })?;
+        }
 
         // Wait until the download is completed
         self.handle.wait_until_completed().await?;

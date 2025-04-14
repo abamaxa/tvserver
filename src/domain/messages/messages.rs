@@ -1,6 +1,6 @@
 use crate::domain::models::{CollectionDetails, VideoDetails};
 use crate::domain::traits::Storer;
-use crate::domain::{SearchEngineType, TaskType};
+use crate::domain::TaskType;
 use chrono::{NaiveDate, Utc};
 use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 lazy_static! {
     static ref DEFAULT_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 80);
@@ -212,26 +212,6 @@ pub struct ClientLogMessage {
     pub messages: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadRequest {
-    pub name: String,
-    pub link: String,
-    pub engine: SearchEngineType,
-    pub series: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadInfo {
-    // All in MB, MB/s
-    pub total_size: Option<i64>,
-    pub downloaded_size: i64,
-    pub uploaded_size: Option<i64>,
-    pub finished: bool,
-    pub error_message: String,
-    pub progress_message: String,
-    pub files: Vec<String>,
-}
 
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -386,4 +366,4 @@ impl ChatGPTMessage {
 }
 
 pub type LocalMessageReceiver = broadcast::Receiver<LocalMessage>;
-pub type LocalMessageSender = broadcast::Sender<LocalMessage>;
+pub type LocalMessageSender = mpsc::Sender<LocalMessage>;

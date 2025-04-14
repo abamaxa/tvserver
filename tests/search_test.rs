@@ -6,15 +6,13 @@ use crate::common::{
     get_media_store, get_pirate_search, get_repository, get_task_manager, get_youtube_search,
 };
 use anyhow::Result;
-use common::get_checker;
+use common::{get_checker, get_context};
 use tokio::task::JoinHandle;
 use tvserver::domain::config::MOVIE_DIR;
-use tvserver::domain::messagebus::MessageExchange;
 use tvserver::services::SearchService;
 use tvserver::{
     domain::models::{DownloadableItem, SearchResults},
-    domain::SearchEngineType,
-    entrypoints,
+    domain::SearchEngineType
 };
 
 #[tokio::test]
@@ -81,14 +79,13 @@ async fn test_pirate_bay() -> Result<()> {
 }
 
 async fn make_server(searcher: SearchService, port: u16) -> JoinHandle<Result<()>> {
-    let context = entrypoints::Context::new(
+    let context = get_context(
         get_media_store(),
         searcher,
-        MessageExchange::new(),
         get_task_manager(),
         get_repository().await,
         get_checker(),
-    );
+    ).await.unwrap();
 
     common::create_server(context, port).await
 }

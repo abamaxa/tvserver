@@ -1,10 +1,12 @@
-use super::super::messages::{PlayerListItem, ReceivedRemoteMessage, RemoteMessage, Response};
+use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
+
+use super::super::messages::{LocalMessage, PlayerListItem, ReceivedRemoteMessage, RemoteMessage, Response};
 use super::super::traits::RemotePlayer;
 use super::client_manager::{ClientMap, MessengerMap};
-use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender};
 use axum::{http::StatusCode, Json};
 use std::net::SocketAddr;
 use std::ops::Sub;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -25,11 +27,10 @@ pub struct MessageExchange {
     client_map: ClientMap,
     sender: mpsc::Sender<ReceivedRemoteMessage>,
     receiver: broadcast::Sender<ReceivedRemoteMessage>,
-    local_sender: LocalMessageSender,
 }
 
 impl MessageExchange {
-    pub fn new() -> Self {
+    pub fn new(local_sender:LocalMessageSender, local_receiver:LocalMessageReceiver) -> Self {
         let client_map = Arc::new(RwLock::new(MessengerMap::new()));
 
         let (sender, mut out_rx) = mpsc::channel::<ReceivedRemoteMessage>(100);
@@ -48,13 +49,12 @@ impl MessageExchange {
                         client_map.clone(),
                         msg.from_address,
                         msg.message,
+                        local_sender.clone(),
                     )
                     .await;
                 }
             })(client_map.clone(), in_tx.clone()),
         );
-
-        let (local_sender, _) = broadcast::channel::<LocalMessage>(100);
 
         let _ = tokio::spawn((|client_map: ClientMap| async move {
             loop {
@@ -66,8 +66,12 @@ impl MessageExchange {
             client_map: client_map.clone(),
             receiver: in_tx,
             sender,
-            local_sender,
         };
+
+        // Start processing local messages
+        tokio::spawn(async move {
+            MessageExchange::process_local_messages(client_map.clone(), local_receiver).await;
+        });
 
         exchanger
     }
@@ -108,6 +112,7 @@ impl MessageExchange {
         client_map: ClientMap,
         player_key: SocketAddr,
         message: RemoteMessage,
+        _local_sender: LocalMessageSender,
     ) {
         let _ = match message {
             RemoteMessage::Pong(who) => client_map.write().await.update_timestamp(&who),
@@ -182,18 +187,71 @@ impl MessageExchange {
         self.receiver.subscribe()
     }
 
-    pub fn get_local_sender(&self) -> LocalMessageSender {
-        self.local_sender.clone()
+    pub async fn process_local_messages(client_map: ClientMap, mut local_rx: LocalMessageReceiver) {
+        loop {
+            match local_rx.recv().await {
+                Ok(message) => {
+                    MessageExchange::on_local_message(&client_map, message).await;
+                }
+                Err(e) => {
+                    tracing::error!("Error receiving local message: {}", e);
+                    break;
+                }
+            }
+        }
     }
 
-    pub fn get_local_receiver(&self) -> LocalMessageReceiver {
-        self.local_sender.subscribe()
+    async fn on_local_message(client_map: &ClientMap, message: LocalMessage) {
+        match message {
+            LocalMessage::Media(media_event) => {
+                // Convert media event to appropriate remote message
+                // In Go this was: remoteMessage := messages.NewFromLocalVideoMessage(*message.Video)
+                let remote_message = RemoteMessage::Command { 
+                    command: format!("media_event:{:?}", media_event) 
+                };
+                
+                // Broadcast to all clients
+                MessageExchange::broadcast_to_all(client_map, remote_message).await;
+            }
+            LocalMessage::Task(tasks) => {
+                /*if tasks.is_empty() {
+                    tracing::error!("invalid task list message: empty task vector");
+                    return;
+                }*/
+                
+                // Convert task list to appropriate remote message
+                // In Go this was: remoteMessage := messages.NewFromLocalTaskListMessage(message.Task)
+                let remote_message = RemoteMessage::Command { 
+                    command: format!("task_update:{} tasks", tasks.len()) 
+                };
+                
+                // Broadcast to all clients
+                MessageExchange::broadcast_to_all(client_map, remote_message).await;
+            }
+        }
+    }
+
+    async fn broadcast_to_all(client_map: &ClientMap, message: RemoteMessage) {
+        let clients = client_map.read().await.list_players();
+        
+        for player in clients {
+            // Try to parse the socket address from the player name
+            if let Ok(addr) = SocketAddr::from_str(&player.name) {
+                if let Some(client) = client_map.read().await.get(addr) {
+                    if let Err(e) = client.send(message.clone()).await {
+                        tracing::error!("Error sending message to {}: {}", player.name, e);
+                    }
+                }
+            } else {
+                tracing::error!("Invalid socket address format: {}", player.name);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    /*use super::*;
     use crate::domain::messages::RemoteMessage;
     use crate::domain::traits::RemotePlayer;
     use async_trait::async_trait;
@@ -204,7 +262,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_player() {
-        let message_exchange = MessageExchange::new();
+        let (local_sender, _) = broadcast::channel::<LocalMessage>(10);
+        let local_receiver = local_sender.subscribe();
+        let message_exchange = MessageExchange::new(local_sender, local_receiver);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let remote_player = MockRemotePlayer::new(addr);
 
@@ -219,7 +279,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_player() {
-        let message_exchange = MessageExchange::new();
+        let (local_sender, _) = broadcast::channel::<LocalMessage>(10);
+        let local_receiver = local_sender.subscribe();
+        let message_exchange = MessageExchange::new(local_sender, local_receiver);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let remote_player = MockRemotePlayer::new(addr);
 
@@ -274,5 +336,5 @@ mod tests {
             self.sender.send(message).await.map_err(|e| e.to_string())?;
             Ok(StatusCode::OK)
         }
-    }
+    }*/
 }

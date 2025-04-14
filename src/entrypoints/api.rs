@@ -4,14 +4,12 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use crate::adaptors::RemoteBrowserPlayer;
 use crate::domain::messages::{
     ClientLogMessage, Command, ConversionRequest, DownloadRequest,
-    LocalMessageReceiver, LocalMessageSender, MediaItem, PlayRequest, PlayerList, RenameRequest,
+    MediaItem, PlayRequest, PlayerList, RenameRequest,
     Response,
 };
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
-use crate::domain::messagebus::MessageExchange;
-use crate::domain::traits::{Checker, ProcessSpawner, Repository, Searcher, Storer};
+use crate::domain::traits::Searcher;
 use crate::domain::{SearchEngineType, TaskType};
-use crate::services::{SearchService, TaskManager};
 use axum::routing::any;
 use axum::{
     debug_handler,
@@ -22,6 +20,7 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use super::context::Context;
 
 type QueryParams = Query<HashMap<String, String>>;
 type StdResponse = (StatusCode, Json<Response>);
@@ -30,64 +29,6 @@ const BAD_REQUEST: StatusCode = StatusCode::BAD_REQUEST;
 const INTERNAL_SERVER_ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 const OK: StatusCode = StatusCode::OK;
 const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
-
-#[derive(Clone)]
-pub struct Context {
-    store: Storer,
-    checker: Checker,
-    search: SearchService,
-    messenger: MessageExchange,
-    task_manager: Arc<TaskManager>,
-    repository: Repository,
-}
-
-impl Context {
-    pub fn new(
-        store: Storer,
-        search: SearchService,
-        messenger: MessageExchange,
-        task_manager: Arc<TaskManager>,
-        repository: Repository,
-        checker: Checker,
-    ) -> Context {
-        Context {
-            store,
-            checker,
-            search,
-            messenger,
-            task_manager,
-            repository,
-        }
-    }
-
-    pub fn get_store(&self) -> Storer {
-        self.store.clone()
-    }
-
-    pub fn get_task_manager(&self) -> Arc<TaskManager> {
-        self.task_manager.clone()
-    }
-
-    pub fn get_spawner(&self) -> Arc<impl ProcessSpawner> {
-        self.task_manager.clone()
-    }
-
-    pub fn get_repository(&self) -> Repository {
-        self.repository.clone()
-    }
-
-    pub fn get_local_sender(&self) -> LocalMessageSender {
-        self.messenger.get_local_sender()
-    }
-
-    pub fn get_local_receiver(&self) -> LocalMessageReceiver {
-        self.messenger.get_local_receiver()
-    }
-
-    pub fn get_checker(&self) -> Checker {
-        self.checker.clone()
-    }
-}
 
 pub type SharedState = Arc<Context>;
 
@@ -115,7 +56,7 @@ pub fn register(shared_state: SharedState) -> Router {
 
 #[debug_handler]
 async fn tasks_add(state: State<SharedState>, payload: Json<DownloadRequest>) -> impl IntoResponse {
-    match state.search.download(payload.0).await {
+    match state.get_search().download(payload.0, state.get_local_sender()).await {
         Ok(_) => (OK, Json(Response::success("download queued".to_string()))),
         Err(err) => (INTERNAL_SERVER_ERROR, Json(Response::error(err.to_string()))),
     }
@@ -126,7 +67,7 @@ async fn tasks_delete(state: State<SharedState>, params: Path<(TaskType, String)
     
     let key = params.0 .1;
 
-    match state.task_manager.remove(&key, state.get_store()).await {
+    match state.get_task_manager().remove(&key, state.get_storer()).await {
         Ok(_) => (OK, Json(Response::success(String::from("success")))),
         Err(err) => (INTERNAL_SERVER_ERROR, Json(Response::error(err.to_string()))),
     }
@@ -134,7 +75,7 @@ async fn tasks_delete(state: State<SharedState>, params: Path<(TaskType, String)
 
 #[debug_handler]
 async fn tasks_list(state: State<SharedState>) -> impl IntoResponse {
-    let mut tasks = state.task_manager.get_current_state().await;
+    let mut tasks = state.get_task_manager().get_current_state().await;
     tasks.sort_by(|a, b| {
         let ord = a.display_name.cmp(&b.display_name);
         match ord {
@@ -147,13 +88,15 @@ async fn tasks_list(state: State<SharedState>) -> impl IntoResponse {
 
 #[debug_handler]
 async fn pirate_search(state: State<SharedState>, params: QueryParams) -> impl IntoResponse {
-    let downloader = state.search.get_search_engine(&SearchEngineType::Torrent);
+    let search = state.get_search();
+    let downloader = search.get_search_engine(&SearchEngineType::Torrent);
     do_search(downloader, &params).await
 }
 
 #[debug_handler]
 async fn youtube_search(state: State<SharedState>, params: QueryParams) -> impl IntoResponse {
-    let downloader = state.search.get_search_engine(&SearchEngineType::YouTube);
+    let search = state.get_search();
+    let downloader = search.get_search_engine(&SearchEngineType::YouTube);
     do_search(downloader, &params).await
 }
 
@@ -179,7 +122,7 @@ async fn list_collection(state: State<SharedState>, collection: Path<String>) ->
 }
 
 async fn list_media(state: &SharedState, collection: &str) -> (StatusCode, Json<MediaItem>) {
-    match state.store.list(collection).await {
+    match state.get_store().list(collection).await {
         Ok(result) => (OK, Json(result)),
         Err(e) => (NOT_FOUND, Json(MediaItem::from(e))),
     }
@@ -203,9 +146,11 @@ pub async fn ws_player_handler(
 
     tracing::info!("opened websocket from player: {}", key);
 
-    let (client, response) = RemoteBrowserPlayer::create(ws, addr, state.messenger.get_sender());
+    let messenger = state.get_messenger();
 
-    state.messenger.add_player(addr, Arc::new(client)).await;
+    let (client, response) = RemoteBrowserPlayer::create(ws, addr, messenger.get_sender());
+
+    messenger.add_player(addr, Arc::new(client)).await;
 
     response
 }
@@ -218,9 +163,9 @@ pub async fn ws_control_handler(
 ) -> impl IntoResponse {
     tracing::info!("opened websocket from remote control: {}", addr);
 
-    let (client, response) = RemoteBrowserPlayer::create(ws, addr, state.messenger.get_sender());
+    let (client, response) = RemoteBrowserPlayer::create(ws, addr, state.get_messenger().get_sender());
 
-    state.messenger.add_control(addr, Arc::new(client)).await;
+    state.get_messenger().add_control(addr, Arc::new(client)).await;
 
     response
 }
@@ -230,7 +175,6 @@ pub async fn ws_control_handler(
 async fn remote_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
     let key = payload.address();
     state
-        .messenger
         .execute(key, payload.make_remote_command())
         .await
 }
@@ -241,14 +185,13 @@ async fn remote_command(
     Json(payload): Json<Command>,
 ) -> StdResponse {
     state
-        .messenger
         .execute(payload.address(), payload.message)
         .await
 }
 
 #[debug_handler]
 async fn list_player(State(state): State<SharedState>) -> (StatusCode, Json<PlayerList>) {
-    let players = PlayerList::new(state.messenger.list_players().await);
+    let players = PlayerList::new(state.get_messenger().list_players().await);
     (OK, Json(players))
 }
 
@@ -263,7 +206,7 @@ async fn delete_video(state: State<SharedState>, Path(collection): Path<String>)
     'Dragons Den - S19EP5 - Berczy, Nick & Nick #dragonsdennew [Zlb1y7bLAlQ].webm'
     '#Dragons Dens - S19EP6 - LONDON NOOTROPICS [y9W2MTHwGLE].webm'
      */
-    match state.store.delete(&collection).await {
+    match state.get_store().delete(&collection).await {
         Ok(()) => (OK, Json(Response::success(collection))),
         Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -275,7 +218,7 @@ async fn rename_video(
     Path(collection): Path<String>,
     Json(params): Json<RenameRequest>,
 ) -> StdResponse {
-    match state.store.rename(&collection, &params.new_name).await {
+    match state.get_store().rename(&collection, &params.new_name).await {
         Ok(_) => (OK, Json(Response::success(params.new_name))),
         _ => std_error(NOT_FOUND, collection),
     }
@@ -288,7 +231,7 @@ async fn convert_video(
     request: Json<ConversionRequest>,
 ) -> StdResponse {
     if let Some(conversion) = Conversion::find(&request.0.name) {
-        let collection = state.store.as_local_path("", &collection);
+        let collection = state.get_store().as_local_path("", &collection);
         conversion.execute(state.get_spawner(), &collection).await;
         (OK, Json(Response::success("conversion queued".to_string())))
     } else {
