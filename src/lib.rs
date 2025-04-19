@@ -12,41 +12,33 @@ pub mod entrypoints;
 pub mod services;
 
 use std::{net::SocketAddr, sync::Arc};
-use domain::messagebus::MessageFilter;
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
-
 use crate::services::{setup_logging, TVSERVER_LOG};
 use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
-use crate::entrypoints::create_context;
+use crate::entrypoints::TVServer;
 use crate::entrypoints::register;
-use crate::services::{
-    MetaDataManager, Monitor,
-};
 
 pub async fn run() -> anyhow::Result<()> {
-    let context = create_context().await?;
-
-    let monitor_handle = Monitor::start(
-        context.get_checker(),      
-        context.get_task_manager(),
-        context.get_store(),
-        context.get_local_sender(),
-    );
-
     setup_logging(TVSERVER_LOG);
 
-    let metadata_manager = MetaDataManager::consume(
-        context.get_repository(),
-        context.listen_for_messages("MetaDataManager", MessageFilter::All).await.unwrap(),
-        context.get_local_sender(),
-    );
+    let tvserver = TVServer::new().await?;
+
+    run_http_server(&tvserver).await?;
+
+    tvserver.shutdown();
+
+    Ok(())
+}
+
+async fn run_http_server(tvserver: &TVServer) -> anyhow::Result<()> {
+    let context = tvserver.get_context().clone();
 
     let app = register(Arc::new(context))
-        .fallback_service(ServeDir::new(get_client_path("app")))
+        .fallback_service(ServeDir::new(get_client_path("newapp")))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
         .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
         .nest_service(
@@ -65,9 +57,6 @@ pub async fn run() -> anyhow::Result<()> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .unwrap();
-
-    monitor_handle.abort();
-    metadata_manager.abort();
 
     Ok(())
 }

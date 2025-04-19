@@ -10,7 +10,6 @@ use mockall::automock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-
 /*
 The following are higher level traits that provide polymorphism
 at the service layer.
@@ -32,9 +31,9 @@ pub type Searcher = Arc<dyn MediaSearcher<DownloadableItem>>;
 pub trait MediaStorer: Send + Sync {
     async fn list(&self, collection: &str) -> anyhow::Result<MediaItem>;
     async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
-    async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
-    async fn delete(&self, path: &str) -> anyhow::Result<()>;
-    fn as_local_path(&self, collection: &str, video: &str) -> String;
+    //async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
+    async fn delete(&self, video_id: i64) -> anyhow::Result<()>;
+    //fn as_local_path(&self, collection: &str, video: &str) -> String;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
@@ -94,7 +93,17 @@ pub trait JsonFetcher<'a, T: DeserializeOwned, Q: Serialize>: Send + Sync {
 #[automock]
 #[async_trait]
 pub trait RemotePlayer: Send + Sync {
-    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String>;
+    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, SendError>;
+}
+
+/// Error type for the RemotePlayer trait's send method
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    #[error("Channel is disconnected: {0}")]
+    Disconnected(String),
+    
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 #[async_trait]
@@ -157,7 +166,6 @@ pub trait Databaser: Sync + Send {
     async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error>;
     async fn list_series_details(&self, series: &str, season: Option<&str>) -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error>;
-    async fn retrieve_video_by_name_and_collection(&self, name: &str, collection: &str) -> Result<VideoDetails, sqlx::Error>;
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;
     async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
     async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
@@ -165,16 +173,18 @@ pub trait Databaser: Sync + Send {
 
 pub type Repository = Arc<dyn Databaser>;
 
+
 #[async_trait]
-pub trait ChannelReceiver<T>: Sync + Send {
-    async fn recv(&mut self) -> anyhow::Result<T>;
+pub trait MediaSharer: Sync + Send {
+    async fn share(&self, series_or_id: &str) -> anyhow::Result<()>;
 }
 
-pub type Receiver<T> = Arc<dyn ChannelReceiver<T>>;
+pub type Sharer = Arc<dyn MediaSharer>;
 
-pub trait ChannelBroadcaster<T>: Sync + Send + Clone {
-    fn subscribe(&self) -> Receiver<T>;
-    fn send(&self, message: T) -> anyhow::Result<()>;
+#[async_trait]
+pub trait InstantMessegeService: Sync + Send {
+	async fn send_link(&self, title: &str, link: &str) -> anyhow::Result<()>;
+	async fn send_error(&self, video: String, error: &str) -> anyhow::Result<()>;
 }
 
-pub type Broadcaster<T> = Arc<dyn ChannelBroadcaster<T>>;
+pub type InstantMessenger = Arc<dyn InstantMessegeService>;

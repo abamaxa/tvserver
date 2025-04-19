@@ -18,7 +18,9 @@ const PIRATE_BAY_PROXY_URL: &str = "PIRATE_BAY_PROXY_URL";
 const DELAY_REAPING_TASKS_SECS: &str = "DELAY_REAPING_TASKS_SECS";
 const THUMBNAIL_DIR: &str = "THUMBNAIL_DIR";
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
-
+const SHARING_SERVER: &str = "SHARING_SERVER";
+const TELEGRAM_TOKEN: &str = "TELEGRAM_TOKEN";
+const TELEGRAM_CHAT_ID: &str = "TELEGRAM_CHAT_ID";
 //  Defaults
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
@@ -92,4 +94,16 @@ pub fn get_thumbnail_dir(movie_dir: &str) -> PathBuf {
 
 pub fn get_openai_api_key() -> String {
     env::var(OPENAI_API_KEY).unwrap_or_default()
+}
+
+pub fn get_sharing_server() -> String {
+    env::var(SHARING_SERVER).unwrap_or_default()
+}
+
+pub fn  get_telegram_token() -> String {
+	env::var(TELEGRAM_TOKEN).unwrap_or_default()
+}
+
+pub fn  get_telegram_chat_id() -> String {
+	env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
 }

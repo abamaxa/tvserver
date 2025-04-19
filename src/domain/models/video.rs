@@ -1,6 +1,6 @@
 use chrono::{NaiveDateTime, Local, Duration};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::{Path, PathBuf}};
 use crate::domain::algorithm::{title_case, parse_file_path};
 
 
@@ -161,6 +161,7 @@ pub struct VideoDetails {
     pub series: SeriesDetails,
     pub thumbnail: Vec<String>,
     pub metadata: VideoMetadata,
+    #[serde(serialize_with = "serialize_i64_to_string", deserialize_with = "deserialize_string_to_i64")]
     pub checksum: i64,
     pub search_phrase: Option<String>,
     pub state: VideoState,
@@ -168,11 +169,28 @@ pub struct VideoDetails {
     pub updated_on: NaiveDateTime,
     pub play_from: Option<NaiveDateTime>,
     pub last_viewed: Option<NaiveDateTime>,
+    #[serde(skip)]
+    pub dir_path: Option<PathBuf>,
 }
 
+fn serialize_i64_to_string<S>(value: &i64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn deserialize_string_to_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let s = String::deserialize(deserializer)?;
+    s.parse::<i64>().map_err(D::Error::custom)
+}
 
 impl VideoDetails {
-    pub fn new(video: String, collection: String, suggested_series: Option<String>) -> Self {
+    pub fn new(video: String, collection: String, path: &PathBuf, suggested_series: Option<String>) -> Self {
         let now = Local::now().naive_local();
         let series = SeriesDetails::parse_collection_video(&collection, &video, suggested_series);
         Self {
@@ -189,9 +207,9 @@ impl VideoDetails {
             updated_on: now,
             play_from: None,
             last_viewed: None,
+            dir_path: Some(path.to_path_buf()),
         }
     }
-
 
     pub fn should_retry_metadata(&self) -> bool {
         if self.metadata.duration == 0. || self.metadata.height == 0 {
@@ -214,6 +232,32 @@ impl VideoDetails {
         duration_since_given >= Duration::hours(num_hours)
     }
     
+    /// Returns the full path to the video file.
+    /// 
+    /// If dir_path is set, joins dir_path and video.
+    /// Otherwise, uses the movie directory from config and joins with collection and video.
+    pub fn get_full_path(&self) -> PathBuf {
+        if let Some(dir_path) = &self.dir_path {
+            dir_path.join(&self.video)
+        } else if self.collection.is_empty() {
+            Path::new(&crate::domain::config::get_movie_dir()).join(&self.video)
+        } else {
+            Path::new(&crate::domain::config::get_movie_dir())
+                .join(&self.collection)
+                .join(&self.video)
+        }
+    }
+    
+    /// Returns the relative path to the video file for download/sharing purposes.
+    /// 
+    /// This is the path relative to the movie directory, used for URLs.
+    pub fn get_download_path(&self) -> String {
+        if self.collection.is_empty() {
+            self.video.clone()
+        } else {
+            format!("{}/{}", self.collection, self.video)
+        }
+    }
 }
 
 impl SeriesDetails {
@@ -266,20 +310,23 @@ impl SeriesDetails {
     }
 
     pub fn full_title(&self) -> String {
-        let mut title = self.series_title.clone();
-
+        use std::fmt::Write;
+        let mut title = String::new();
+        
+        write!(&mut title, "{}", self.series_title).unwrap();
+        
         if !self.season.is_empty() {
-            title = format!("{}, Season {}", title, self.season);
+            write!(&mut title, ", Season {}", self.season).unwrap();
         }
-
+        
         if !self.episode.is_empty() {
-            title = format!("{}, Episode {}", title, self.episode);
+            write!(&mut title, ", Episode {}", self.episode).unwrap();
         }
-
+        
         if !self.episode_title.is_empty() {
-            title = format!("{}, {}", title, self.episode_title);
+            write!(&mut title, ", {}", self.episode_title).unwrap();
         }
-
+        
         title
     }
 }

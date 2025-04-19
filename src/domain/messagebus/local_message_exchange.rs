@@ -19,6 +19,8 @@ pub enum MessageFilter {
     All,
     Media,
     Task,
+    Video,
+    PlayerState,
 }
 
 
@@ -50,6 +52,8 @@ impl LocalMessageExchange {
                 (MessageFilter::All, LocalMessageSenderReceiver::new()),
                 (MessageFilter::Media, LocalMessageSenderReceiver::new()),
                 (MessageFilter::Task, LocalMessageSenderReceiver::new()),
+                (MessageFilter::Video, LocalMessageSenderReceiver::new()),
+                (MessageFilter::PlayerState, LocalMessageSenderReceiver::new()),
             ]
             .into_iter()
             .collect::<HashMap<_, _>>();
@@ -73,30 +77,10 @@ impl LocalMessageExchange {
     }
 
     pub fn new_sender(&self) -> LocalMessageSender {
-        // this seems to be for testing only
-        /*let multiplexer = self.multiplexer.clone();
-        
-        let (sender, mut sender_rx) = mpsc::channel::<LocalMessage>(CHANNEL_SIZE);
-        
-        tokio::spawn(async move {
-            while let Some(message) = sender_rx.recv().await {
-                if let Err(e) = multiplexer.send(message).await {
-                    tracing::error!("Failed to forward message to multiplexer: {}", e);
-                    break;
-                }
-            }
-            tracing::debug!("Sender channel closed");
-        });
-        
-        sender*/
         self.multiplexer.clone()
     }
 
-    pub async fn listen_for_messages(
-        &self,
-        _key: &str,
-        filter: MessageFilter,
-    ) -> Result<LocalMessageReceiver, LocalMessageExchangeError> {
+    pub async fn listen_for_messages(&self, filter: MessageFilter) -> Result<LocalMessageReceiver, LocalMessageExchangeError> {
         if let Some(receiver) = self.broadcasters.read().await.get(&filter) {
             return Ok(receiver.subscribe());
         }
@@ -109,27 +93,35 @@ impl LocalMessageExchange {
         message: LocalMessage,
     ) {
         let broadcasters = broadcasters.read().await;
-
-        match message.clone() {
-            LocalMessage::Media(_event) => {
-                let broadcaster = broadcasters.get(&MessageFilter::Media).unwrap();
-                if let Err(e) = broadcaster.sender.send(message.clone()) {
-                    tracing::warn!("Failed to send Media message: {}", e);
-                }
+        let filter = match &message {
+            LocalMessage::Media(_) => Some(MessageFilter::Media),
+            LocalMessage::Task(_) => Some(MessageFilter::Task),
+            LocalMessage::Video(_) => Some(MessageFilter::Video),
+            LocalMessage::PlayerState(_) => Some(MessageFilter::PlayerState),
+            _ => {
+                tracing::warn!("Unknown local message type: {:?}", message.clone());
+                None
             }
-            LocalMessage::Task(_task) => {
-                let broadcaster = broadcasters.get(&MessageFilter::Task).unwrap();
-                if let Err(e) = broadcaster.sender.send(message.clone()) {
-                    tracing::warn!("Failed to send Task message: {}", e);
+        };
+
+        // First send to the specific channel if applicable
+        if let Some(filter_type) = filter {
+            if let Some(broadcaster) = broadcasters.get(&filter_type) {
+                if broadcaster.sender.receiver_count() > 1 {
+                    if let Err(e) = broadcaster.sender.send(message.clone()) {
+                        tracing::warn!("Failed to send message to specific channel: {}", e);
+                    }
                 }
             }
         }
 
+        // Then send to the All channel
         let broadcaster = broadcasters.get(&MessageFilter::All).unwrap();
         if let Err(e) = broadcaster.sender.send(message) {
             tracing::warn!("Failed to send message to All channel: {}", e);
         }
     }
+
 }
 
 #[cfg(test)]
@@ -152,11 +144,11 @@ mod tests {
     async fn test_listen_for_messages() {
         let exchange = LocalMessageExchange::new();
         
-        let result = exchange.listen_for_messages("test", MessageFilter::Media).await;
+        let result = exchange.listen_for_messages(MessageFilter::Media).await;
         assert!(result.is_ok());
         
         // Try to listen with the same key again, should fail
-        let result = exchange.listen_for_messages("test", MessageFilter::Media).await;
+        let result = exchange.listen_for_messages(MessageFilter::Media).await;
         assert!(matches!(result, Err(LocalMessageExchangeError::ListenerExists)));
     }
 
@@ -168,9 +160,9 @@ mod tests {
         let sender = exchange.new_sender();
         
         // Register listeners for different message types
-        let mut media_receiver = exchange.listen_for_messages("media", MessageFilter::Media).await.unwrap();
-        let mut task_receiver = exchange.listen_for_messages("tasks", MessageFilter::Task).await.unwrap();
-        let mut all_receiver = exchange.listen_for_messages("all", MessageFilter::All).await.unwrap();
+        let mut media_receiver = exchange.listen_for_messages(MessageFilter::Media).await.unwrap();
+        let mut task_receiver = exchange.listen_for_messages(MessageFilter::Task).await.unwrap();
+        let mut all_receiver = exchange.listen_for_messages(MessageFilter::All).await.unwrap();
         
         // Send a media message
         let media_event = MediaEvent::new_media(&PathBuf::from("test.mp4"), None);
@@ -204,11 +196,11 @@ mod tests {
         let sender1 = exchange.new_sender();
         
         // Register multiple media listeners
-        let mut media_receiver1 = exchange.listen_for_messages("media1", MessageFilter::Media).await.unwrap();
-        let mut media_receiver2 = exchange.listen_for_messages("media2", MessageFilter::Media).await.unwrap();
+        let mut media_receiver1 = exchange.listen_for_messages(MessageFilter::Media).await.unwrap();
+        let mut media_receiver2 = exchange.listen_for_messages(MessageFilter::Media).await.unwrap();
         
         // Register a task listener
-        let mut task_receiver = exchange.listen_for_messages("tasks", MessageFilter::Task).await.unwrap();
+        let mut task_receiver = exchange.listen_for_messages(MessageFilter::Task).await.unwrap();
         
         // Send two media messages
         let media_event1 = MediaEvent::new_media(&PathBuf::from("test1.mp4"), None);

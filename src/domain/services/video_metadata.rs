@@ -98,7 +98,7 @@ async fn make_video_metadatas(path: &PathBuf, suggested_series: Option<String>) 
 
     let (collection, video) = get_collection_and_video_from_path(&path);
 
-    let mut details: VideoDetails = VideoDetails::new(video, collection, suggested_series);
+    let mut details: VideoDetails = VideoDetails::new(video, collection, path, suggested_series);
 
     details.checksum = match calculate_checksum(&path).await {
         Ok(checksum) => checksum,

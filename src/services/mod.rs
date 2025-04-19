@@ -7,6 +7,7 @@ mod search;
 mod task_manager;
 mod video_information;
 mod youtube;
+mod sharing;
 
 pub use logging::{TVSERVER_LOG, DBTOOL_LOG, setup_logging};
 pub use media_store::MediaStore;
@@ -16,3 +17,4 @@ pub use search::{SearchEngine, SearchEngineMap, SearchService};
 pub use task_manager::TaskManager;
 pub use video_information::MetaDataManager;
 pub use youtube::{YoutubeClient, YoutubeFetcher, YoutubeResult};
+pub use sharing::SharingService;

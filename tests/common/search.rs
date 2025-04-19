@@ -8,13 +8,14 @@ use tvserver::domain::traits::Searcher;
 use tvserver::services::{
     PirateClient, SearchEngine, SearchService, YoutubeClient,
 };
+use super::get_task_manager;
 
 pub fn get_search_service(engine: SearchEngine) -> SearchService {
-    let spawner = get_no_spawner();
+    let task_manager = get_task_manager();
 
     let engines = vec![Arc::new(engine)];
 
-    SearchService::new(spawner, engines)
+    SearchService::new(task_manager, engines)
 }
 
 pub async fn get_youtube_search(fixture: &str) -> SearchService {

@@ -90,32 +90,19 @@ impl MediaStorer for MediaStore {
         Ok(())
     }
 
-    /// Rename (move) a media file.
-    async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()> {
-        let current_path = Path::new(current);
-        let parent_dir = current_path.parent()
-            .ok_or_else(|| anyhow::anyhow!("No parent directory found for {:?}", current_path))?;
-        let new_path = parent_dir.join(new_name);
-        self.store.rename(current, new_path.to_str().unwrap_or_default()).await?;
-        Ok(())
-    }
-
     /// Delete a media file, ensuring that the file path is within the movie directory.
-    async fn delete(&self, path: &str) -> anyhow::Result<()> {
-        let mut full_path = PathBuf::from(path);
+    async fn delete(&self, video_id: i64) -> anyhow::Result<()> {
+        let video = self.repo.retrieve_video(video_id).await?;
+        let mut full_path = video.get_full_path();
         let movie_dir = get_movie_dir();
         if !full_path.starts_with(&movie_dir) {
             full_path = PathBuf::from(movie_dir).join(full_path);
         }
+        // there's a race here, where the video is deleted from the filesystem but
+        // could be picked up by the media checker and queued for insertion into 
+        // the database.
         self.store.delete(full_path.to_str().unwrap_or_default()).await?;
+        self.repo.delete_video(video_id).await?;
         Ok(())
-    }
-
-    /// Construct a local path for a video within a collection.
-    fn as_local_path(&self, collection: &str, video: &str) -> String {
-        let movie_dir = PathBuf::from(get_movie_dir());
-        movie_dir.join(collection).join(video)
-            .to_string_lossy()
-            .to_string()
     }
 }

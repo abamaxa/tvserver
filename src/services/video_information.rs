@@ -2,6 +2,17 @@ use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSe
 use crate::domain::services::generate_video_metadatas;
 use crate::domain::traits::Repository;
 use tokio::task::JoinHandle;
+use tokio::sync::Semaphore;
+use std::sync::Arc;
+use once_cell::sync::Lazy;
+
+// Create a static semaphore with a capacity of half the number of CPUs
+static WORKER_SEMAPHORE: Lazy<Arc<Semaphore>> = Lazy::new(|| {
+    let num_cpus = num_cpus::get();
+    let concurrent_limit = std::cmp::max(1, num_cpus / 2);
+    tracing::info!("Using {} CPU cores, limiting to {} concurrent metadata tasks", num_cpus, concurrent_limit);
+    Arc::new(Semaphore::new(concurrent_limit))
+});
 
 pub struct MetaDataManager {
     repo: Repository,
@@ -39,19 +50,31 @@ impl MetaDataManager {
                 },
                 Err(e) => tracing::error!("event loop got an error: {}", e)
             }
-            //tracing::info!("event loop receiver len: {}", self.receiver.len());
         }
     }
 
     async fn handle_media_event(&self, event: MediaEvent) {
-        let _ = match event {
+        match event {
             MediaEvent::MediaAvailable(event) => {
-                if let Err(err) = generate_video_metadatas(event.full_path, self.repo.clone(), event.search).await {
-                    match err.code {
-                        // MetaDataErrorCode::ZeroFileSize => ,
-                        _ => tracing::error!("processing MediaAvailable: {}", err)
-                    };
-                }
+                // Clone the values needed for the task
+                let full_path = event.full_path;
+                let search = event.search;
+                let repo = self.repo.clone();
+                let semaphore = WORKER_SEMAPHORE.clone();
+                
+                // Spawn a new task to process the media event
+                tokio::spawn(async move {
+                    // Acquire a permit from the semaphore, which will limit concurrent tasks
+                    let permit = semaphore.acquire().await.unwrap();
+                    
+                    // Process the media event
+                    if let Err(err) = generate_video_metadatas(full_path, repo, search).await {
+                        tracing::error!("processing MediaAvailable: {}", err);
+                    }
+                    
+                    // Permit is automatically dropped when it goes out of scope
+                    drop(permit);
+                });
             },
             _ => return,
         };

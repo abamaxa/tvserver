@@ -19,7 +19,7 @@ async fn test_video_stream() -> Result<()> {
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
 
-    let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
 
     let store = Arc::new(MediaStore::new(file_storer, repo));
 

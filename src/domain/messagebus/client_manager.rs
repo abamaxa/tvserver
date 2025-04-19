@@ -1,5 +1,5 @@
 use crate::domain::messages::{PlayerListItem, RemoteMessage};
-use crate::domain::traits::RemotePlayer;
+use crate::domain::traits::{RemotePlayer, SendError};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -106,7 +106,14 @@ impl MessengerMap {
             }
 
             if let Err(e) = client.client.send(RemoteMessage::Close(key)).await {
-                tracing::info!("error sending close to {}: {}", key, e);
+                match e {
+                    SendError::Disconnected(msg) => {
+                        tracing::info!("client already disconnected {}: {}", key, msg);
+                    },
+                    SendError::Other(msg) => {
+                        tracing::error!("error sending close to {}: {}", key, msg);
+                    }
+                }
             }
         }
 
@@ -138,11 +145,21 @@ impl MessengerMap {
         let message = RemoteMessage::Ping(ping_msg);
 
         let mut js = JoinSet::new();
-        for item in self.inner.values() {
+        for (addr, item) in self.inner.iter() {
+            let client_addr = *addr;
             js.spawn(
-                (|client: Arc<dyn RemotePlayer>, message: RemoteMessage| async move {
-                    client.send(message).await
-                })(item.client.clone(), message.clone()),
+                (|client: Arc<dyn RemotePlayer>, message: RemoteMessage, addr: SocketAddr| async move {
+                    if let Err(err) = client.send(message).await {
+                        match err {
+                            SendError::Disconnected(msg) => {
+                                tracing::debug!("ping to disconnected client {}: {}", addr, msg);
+                            },
+                            SendError::Other(msg) => {
+                                tracing::error!("error sending ping to {}: {}", addr, msg);
+                            }
+                        }
+                    }
+                })(item.client.clone(), message.clone(), client_addr),
             );
         }
 
@@ -158,11 +175,25 @@ impl MessengerMap {
                 }
                 if let Some(message) = &item.last_message {
                     if let Err(err) = destination.client.send(message.clone()).await {
-                        tracing::error!("could not send last message {}, {}", to_host, err);
+                        match err {
+                            SendError::Disconnected(msg) => {
+                                tracing::warn!("could not send last message to disconnected client {}: {}", to_host, msg);
+                            },
+                            SendError::Other(msg) => {
+                                tracing::error!("could not send last message {}: {}", to_host, msg);
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    pub fn get_all_clients(&self) -> HashMap<SocketAddr, Arc<dyn RemotePlayer>> {
+        self.inner
+            .iter()
+            .map(|(key, client)| (*key, client.client.clone()))
+            .collect()
     }
 
     pub fn get_clients(&self, exclude: SocketAddr) -> Vec<Arc<dyn RemotePlayer>> {

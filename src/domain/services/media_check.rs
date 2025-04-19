@@ -165,7 +165,7 @@ mod tests {
     async fn test_check_video_info() -> Result<()> {
         let (tx, _rx1) = mpsc::channel(16);
         let filer: FileStorer = Arc::new(FileSystemStore::new("/Users/chris2/Movies"));
-        let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+        let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
         let store = MediaCheck::new(filer, repo, tx);
 
         store.check_video_information().await?;

@@ -16,7 +16,7 @@ pub async fn get_context(
     
     let messenger = MessageExchange::new(
         local_message_exchange.new_sender(), 
-        local_message_exchange.listen_for_messages("MessageExchange", MessageFilter::All).await?
+        local_message_exchange.listen_for_messages( MessageFilter::All).await?
     );
 
     Ok(Context::new(
@@ -27,6 +27,7 @@ pub async fn get_context(
         repository,
         checker,
         local_message_exchange,
+        None,
     ))
 }
 

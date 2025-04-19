@@ -10,6 +10,7 @@ use std::path;
 use serde_json;
 
 use crate::domain::config::get_database_migration_dir;
+use crate::domain::messages::{LocalMessage, LocalMessageSender, VideoEvent};
 use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata, CollectionItem};
 use crate::domain::traits::Databaser;
 use itertools::Itertools;
@@ -18,11 +19,12 @@ const MEMORY_DB_URL: &str = ":memory:";
 
 pub struct SqlRepository {
     pool: SqlitePool,
+    sender: Option<LocalMessageSender>,
 }
 
 
 impl SqlRepository {
-    pub async fn new(url: &str) -> Result<Self, Error> {
+    pub async fn new(url: &str, sender: Option<LocalMessageSender>) -> Result<Self, Error> {
         if url != MEMORY_DB_URL && !Sqlite::database_exists(&url).await.unwrap_or(false) {
             Sqlite::create_database(&url).await?;
         }
@@ -31,7 +33,7 @@ impl SqlRepository {
 
         SqlRepository::do_migrations(&pool).await?;
 
-        Ok(Self { pool })
+        Ok(Self { pool, sender })
     }
 
     async fn do_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
@@ -76,6 +78,7 @@ impl SqlRepository {
             updated_on: row.get("updated_on"),
             play_from: None,
             last_viewed: None,
+            dir_path: None,
         }
     }
 
@@ -97,8 +100,8 @@ impl Databaser for SqlRepository {
         let thumbnail = serde_json::to_string(&details.thumbnail).unwrap_or_default();
         let state: i32 = details.state as i32;
 
-        sqlx::query!(
-            r#"
+        // Using raw query to handle both conflict scenarios directly
+        let query = r#"
             INSERT INTO video_details (
                 checksum, 
                 video, 
@@ -115,72 +118,128 @@ impl Databaser for SqlRepository {
                 aspect_width, 
                 aspect_height, 
                 audio_tracks, 
+                probe_data,
                 search_phrase,
                 state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(checksum) DO UPDATE SET
-                video = excluded.video, 
-                collection = excluded.collection, 
-                description = excluded.description, 
-                series_title = excluded.series_title, 
-                season = excluded.season, 
-                episode = excluded.episode, 
-                episode_title = excluded.episode_title, 
-                thumbnail = excluded.thumbnail, 
-                duration = excluded.duration, 
-                width = excluded.width, 
-                height = excluded.height, 
-                aspect_width = excluded.aspect_width, 
-                aspect_height = excluded.aspect_height, 
-                audio_tracks = excluded.audio_tracks, 
-                search_phrase = excluded.search_phrase,
-                state = state,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(collection, video) DO UPDATE SET
+                checksum = ?,
+                description = ?,
+                series_title = ?,
+                season = ?,
+                episode = ?,
+                episode_title = ?,
+                thumbnail = ?,
+                duration = ?,
+                width = ?,
+                height = ?,
+                aspect_width = ?,
+                aspect_height = ?,
+                audio_tracks = ?,
+                probe_data = ?,
+                search_phrase = ?,
+                state = ?,
                 updated_on = CURRENT_TIMESTAMP
-            WHERE
-                (
-                    video != excluded.video OR
-                    collection != excluded.collection OR
-                    description != excluded.description OR
-                    series_title != excluded.series_title  OR
-                    season != excluded.season OR 
-                    episode != excluded.episode OR 
-                    episode_title != excluded.episode_title OR 
-                    thumbnail != excluded.thumbnail OR
-                    duration != excluded.duration OR
-                    width != excluded.width OR
-                    height != excluded.height OR
-                    aspect_width != excluded.aspect_width OR
-                    aspect_height != excluded.aspect_height OR
-                    audio_tracks != excluded.audio_tracks OR
-                    state != excluded.state
-                ) AND (
-                    excluded.width != 0 AND
-                    excluded.height != 0 AND
-                    excluded.duration != 0
-                )
-            "#,
-            details.checksum,
-            details.video,
-            details.collection,
-            details.description,
-            details.series.series_title,
-            details.series.season,
-            details.series.episode,
-            details.series.episode_title,
-            thumbnail,
-            details.metadata.duration,
-            details.metadata.width,
-            details.metadata.height,
-            details.metadata.aspect_width,
-            details.metadata.aspect_height,
-            details.metadata.audio_tracks,
-            details.search_phrase,
-            state
-        )
-        .execute(&self.pool)
-        .await
-        .map(|result| result.last_insert_rowid()) // retrieve ID of last inserted row
+            ON CONFLICT(checksum) DO UPDATE SET
+                video = ?,
+                collection = ?,
+                description = ?,
+                series_title = ?,
+                season = ?,
+                episode = ?,
+                episode_title = ?,
+                thumbnail = ?,
+                duration = ?,
+                width = ?,
+                height = ?,
+                aspect_width = ?,
+                aspect_height = ?,
+                audio_tracks = ?,
+                probe_data = ?,
+                search_phrase = ?,
+                state = ?,
+                updated_on = CURRENT_TIMESTAMP
+        "#;
+
+        // Execute with all bindings (for INSERT, then UPDATE)
+        let result = sqlx::query(query)
+            // Values for the INSERT
+            .bind(details.checksum)
+            .bind(&details.video)
+            .bind(&details.collection)
+            .bind(&details.description)
+            .bind(&details.series.series_title)
+            .bind(&details.series.season)
+            .bind(&details.series.episode)
+            .bind(&details.series.episode_title)
+            .bind(&thumbnail)
+            .bind(details.metadata.duration)
+            .bind(details.metadata.width as i32)
+            .bind(details.metadata.height as i32)
+            .bind(details.metadata.aspect_width as i32)
+            .bind(details.metadata.aspect_height as i32)
+            .bind(details.metadata.audio_tracks as i32)
+            .bind(&details.metadata.probe_data)
+            .bind(&details.search_phrase)
+            .bind(state)
+            // Values for the ON CONFLICT UPDATE (video, collection)
+            .bind(details.checksum)
+            .bind(&details.description)
+            .bind(&details.series.series_title)
+            .bind(&details.series.season)
+            .bind(&details.series.episode)
+            .bind(&details.series.episode_title)
+            .bind(&thumbnail)
+            .bind(details.metadata.duration)
+            .bind(details.metadata.width as i32)
+            .bind(details.metadata.height as i32)
+            .bind(details.metadata.aspect_width as i32)
+            .bind(details.metadata.aspect_height as i32)
+            .bind(details.metadata.audio_tracks as i32)
+            .bind(&details.metadata.probe_data)
+            .bind(&details.search_phrase)
+            .bind(state)
+            // Values for the ON CONFLICT UPDATE (checksum)
+            .bind(&details.video)
+            .bind(&details.collection)
+            .bind(&details.description)
+            .bind(&details.series.series_title)
+            .bind(&details.series.season)
+            .bind(&details.series.episode)
+            .bind(&details.series.episode_title)
+            .bind(&thumbnail)
+            .bind(details.metadata.duration)
+            .bind(details.metadata.width as i32)
+            .bind(details.metadata.height as i32)
+            .bind(details.metadata.aspect_width as i32)
+            .bind(details.metadata.aspect_height as i32)
+            .bind(details.metadata.audio_tracks as i32)
+            .bind(&details.metadata.probe_data)
+            .bind(&details.search_phrase)
+            .bind(state)
+            .execute(&self.pool)
+            .await;
+
+        if let Err(e) = result {
+            tracing::error!("Error saving video: {}", e);
+            return Err(e);
+        }
+
+        let last_id = result.unwrap().last_insert_rowid();
+
+        if let Some(sender) = &self.sender {
+            let message = match last_id {
+                0 => LocalMessage::Video(VideoEvent::new_video_changed_event(details.clone())),
+                _ => LocalMessage::Video(VideoEvent::new_video_added_event(details.clone())),
+            };
+            
+            if let Err(e) = sender.send(message).await {
+                tracing::error!("Error sending video event {} {}", last_id, e);
+            }
+        }
+
+        Ok(last_id)
     }
 
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error> {
@@ -365,27 +424,8 @@ impl Databaser for SqlRepository {
         Ok(Self::from_record(&row))
     }
 
-    async fn retrieve_video_by_name_and_collection(&self, name: &str, collection: &str) -> Result<VideoDetails, sqlx::Error> {
-        let row = sqlx::query(
-            r#"
-            SELECT 
-                *
-            FROM 
-                video_details 
-            WHERE 
-                video = ? and collection = ?
-            "#
-        )
-        .bind(name)
-        .bind(collection)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(Self::from_record(&row))
-    }
-
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error> {
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             DELETE FROM video_details 
             WHERE checksum = ?
@@ -394,7 +434,19 @@ impl Databaser for SqlRepository {
         )
         .execute(&self.pool)
         .await
-        .map(|result| result.rows_affected()) // return number of rows affected
+        .map(|result| result.rows_affected()); // return number of rows affected
+
+        if let Ok(rows) = result {
+            if rows > 0 {
+                if let Some(sender) = &self.sender {
+                    if let Err(e) = sender.send(LocalMessage::Video(VideoEvent::new_video_deleted_event(checksum))).await {
+                        tracing::error!("Error sending video deleted event {} {}", checksum, e);
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error> {
@@ -476,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_video_details() {
         // Create an in-memory SQLite database for testing.
-        let db = SqlRepository::new(MEMORY_DB_URL).await.unwrap();
+        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
         let now = Local::now().naive_local();
 
         // Define a VideoDetails instance.
@@ -507,6 +559,7 @@ mod tests {
             updated_on: now,
             play_from: None,
             last_viewed: None,
+            dir_path: None,
         };
 
         // Save the VideoDetails instance.

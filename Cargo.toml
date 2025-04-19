@@ -41,9 +41,15 @@ transmission-rpc = "0.4.1"
 urlencoding = "2.1.2"
 itertools = "0.11.0"
 librqbit = "8.0.0"
+num_cpus = "1.16.0"
+once_cell = "1.21.3"
 
 [profile.release]
-strip = "debuginfo"
+codegen-units = 1 # Allows LLVM to perform better optimization.
+lto = true # Enables link-time-optimizations.
+opt-level = "s" # Prioritizes small binary size. Use `3` if you prefer speed.
+panic = "abort" # Higher performance by disabling panic handlers.
+strip = true # Ensures debug symbols are removed.
 
 [features]
 vlc = []

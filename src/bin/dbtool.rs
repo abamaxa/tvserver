@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
 
     let metadata_manager = MetaDataManager::consume(
         context.get_repository(),
-        context.listen_for_messages("MetaDataManager", MessageFilter::All).await?,
+        context.listen_for_messages(MessageFilter::All).await?,
         context.get_local_sender(),
     );
 

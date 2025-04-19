@@ -1,5 +1,5 @@
 use crate::domain::messages::{ReceivedRemoteMessage, RemoteMessage};
-use crate::domain::traits::RemotePlayer;
+use crate::domain::traits::{RemotePlayer, SendError};
 use async_trait::async_trait;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -19,10 +19,14 @@ pub struct RemoteBrowserPlayer {
 
 #[async_trait]
 impl RemotePlayer for RemoteBrowserPlayer {
-    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String> {
+    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, SendError> {
         match self.in_tx.send(message).await {
             Ok(_) => Ok(StatusCode::OK),
-            Err(err) => Err(err.to_string()),
+            Err(err) => {
+                // In tokio's channel SendError, we can only tell that the receiver is closed
+                // Check if the receiver has been closed (dropped)
+                Err(SendError::Disconnected(err.to_string()))
+            }
         }
     }
 }

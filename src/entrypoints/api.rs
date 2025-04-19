@@ -4,11 +4,10 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use crate::adaptors::RemoteBrowserPlayer;
 use crate::domain::messages::{
     ClientLogMessage, Command, ConversionRequest, DownloadRequest,
-    MediaItem, PlayRequest, PlayerList, RenameRequest,
-    Response,
+    MediaItem, PlayRequest, PlayerList, Response,
 };
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
-use crate::domain::traits::Searcher;
+use crate::domain::traits::{MediaSharer, Searcher};
 use crate::domain::{SearchEngineType, TaskType};
 use axum::routing::any;
 use axum::{
@@ -17,7 +16,7 @@ use axum::{
     extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post, patch},
     Json, Router,
 };
 use super::context::Context;
@@ -41,8 +40,8 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/media", get(list_root_collection))
         .route("/api/media/{*media}", get(list_collection))
         .route("/api/media/{*media}", delete(delete_video))
-        .route("/api/media/{*media}", put(rename_video))
         .route("/api/media/{*media}", post(convert_video))
+        .route("/api/media/{*media}", patch(share_video))
         .route("/api/remote", get(list_player))
         .route("/api/remote/control", post(remote_command))
         .route("/api/remote/play", post(remote_play))
@@ -196,7 +195,7 @@ async fn list_player(State(state): State<SharedState>) -> (StatusCode, Json<Play
 }
 
 #[debug_handler]
-async fn delete_video(state: State<SharedState>, Path(collection): Path<String>) -> StdResponse {
+async fn delete_video(state: State<SharedState>, video_id: Path<i64>) -> StdResponse {
     /*
     Cannot delete filenames with the `#` character in the name, think this is due
     to axum seeing everything past the # as being part of the query instead of the
@@ -206,36 +205,34 @@ async fn delete_video(state: State<SharedState>, Path(collection): Path<String>)
     'Dragons Den - S19EP5 - Berczy, Nick & Nick #dragonsdennew [Zlb1y7bLAlQ].webm'
     '#Dragons Dens - S19EP6 - LONDON NOOTROPICS [y9W2MTHwGLE].webm'
      */
-    match state.get_store().delete(&collection).await {
-        Ok(()) => (OK, Json(Response::success(collection))),
+    match state.get_store().delete(video_id.0).await {
+        Ok(()) => (OK, Json(Response::success("success".to_string()))),
         Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 #[debug_handler]
-async fn rename_video(
-    state: State<SharedState>,
-    Path(collection): Path<String>,
-    Json(params): Json<RenameRequest>,
-) -> StdResponse {
-    match state.get_store().rename(&collection, &params.new_name).await {
-        Ok(_) => (OK, Json(Response::success(params.new_name))),
-        _ => std_error(NOT_FOUND, collection),
+async fn share_video(state: State<SharedState>, video_id: Path<String>) -> StdResponse {
+    match state.get_sharing() {
+        Some(sharing) => {
+            match sharing.share(&video_id.0).await {
+                Ok(()) => (OK, Json(Response::success("success".to_string()))),
+                Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        }
+        None => std_error(INTERNAL_SERVER_ERROR, "sharing not enabled".to_string()),
     }
 }
 
 #[debug_handler]
 async fn convert_video(
     state: State<SharedState>,
-    collection: Path<String>,
+    video_id: Path<i64>,
     request: Json<ConversionRequest>,
 ) -> StdResponse {
-    if let Some(conversion) = Conversion::find(&request.0.name) {
-        let collection = state.get_store().as_local_path("", &collection);
-        conversion.execute(state.get_spawner(), &collection).await;
-        (OK, Json(Response::success("conversion queued".to_string())))
-    } else {
-        std_error(NOT_FOUND, format!("{} not recognized", request.0.name))
+    match Conversion::do_conversion(state.0, &request.0.name, video_id.0).await {
+        Ok(_) => (OK, Json(Response::success("conversion queued".to_string()))),
+        Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 

@@ -1,5 +1,7 @@
 use crate::domain::algorithm::get_next_version_name;
 use crate::domain::traits::{ProcessSpawner, Task};
+use crate::entrypoints::SharedState;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -94,6 +96,20 @@ pub const AVAILABLE_CONVERSIONS: [Conversion; 8] = [
 ];
 
 impl Conversion {
+    pub async fn do_conversion(state: SharedState, name: &str, video_id: i64) -> Result<Task> {
+        let conversion = Conversion::find(name)
+            .ok_or_else(|| anyhow::anyhow!("{} not recognized", name))?;
+            
+        let video = state.get_repository().retrieve_video(video_id).await?;
+        
+        conversion.execute(
+            state.get_spawner(), 
+            &video.get_full_path().to_string_lossy().to_string()
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Failed to create conversion task"))
+    }
+
     pub fn find(name: &str) -> Option<&Conversion> {
         AVAILABLE_CONVERSIONS
             .iter()

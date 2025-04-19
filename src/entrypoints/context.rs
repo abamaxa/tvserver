@@ -4,15 +4,15 @@ use sqlx::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::adaptors::{FileSystemStore, HTTPClient, SqlRepository, TokioProcessSpawner, TorrentFetcher, YoutubeFetcher};
-use crate::domain::config::{get_database_url, get_google_key, get_movie_dir};
+use crate::adaptors::{FileSystemStore, HTTPClient, SqlRepository, TelegramBot, TokioProcessSpawner, TorrentFetcher, YoutubeFetcher};
+use crate::domain::config::{get_database_url, get_google_key, get_movie_dir, get_telegram_token, get_telegram_chat_id};
 use crate::domain::messagebus::{LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter};
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender, RemoteMessage, Response};
 use crate::domain::services::MediaCheck;
 use crate::domain::traits::FileStorer;
 use crate::domain::SearchEngineType;
 use crate::services::{
-    MediaStore, PirateClient, SearchEngine, SearchService, TaskManager, YoutubeClient
+    MediaStore, PirateClient, SearchEngine, SearchService, TaskManager, YoutubeClient, SharingService
 };
 use crate::domain::traits::{Checker, ProcessSpawner, Repository, Storer};
 
@@ -25,6 +25,7 @@ pub struct Context {
     task_manager: Arc<TaskManager>,
     repository: Repository,
     local_message_exchange: LocalMessageExchange,
+    sharing: Option<Arc<SharingService>>,
 }   
 
 impl Context {
@@ -36,6 +37,7 @@ impl Context {
         repository: Repository,
         checker: Checker,
         local_message_exchange: LocalMessageExchange,
+        sharing: Option<Arc<SharingService>>,
     ) -> Context {
         Context {
             store,
@@ -45,6 +47,7 @@ impl Context {
             task_manager,
             repository,
             local_message_exchange,
+            sharing,
         }
     }
 
@@ -68,12 +71,8 @@ impl Context {
         self.local_message_exchange.new_sender()
     }
 
-    pub async fn listen_for_messages(
-        &self,
-        key: &str,
-        filter: MessageFilter,
-    ) -> Result<LocalMessageReceiver, LocalMessageExchangeError> {
-        self.local_message_exchange.listen_for_messages(key, filter).await
+    pub async fn listen_for_messages(&self, filter: MessageFilter) -> Result<LocalMessageReceiver, LocalMessageExchangeError> {
+        self.local_message_exchange.listen_for_messages(filter).await
     }
 
     pub fn get_checker(&self) -> Checker {
@@ -95,8 +94,10 @@ impl Context {
     pub fn get_messenger(&self) -> &MessageExchange {
         &self.messenger
     }
-    
-    
+
+    pub fn get_sharing(&self) -> Option<Arc<SharingService>> {
+        self.sharing.clone()
+    }
 }
 
 pub async fn create_context() -> Result<Context, Error> {
@@ -135,10 +136,12 @@ pub async fn create_context() -> Result<Context, Error> {
 
     let messenger = MessageExchange::new(
         local_message_exchange.new_sender(), 
-        local_message_exchange.listen_for_messages("MessageExchange", MessageFilter::All).await.unwrap()
+        local_message_exchange.listen_for_messages( MessageFilter::All).await.unwrap()
     );
 
-    let repository = Arc::new(SqlRepository::new(&get_database_url()).await?);
+    let repository = Arc::new(
+        SqlRepository::new(&get_database_url(), Some(local_message_exchange.new_sender())).await?
+    );
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
 
@@ -147,6 +150,12 @@ pub async fn create_context() -> Result<Context, Error> {
         repository.clone(), 
         local_message_exchange.new_sender())
     );
+
+    let sharing = Arc::new(SharingService::new(
+        Arc::new(TelegramBot::new(&get_telegram_chat_id(), &get_telegram_token())),
+        repository.clone(),
+        spawner.clone()
+    ));
     
     Ok(Context::new(
         Arc::new(MediaStore::new(file_storer, repository.clone())),
@@ -156,5 +165,6 @@ pub async fn create_context() -> Result<Context, Error> {
         repository,
         checker,
         local_message_exchange,
+        Some(sharing)
     ))
 }

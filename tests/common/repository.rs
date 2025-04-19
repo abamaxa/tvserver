@@ -3,5 +3,5 @@ use tvserver::adaptors::SqlRepository;
 use tvserver::domain::traits::Repository;
 
 pub async fn get_repository() -> Repository {
-    Arc::new(SqlRepository::new(":memory:").await.unwrap())
+    Arc::new(SqlRepository::new(":memory:", None).await.unwrap())
 }

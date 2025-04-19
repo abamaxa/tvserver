@@ -60,7 +60,7 @@ pub fn skip_file(name: &str) -> bool {
         ".rm", ".rmvb", ".asf", ".amv", ".mp4", ".m4p", ".m4v", ".mpg",
         ".mp2", ".mpeg", ".mpe", ".mpv", ".mpg", ".mpeg", ".m2v", ".m4v",
         ".svi", ".3gp", ".3g2", ".mxf", ".roq", ".nsv", ".flv", ".f4v",
-        ".f4p", ".f4a", ".f4b",
+        ".f4p", ".f4a", ".f4b", ".srt"
     ];
 
     // Convert the file name to lowercase and extract the extension.
@@ -117,3 +117,4 @@ mod tests {
         }
     }
 }
+

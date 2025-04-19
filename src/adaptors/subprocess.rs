@@ -85,8 +85,14 @@ impl AsyncSubProcess {
         tokio::spawn(async move {
             match Self::run(&cmd, args.clone(), stdout_tx).await {
                 Ok(exit_status) => {
-                    *status.lock().await = Some(exit_status);
-                    tracing::info!("succeeded - {} {} {:?}", name, cmd, args)
+                    if exit_status.success() {
+                        *status.lock().await = Some(exit_status);
+                        tracing::info!("succeeded - {} {} {:?}", name, cmd, args)
+                    } else {
+                        let exit_code = exit_status.code().unwrap_or(0);
+                        *error_string.lock().await = format!("failed with code {}", exit_code);
+                        tracing::error!("failed exit code: {} - {} {} {:?}", exit_code, name, cmd, args)
+                    }
                 }
                 Err(e) => {
                     *error_string.lock().await = e.to_string();
@@ -97,26 +103,46 @@ impl AsyncSubProcess {
     }
 
     pub async fn run(cmd: &str, args: Vec<String>, output: Sender<String>) -> Result<ExitStatus> {
-        let mut child = Command::new(cmd)
+        let process_result = Command::new(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .args(args)
-            .spawn()
-            .expect("spawn child");
+            .args(&args)
+            .spawn();
+        
+        let mut child = match process_result {
+            Ok(child) => child,
+            Err(e) => {
+                // If the command failed to spawn, report the error via the output channel
+                let error_msg = format!("Failed to spawn command '{}': {}", cmd, e);
+                let _ = output.send(error_msg.clone()).await;
+                tracing::error!("{}", error_msg);
+                return Err(e);
+            }
+        };
 
-        let stdout = child.stdout.take().unwrap();
+        // Make sure we have both stdout and stderr
+        let stdout = child.stdout.take().expect("stdout pipe missing");
+        let stderr = child.stderr.take().expect("stderr pipe missing");
+        
         let output2 = output.clone();
 
+        // Spawn tasks to handle stdout and stderr
         let out_task = tokio::spawn(async move { Self::copy_stdio(stdout, output2).await });
-
-        let stderr = child.stderr.take().unwrap();
         let err_task = tokio::spawn(async move { Self::copy_stdio(stderr, output).await });
 
+        // Wait for the process to complete
         let result = child.wait().await;
 
-        out_task.abort();
-        err_task.abort();
+        // Give a bit of time for any buffered stdout/stderr to be processed
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        
+        // Drop the child process to close the pipes which will cause the copy_stdio tasks to complete
+        drop(child);
+        
+        // Wait for the stdout/stderr tasks to complete instead of aborting them
+        // This ensures we capture all output, even if the command fails immediately
+        let _ = tokio::join!(out_task, err_task);
 
         result
     }
@@ -136,14 +162,37 @@ impl AsyncSubProcess {
         T: AsyncRead + Unpin,
     {
         let mut buffer = [0; 0x1000];
-        while let Ok(bytes_read) = child_stdout.read(&mut buffer).await {
-            let data = String::from_utf8(buffer[0..bytes_read].to_vec()).unwrap_or_default();
-            if let Err(e) = output.send(data).await {
-                tracing::error!("could not copy to channel: {}", e);
-                break;
+        loop {
+            match child_stdout.read(&mut buffer).await {
+                Ok(0) => {
+                    // EOF reached
+                    break;
+                }
+                Ok(bytes_read) => {
+                    let data = String::from_utf8(buffer[0..bytes_read].to_vec()).unwrap_or_default();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = output.send(data).await {
+                        tracing::error!("could not copy to channel: {}", e);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error reading from process output: {}", e);
+                    break;
+                }
             }
         }
     }
+
+    async fn get_last_message(&self) -> String {
+        match self.output.read().await.last() {
+            Some(msg) => msg.clone(),
+            _ => String::new(),
+        }
+    }
+
 }
 
 impl PartialEq<Self> for AsyncSubProcess {
@@ -157,10 +206,8 @@ impl Eq for AsyncSubProcess {}
 #[async_trait]
 impl TaskMonitor for AsyncSubProcess {
     async fn get_state(&self) -> TaskState {
-        let last_message = match self.output.read().await.last() {
-            Some(msg) => msg.clone(),
-            _ => String::new(),
-        };
+        let last_message = self.get_last_message().await;
+        let error_string = self.error_string.lock().await.clone();
 
         TaskState {
             key: self.get_key(),
@@ -170,7 +217,7 @@ impl TaskMonitor for AsyncSubProcess {
             eta: 0,
             percent_done: 0.0,
             size_details: "".to_string(),
-            error_string: self.error_string.lock().await.clone(),
+            error_string: format!("{} {}", error_string, last_message),
             rate_details: "".to_string(),
             process_details: last_message,
             task_type: TaskType::AsyncProcess,

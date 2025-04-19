@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::LocalMessageSender;
-use super::messages::{LocalMessage, MediaEvent};
+use super::media::MediaEvent;
+use super::local::LocalMessage;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

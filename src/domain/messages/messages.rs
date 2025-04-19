@@ -1,14 +1,11 @@
-use crate::domain::models::{CollectionDetails, VideoDetails};
-use crate::domain::traits::Storer;
+use crate::domain::models::VideoDetails;
 use crate::domain::TaskType;
-use chrono::{NaiveDate, Utc};
 use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tokio::sync::{broadcast, mpsc};
+
+use super::VideoEvent;
 
 lazy_static! {
     static ref DEFAULT_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 80);
@@ -22,6 +19,8 @@ pub struct RemotePlayerState {
     pub current_src: String,
     pub collection: String,
     pub video: String,
+    #[serde(rename = "videoId")]
+    pub video_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,6 +29,8 @@ pub enum RemoteMessage {
         command: String,
     },
     Play {
+        #[serde(rename = "videoId")]
+        video_id: String,
         url: String,
         collection: String,
         video: String,
@@ -54,75 +55,13 @@ pub enum RemoteMessage {
     Pong(SocketAddr),
 
     Close(SocketAddr),
+
+    LastState(VideoDetails),
+    CurrentTasks(Vec<TaskState>),
+
+    Video(Vec<VideoEvent>),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaAdded {
-    pub full_path: PathBuf,
-    pub search: Option<String>,
-    pub date: Option<NaiveDate>,
-}
-
-impl MediaAdded {
-    pub fn new(path: &Path, search: Option<String>) -> Self {
-        Self {
-            full_path: PathBuf::from(path),
-            search: search,
-            date: Some(NaiveDate::from(Utc::now().naive_utc())),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaMoved {
-    pub old_path: PathBuf,
-    pub new_path: PathBuf,
-}
-
-/*
-This event is generated when a file is downloaded, renamed, deleted and is used to trigger
-copying the file into the MediaStore, metadata generation and notifications to remote clients.
- */
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MediaEvent {
-    MediaAvailable(MediaAdded),
-    MediaMoved(MediaMoved),
-    MediaDeleted(PathBuf),
-}
-
-impl MediaEvent {
-    pub fn new_media(path: &Path, search: Option<String>) -> Self {
-        Self::MediaAvailable(MediaAdded::new(path, search))
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum MediaItem {
-    Collection(CollectionDetails),
-    Video(VideoDetails),
-    Error(String),
-}
-
-impl MediaItem {
-    pub fn error(message: &str) -> Self {
-        Self::Error(message.to_string())
-    }
-}
-
-impl From<std::io::Error> for MediaItem {
-    fn from(value: std::io::Error) -> Self {
-        Self::Error(value.to_string())
-    }
-}
-
-impl From<anyhow::Error> for MediaItem {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Error(value.to_string())
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceivedRemoteMessage {
@@ -152,6 +91,8 @@ pub struct PlayRequest {
     pub height: i32,
     pub aspect_width: i32,
     pub aspect_height: i32,
+    #[serde(rename = "videoId")]
+    pub video_id: String,
 }
 
 impl PlayRequest {
@@ -170,14 +111,8 @@ impl PlayRequest {
             height: self.height,
             aspect_width: self.aspect_width,
             aspect_height: self.aspect_height,
+            video_id: self.video_id.clone(),
         }
-    }
-
-    pub fn make_local_command(&self, store: &Storer) -> String {
-        format!(
-            "add file://{}",
-            store.as_local_path(&self.collection, &self.video)
-        )
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -237,11 +172,6 @@ pub struct ConversionRequest {
     pub name: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameRequest {
-    pub new_name: String,
-}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -259,13 +189,6 @@ pub struct TaskState {
     pub task_type: TaskType,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum LocalMessage {
-    Media(MediaEvent),
-    Task(Vec<TaskState>),
-}
-
 fn as_sockaddr(remote_address: &Option<String>) -> SocketAddr {
     match remote_address {
         Some(addr) => match SocketAddr::from_str(&addr) {
@@ -275,95 +198,3 @@ fn as_sockaddr(remote_address: &Option<String>) -> SocketAddr {
         _ => *DEFAULT_ADDRESS,
     }
 }
-
-#[serde_with::skip_serializing_none]
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatGPTRequest {
-    pub model: String,
-    pub messages: Vec<ChatGPTMessage>,
-    pub temperature: Option<f64>,
-    pub top_p: Option<f64>,
-    pub n: Option<i32>,
-    pub stream: Option<bool>,
-    pub stop: Option<Vec<String>>,
-    pub max_tokens: Option<i32>,
-    pub presence_penalty: Option<f64>,
-    pub frequency_penalty: Option<f64>,
-    pub logit_bias: Option<HashMap<String, f64>>,
-    pub user: Option<String>,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatGPTResponse {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub model: String,
-    pub usage: ChatGPTUsage,
-    pub choices: Vec<ChatGPTChoice>,
-}
-
-impl<'a> ChatGPTResponse {
-    pub fn get_all_content(&self) -> String {
-        self.choices
-            .iter()
-            .map(|c| c.message.content.to_string())
-            .collect::<Vec<String>>()
-            .join(" ")
-    }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatGPTUsage {
-    #[serde(rename = "prompt_tokens")]
-    pub prompt_tokens: i64,
-    #[serde(rename = "completion_tokens")]
-    pub completion_tokens: i64,
-    #[serde(rename = "total_tokens")]
-    pub total_tokens: i64,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatGPTChoice {
-    pub message: ChatGPTMessage,
-    #[serde(rename = "finish_reason")]
-    pub finish_reason: String,
-    pub index: i64,
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatGPTMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl ChatGPTMessage {
-    pub fn system(message: &str) -> Self {
-        Self {
-            role: "system".to_string(),
-            content: message.to_string(),
-        }
-    }
-
-    pub fn user(message: &str) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: message.to_string(),
-        }
-    }
-
-    pub fn assistant(message: &str) -> Self {
-        Self {
-            role: "assistant".to_string(),
-            content: message.to_string(),
-        }
-    }
-}
-
-pub type LocalMessageReceiver = broadcast::Receiver<LocalMessage>;
-pub type LocalMessageSender = mpsc::Sender<LocalMessage>;

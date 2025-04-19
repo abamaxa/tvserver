@@ -4,6 +4,19 @@ use regex::Regex;
 use std::{collections::HashSet, path::{Path, PathBuf}};
 use titlecase::titlecase;
 
+pub fn replace_extension(path: &str, new_extension: &str) -> String {
+    let path_obj = Path::new(path);
+    let stem = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    
+    match path_obj.parent() {
+        Some(parent) => parent.join(format!("{}{}", stem, new_extension))
+            .to_str()
+            .unwrap_or(path)
+            .to_string(),
+        None => format!("{}{}", stem, new_extension),
+    }
+}
+
 pub fn get_next_version_name(filename: &str, ext: Option<&str>) -> Option<String> {
     let path = Path::new(filename);
 

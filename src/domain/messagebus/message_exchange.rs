@@ -1,15 +1,14 @@
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
 
 use super::super::messages::{LocalMessage, PlayerListItem, ReceivedRemoteMessage, RemoteMessage, Response};
-use super::super::traits::RemotePlayer;
+use super::super::traits::{RemotePlayer, SendError};
 use super::client_manager::{ClientMap, MessengerMap};
 use axum::{http::StatusCode, Json};
 use std::net::SocketAddr;
 use std::ops::Sub;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
@@ -17,34 +16,19 @@ use tokio::time::sleep;
 pub struct MessageExchange {
     /*
     Tracks clients that are available to play media, e.g. Samsung TVs.
-
-    Queues:
-
-    File available/changed/deleted
-    Remote Message Received
-    Task Started/State/Complete
      */
     client_map: ClientMap,
-    sender: mpsc::Sender<ReceivedRemoteMessage>,
-    receiver: broadcast::Sender<ReceivedRemoteMessage>,
+    incoming_sender: mpsc::Sender<ReceivedRemoteMessage>,
 }
 
 impl MessageExchange {
     pub fn new(local_sender:LocalMessageSender, local_receiver:LocalMessageReceiver) -> Self {
         let client_map = Arc::new(RwLock::new(MessengerMap::new()));
-
-        let (sender, mut out_rx) = mpsc::channel::<ReceivedRemoteMessage>(100);
-
-        let (in_tx, _receiver) = broadcast::channel::<ReceivedRemoteMessage>(1);
+        let (incoming_sender, mut incoming_receiver) = mpsc::channel::<ReceivedRemoteMessage>(100);
 
         let _ = tokio::spawn(
-            (|client_map: ClientMap, broadcast: broadcast::Sender<ReceivedRemoteMessage>| async move {
-                let _hold = Arc::new(_receiver);
-                while let Some(msg) = out_rx.recv().await {
-                    if let Err(e) = broadcast.send(msg.clone()) {
-                        tracing::error!("could not send remote message: {}, {:?}", e, &msg);
-                    }
-
+            (|client_map: ClientMap| async move {
+                while let Some(msg) = incoming_receiver.recv().await {
                     MessageExchange::on_player_message(
                         client_map.clone(),
                         msg.from_address,
@@ -53,7 +37,7 @@ impl MessageExchange {
                     )
                     .await;
                 }
-            })(client_map.clone(), in_tx.clone()),
+            })(client_map.clone()),
         );
 
         let _ = tokio::spawn((|client_map: ClientMap| async move {
@@ -64,8 +48,7 @@ impl MessageExchange {
 
         let exchanger = Self {
             client_map: client_map.clone(),
-            receiver: in_tx,
-            sender,
+            incoming_sender,
         };
 
         // Start processing local messages
@@ -115,10 +98,17 @@ impl MessageExchange {
         _local_sender: LocalMessageSender,
     ) {
         let _ = match message {
+            RemoteMessage::Ping(who) => _ = who,
             RemoteMessage::Pong(who) => client_map.write().await.update_timestamp(&who),
             RemoteMessage::Close(who) => client_map.write().await.remove(who).await,
             RemoteMessage::SendLastState => {
                 client_map.read().await.send_last_message(player_key).await
+            }
+            RemoteMessage::State(state) => {
+                if let Err(e) = _local_sender.send(LocalMessage::PlayerState(state.clone())).await {
+                    tracing::error!("Error sending player state: {}", e);
+                }
+                Self::dispatch_message(client_map, player_key, RemoteMessage::State(state)).await
             }
             _ => Self::dispatch_message(client_map, player_key, message).await,
         };
@@ -145,7 +135,7 @@ impl MessageExchange {
                 result_set.spawn(async move {
                     match client.send(message).await {
                         Ok(result) => (result, Json(Response::success("success".to_string()))),
-                        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e))),
+                        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e.to_string()))),
                     }
                 });
             }
@@ -175,16 +165,12 @@ impl MessageExchange {
         // execute the command.
         match remote_client.send(command).await {
             Ok(result) => (result, Json(Response::success("success".to_string()))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e))),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e.to_string()))),
         }
     }
 
     pub fn get_sender(&self) -> mpsc::Sender<ReceivedRemoteMessage> {
-        self.sender.clone()
-    }
-
-    pub fn get_receiver(&self) -> broadcast::Receiver<ReceivedRemoteMessage> {
-        self.receiver.subscribe()
+        self.incoming_sender.clone()
     }
 
     pub async fn process_local_messages(client_map: ClientMap, mut local_rx: LocalMessageReceiver) {
@@ -204,8 +190,6 @@ impl MessageExchange {
     async fn on_local_message(client_map: &ClientMap, message: LocalMessage) {
         match message {
             LocalMessage::Media(media_event) => {
-                // Convert media event to appropriate remote message
-                // In Go this was: remoteMessage := messages.NewFromLocalVideoMessage(*message.Video)
                 let remote_message = RemoteMessage::Command { 
                     command: format!("media_event:{:?}", media_event) 
                 };
@@ -214,36 +198,35 @@ impl MessageExchange {
                 MessageExchange::broadcast_to_all(client_map, remote_message).await;
             }
             LocalMessage::Task(tasks) => {
-                /*if tasks.is_empty() {
-                    tracing::error!("invalid task list message: empty task vector");
-                    return;
-                }*/
-                
-                // Convert task list to appropriate remote message
-                // In Go this was: remoteMessage := messages.NewFromLocalTaskListMessage(message.Task)
-                let remote_message = RemoteMessage::Command { 
-                    command: format!("task_update:{} tasks", tasks.len()) 
-                };
+                let remote_message = RemoteMessage::CurrentTasks(tasks.clone());
                 
                 // Broadcast to all clients
                 MessageExchange::broadcast_to_all(client_map, remote_message).await;
-            }
+            },
+            LocalMessage::Video(video_event) => {
+                let remote_message = RemoteMessage::Video(vec![video_event.clone()]);
+                
+                // Broadcast to all clients
+                MessageExchange::broadcast_to_all(client_map, remote_message).await;
+            },
+            _ => tracing::warn!("Received unknown local message type: {:?}", message),
         }
     }
 
     async fn broadcast_to_all(client_map: &ClientMap, message: RemoteMessage) {
-        let clients = client_map.read().await.list_players();
+        let clients = client_map.read().await.get_all_clients();
         
-        for player in clients {
-            // Try to parse the socket address from the player name
-            if let Ok(addr) = SocketAddr::from_str(&player.name) {
-                if let Some(client) = client_map.read().await.get(addr) {
-                    if let Err(e) = client.send(message.clone()).await {
-                        tracing::error!("Error sending message to {}: {}", player.name, e);
+        for (key, player) in clients {
+            if let Err(e) = player.send(message.clone()).await {
+                match e {
+                    SendError::Disconnected(msg) => {
+                        tracing::info!("client already disconnected {}: {}", key, msg);
+                        client_map.write().await.remove(key).await;
+                    },
+                    SendError::Other(msg) => {
+                        tracing::error!("error sending message to {}: {}", key, msg);
                     }
                 }
-            } else {
-                tracing::error!("Invalid socket address format: {}", player.name);
             }
         }
     }

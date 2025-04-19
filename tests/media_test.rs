@@ -24,7 +24,7 @@ async fn test_rename_video() -> Result<()> {
     
     let file_storer: FileStorer = Arc::new(FileSystemStore::new("tests/fixtures/media_dir"));
 
-    let repo: Repository = Arc::new(SqlRepository::new(":memory:").await.unwrap());
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
 
     let store = Arc::new(MediaStore::new(file_storer, repo));
 

@@ -38,6 +38,7 @@ async fn test_local_play() -> Result<()> {
         height: 1080,
         aspect_width: 1920,
         aspect_height: 1080,
+        video_id: (1234567890 as i64).to_string(),
     };
 
     let body = client
@@ -61,7 +62,7 @@ async fn test_remote_play() -> Result<()> {
     let local_exchange = LocalMessageExchange::new();
     let exchange = MessageExchange::new(
         local_exchange.new_sender(),
-        local_exchange.listen_for_messages("MessageExchange", MessageFilter::All).await?
+        local_exchange.listen_for_messages(MessageFilter::All).await?
     );
 
     let key = SocketAddr::from_str("0.0.0.0:456").unwrap();
@@ -78,6 +79,7 @@ async fn test_remote_play() -> Result<()> {
         get_repository().await,
         get_checker(),
         local_exchange,
+        None,
     );
 
     let server = common::create_server(context, 57182).await;
@@ -92,6 +94,7 @@ async fn test_remote_play() -> Result<()> {
         height: 1080,
         aspect_width: 1920,
         aspect_height: 1080,
+        video_id: (1234567890 as i64).to_string(),
     };
 
     let body = client
