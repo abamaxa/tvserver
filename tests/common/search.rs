@@ -1,11 +1,11 @@
 use crate::common::{get_json_fetcher, get_no_spawner, get_text_fetcher, get_torrent_downloader};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tvserver::adaptors::YoutubeFetcher;
-use tvserver::domain::config::get_google_key;
-use tvserver::domain::SearchEngineType::{Torrent, YouTube};
-use tvserver::domain::traits::Searcher;
-use tvserver::services::{
+use app_lib::adaptors::YoutubeFetcher;
+use app_lib::domain::config::get_google_key;
+use app_lib::domain::SearchEngineType::{Torrent, YouTube};
+use app_lib::domain::traits::Searcher;
+use app_lib::services::{
     PirateClient, SearchEngine, SearchService, YoutubeClient,
 };
 use super::get_task_manager;

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tvserver::{domain::messagebus::MessageFilter, entrypoints::create_context, services::{setup_logging, MetaDataManager, DBTOOL_LOG}};
+use app_lib::{domain::messagebus::MessageFilter, entrypoints::create_context, services::{setup_logging, MetaDataManager, DBTOOL_LOG}};
 
 
 #[tokio::main]

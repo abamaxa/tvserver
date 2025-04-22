@@ -1,9 +1,9 @@
 use crate::domain::models::VideoDetails;
 use crate::domain::TaskType;
+use crate::domain::algorithm::get_video_url;
 use mockall::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
-use std::str::FromStr;
 
 use super::VideoEvent;
 
@@ -54,7 +54,7 @@ pub enum RemoteMessage {
     Ping(u64),
     Pong(SocketAddr),
 
-    Close(SocketAddr),
+    Close(String),
 
     LastState(VideoDetails),
     CurrentTasks(Vec<TaskState>),
@@ -65,7 +65,7 @@ pub enum RemoteMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceivedRemoteMessage {
-    pub from_address: SocketAddr,
+    pub from_address: String,
     pub message: RemoteMessage,
 }
 
@@ -76,8 +76,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn address(&self) -> SocketAddr {
-        as_sockaddr(&self.remote_address)
+    pub fn address(&self) -> String {
+        self.remote_address.clone().unwrap_or_default()
     }
 }
 
@@ -97,11 +97,7 @@ pub struct PlayRequest {
 
 impl PlayRequest {
     pub fn make_remote_command(&self) -> RemoteMessage {
-        let url: String = if self.collection.is_empty() {
-            format!("/api/stream/{}  ", self.video)
-        } else {
-            format!("/api/stream/{}/{}", self.collection, self.video)
-        };
+        let url: String = get_video_url(&self.collection, &self.video);
 
         RemoteMessage::Play {
             url,
@@ -115,8 +111,8 @@ impl PlayRequest {
         }
     }
 
-    pub fn address(&self) -> SocketAddr {
-        as_sockaddr(&self.remote_address)
+    pub fn address(&self) -> String {
+        self.remote_address.clone().unwrap_or_default()
     }
 }
 
@@ -187,14 +183,4 @@ pub struct TaskState {
     pub process_details: String,
     pub error_string: String,
     pub task_type: TaskType,
-}
-
-fn as_sockaddr(remote_address: &Option<String>) -> SocketAddr {
-    match remote_address {
-        Some(addr) => match SocketAddr::from_str(&addr) {
-            Ok(addr) => addr,
-            _ => *DEFAULT_ADDRESS,
-        },
-        _ => *DEFAULT_ADDRESS,
-    }
 }

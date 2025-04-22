@@ -8,12 +8,10 @@ use crate::common::{
 use anyhow::Result;
 use common::{get_checker, get_context};
 use tokio::task::JoinHandle;
-use tvserver::domain::config::MOVIE_DIR;
-use tvserver::services::SearchService;
-use tvserver::{
-    domain::models::{DownloadableItem, SearchResults},
-    domain::SearchEngineType
-};
+use app_lib::domain::config::MOVIE_DIR;
+use app_lib::services::SearchService;
+use app_lib::domain::models::{DownloadableItem, SearchResults};
+use app_lib::domain::SearchEngineType;
 
 #[tokio::test]
 async fn test_youtube() -> Result<()> {

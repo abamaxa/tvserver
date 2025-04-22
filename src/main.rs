@@ -1,4 +1,13 @@
+// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(feature = "webserver")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tvserver::run().await
+}
+
+#[cfg(not(feature = "webserver"))]
+fn main() {
+  app_lib::run();
 }

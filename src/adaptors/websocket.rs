@@ -49,7 +49,7 @@ impl RemoteBrowserPlayer {
                 if let Err(err) = on_message
                     .send(ReceivedRemoteMessage {
                         message,
-                        from_address: who,
+                        from_address: who.to_string(),
                     })
                     .await
                 {
@@ -148,7 +148,7 @@ async fn handle_receiving(
             }
             Message::Close(_) => {
                 tracing::info!("websocket {} close message", who);
-                if let Err(e) = output.send(RemoteMessage::Close(who)).await {
+                if let Err(e) = output.send(RemoteMessage::Close(who.to_string())).await {
                     tracing::error!("output.send close message failed: {}", e);
                 }
             }

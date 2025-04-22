@@ -4,10 +4,10 @@ use crate::common::{get_media_store, get_pirate_search, get_repository, get_task
 use anyhow::Result;
 use common::{get_checker, get_context};
 use reqwest::StatusCode;
-use tvserver::domain::config::MOVIE_DIR;
+use app_lib::domain::config::MOVIE_DIR;
 use std::collections::HashMap;
 use std::env;
-use tvserver::domain::messages::Response;
+use app_lib::domain::messages::Response;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
 

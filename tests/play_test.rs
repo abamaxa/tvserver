@@ -5,13 +5,13 @@ use crate::common::{
 };
 use anyhow::Result;
 use common::{get_checker, get_context};
-use tvserver::domain::config::MOVIE_DIR;
-use tvserver::domain::messages::PlayRequest;
+use app_lib::domain::config::MOVIE_DIR;
+use app_lib::domain::messages::PlayRequest;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tvserver::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
-use tvserver::{domain::messages::Response, entrypoints};
+use app_lib::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
+use app_lib::{domain::messages::Response, entrypoints};
 
 #[tokio::test]
 async fn test_local_play() -> Result<()> {
@@ -67,7 +67,7 @@ async fn test_remote_play() -> Result<()> {
 
     let key = SocketAddr::from_str("0.0.0.0:456").unwrap();
 
-    exchange.add_player(key, common::get_remote_player()).await;
+    exchange.add_player(key.to_string(), common::get_remote_player()).await;
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 

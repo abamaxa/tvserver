@@ -1,7 +1,8 @@
 use chrono::{NaiveDateTime, Local, Duration};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::HashMap, path::{Path, PathBuf}};
-use crate::domain::algorithm::{title_case, parse_file_path};
+use crate::domain::algorithm::{title_case, parse_file_path, get_video_url, get_thumbnails_url};
+use serde::ser::SerializeStruct;
 
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -152,7 +153,7 @@ impl From<i64> for VideoState {
 
 
 #[serde_with::skip_serializing_none]
-#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoDetails {
     pub video: String,
@@ -257,6 +258,50 @@ impl VideoDetails {
         } else {
             format!("{}/{}", self.collection, self.video)
         }
+    }
+}
+
+impl Serialize for VideoDetails {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Calculate the number of fields dynamically based on Option values and the added url
+        let mut field_count = 11; // Base fields + url
+        if self.search_phrase.is_none() { field_count -= 1; }
+        if self.play_from.is_none() { field_count -= 1; }
+        if self.last_viewed.is_none() { field_count -= 1; }
+
+        let mut state = serializer.serialize_struct("VideoDetails", field_count)?;
+        let thumbnails = get_thumbnails_url(&self.thumbnail);
+
+        state.serialize_field("video", &self.video)?;
+        state.serialize_field("collection", &self.collection)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("series", &self.series)?;
+        state.serialize_field("thumbnail", &thumbnails)?;
+        state.serialize_field("metadata", &self.metadata)?;
+        // Apply custom i64 to string serialization for checksum explicitly
+        state.serialize_field("checksum", &self.checksum.to_string())?;
+
+        // Handle Option fields honoring skip_serializing_none implicitly by checking is_some()
+        if let Some(ref sp) = self.search_phrase {
+            state.serialize_field("searchPhrase", sp)?;
+        }
+        state.serialize_field("state", &self.state)?;
+        state.serialize_field("createdOn", &self.created_on)?;
+        state.serialize_field("updatedOn", &self.updated_on)?;
+        if let Some(ref pf) = self.play_from {
+            state.serialize_field("playFrom", pf)?;
+        }
+        if let Some(ref lv) = self.last_viewed {
+             state.serialize_field("lastViewed", lv)?;
+        }
+
+        // Add the computed url field
+        state.serialize_field("url", &get_video_url(&self.collection, &self.video))?;
+
+        state.end()
     }
 }
 

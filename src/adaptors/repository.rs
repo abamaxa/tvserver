@@ -9,6 +9,7 @@ use sqlx::sqlite::{SqlitePool, SqliteRow};
 use std::path;
 use serde_json;
 
+use crate::domain::algorithm::get_thumbnails_url;
 use crate::domain::config::get_database_migration_dir;
 use crate::domain::messages::{LocalMessage, LocalMessageSender, VideoEvent};
 use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata, CollectionItem};
@@ -343,7 +344,7 @@ impl Databaser for SqlRepository {
             // Create a new CollectionItem and add it to the result list.
             series.push(CollectionItem {
                 collection: row.series_title.unwrap_or_default(),
-                thumbnail: thumbnails,
+                thumbnail: get_thumbnails_url(&thumbnails),
             });
         }
         Ok(series)

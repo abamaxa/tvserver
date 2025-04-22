@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tvserver::domain::traits::{MockMediaStorer, Storer};
+use app_lib::domain::traits::{MockMediaStorer, Storer};
 
 pub fn get_media_store() -> Storer {
     let mut mock_store = MockMediaStorer::new();

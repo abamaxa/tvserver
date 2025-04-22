@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tvserver::domain::messages::TaskState;
-use tvserver::domain::traits::{MockTaskMonitor, ProcessSpawner, Spawner, Task};
-use tvserver::domain::TaskType;
+use app_lib::domain::messages::TaskState;
+use app_lib::domain::traits::{MockTaskMonitor, ProcessSpawner, Spawner, Task};
+use app_lib::domain::TaskType;
 
 struct FakeSpawner {
     fixture: PathBuf,
