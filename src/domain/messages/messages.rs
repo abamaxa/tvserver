@@ -16,7 +16,6 @@ lazy_static! {
 pub struct RemotePlayerState {
     pub current_time: f64,
     pub duration: f64,
-    pub current_src: String,
     pub collection: String,
     pub video: String,
     #[serde(rename = "videoId")]
@@ -184,3 +183,12 @@ pub struct TaskState {
     pub error_string: String,
     pub task_type: TaskType,
 }
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyFromServerRequest {
+    pub host_url: String,
+    pub videos: Vec<VideoDetails>,
+}
+

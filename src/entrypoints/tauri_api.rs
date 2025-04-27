@@ -2,8 +2,7 @@ use std::sync::Arc;
 use tauri::ipc::Invoke;
 use crate::adaptors::TauriChannelPlayer;
 use crate::domain::messages::{
-    ClientLogMessage, Command, ConversionRequest, DownloadRequest,
-    MediaItem, PlayRequest, PlayerList, Response,
+    ClientLogMessage, Command, ConversionRequest, CopyFromServerRequest, DownloadRequest, MediaItem, PlayRequest, PlayerList, Response
 };
 use crate::domain::models::{Conversion, DownloadableItem, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
 use crate::domain::traits::MediaSharer;
@@ -142,9 +141,10 @@ pub async fn list_player(
 #[tauri::command]
 pub async fn delete_video(
     state: tauri::State<'_, SharedState>,
-    video_id: i64
+    video_id: String
 ) -> Result<Response, String> {
-    match state.get_store().delete(video_id).await {
+    let id = video_id.parse::<i64>().map_err(|e| format!("Invalid video ID: {}", e))?;
+    match state.get_store().delete(id).await {
         Ok(()) => Ok(Response::success("success".to_string())),
         Err(e) => Err(e.to_string()),
     }
@@ -169,10 +169,11 @@ pub async fn share_video(
 #[tauri::command]
 pub async fn convert_video(
     state: tauri::State<'_, SharedState>,
-    video_id: i64,
+    video_id: String,
     request: ConversionRequest
 ) -> Result<Response, String> {
-    match Conversion::do_conversion(state.inner().clone(), &request.name, video_id).await {
+    let id = video_id.parse::<i64>().map_err(|e| format!("Invalid video ID: {}", e))?;
+    match Conversion::do_conversion(state.inner().clone(), &request.name, id).await {
         Ok(_) => Ok(Response::success("conversion queued".to_string())),
         Err(e) => Err(e.to_string()),
     }
@@ -206,6 +207,17 @@ pub async fn channel_connect(
     Ok(Response::success("Channel connection established".to_string()))
 }
 
+#[tauri::command]
+pub async fn download_videos(
+    state: tauri::State<'_, SharedState>,
+    payload: CopyFromServerRequest
+) -> Result<Response, String> {
+    match state.get_search().download_videos(payload.host_url, payload.videos, state.get_local_sender()).await {
+        Ok(_) => Ok(Response::success("videos download queued".to_string())),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 // Helper function to register all commands
 pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -224,6 +236,7 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         share_video,
         convert_video,
         list_conversions,
-        channel_connect
+        channel_connect,
+        download_videos
     ]
 } 

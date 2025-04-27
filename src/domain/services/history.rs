@@ -28,7 +28,7 @@ impl HistoryService {
                                         // Process player state message if available
                                         counter += 1;
                                         
-                                        if counter % 10 == 0 {
+                                        if counter % 3 == 0 {
                                             self.update_history(&player_state).await;
                                         }
                                     }

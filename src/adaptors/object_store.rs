@@ -93,10 +93,9 @@ impl Filer for FileStoreObject {
 
 #[async_trait]
 impl FileStore for FileSystemStore {
-    async fn create_folder(&self, path: &str) -> Result<()> {
-        let dest_dir = self.get_real_path(path);
-        if !dest_dir.exists() {
-            fs::create_dir_all(&dest_dir).await?;
+    async fn create_folder(&self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            fs::create_dir_all(&path).await?;
         }
         Ok(())
     }

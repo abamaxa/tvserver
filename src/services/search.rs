@@ -1,6 +1,7 @@
 use crate::domain::messages::{DownloadRequest, LocalMessageSender};
-use crate::domain::services::DownloadMonitor;
-use crate::domain::traits::{Downloader, Searcher};
+use crate::domain::models::VideoDetails;
+use crate::domain::services::{CopyServer, DownloadMonitor};
+use crate::domain::traits::{Downloader, Searcher, Databaser};
 use crate::domain::SearchEngineType;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub type SearchEngineMap = HashMap<SearchEngineType, Arc<SearchEngine>>;
 pub struct SearchService {
     engines: SearchEngineMap,
     task_manager: Arc<TaskManager>,
+    copy_server: Arc<CopyServer>,
 }
 
 impl SearchEngine {
@@ -33,7 +35,7 @@ impl SearchEngine {
 }
 
 impl SearchService {
-    pub fn new(task_manager: Arc<TaskManager>, engines: Vec<Arc<SearchEngine>>) -> Self {
+    pub fn new(task_manager: Arc<TaskManager>, engines: Vec<Arc<SearchEngine>>, repo: Arc<dyn Databaser>) -> Self {
         let mut engines_map = HashMap::new();
         
         for engine in engines {
@@ -43,6 +45,7 @@ impl SearchService {
         Self {
             engines: engines_map,
             task_manager: task_manager,
+            copy_server: Arc::new(CopyServer::new(repo)),
         }
     }
 
@@ -73,6 +76,29 @@ impl SearchService {
         // Create a new download monitor task
         let task = Arc::new(DownloadMonitor::new(request, progresser));
 
+        DownloadMonitor::monitor(task.clone(), sender);
+        
+        // Add the task to the task manager
+        self.task_manager.add(task.clone()).await;
+        
+        Ok(())
+    }
+
+    pub async fn download_videos(&self, host_url: String, videos: Vec<VideoDetails>, sender: LocalMessageSender) -> Result<(), Box<dyn std::error::Error>> {
+        // Use the CopyServer to download videos
+        let progresser = self.copy_server.download_videos(host_url.clone(), videos).await?;
+        
+        // Create a placeholder download request for task monitoring
+        let request = DownloadRequest {
+            name: format!("Batch download from {}", &host_url),
+            link: format!("copy-server:{}", &host_url),
+            engine: SearchEngineType::CopyServer, // Just a placeholder, not actually used
+            series: None,
+        };
+        
+        // Create a new download monitor task
+        let task = Arc::new(DownloadMonitor::new(request, progresser));
+        
         DownloadMonitor::monitor(task.clone(), sender);
         
         // Add the task to the task manager

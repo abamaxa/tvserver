@@ -34,8 +34,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_collection ON video_details(collection, vi
 
 CREATE TABLE IF NOT EXISTS history (
     checksum INTEGER PRIMARY KEY NOT NULL,
-    started TIMESTAMP,
-    stopped TIMESTAMP,
+    started REAL,
+    stopped REAL,
     created_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

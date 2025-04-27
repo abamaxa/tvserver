@@ -1,4 +1,4 @@
-use crate::common::{get_json_fetcher, get_no_spawner, get_text_fetcher, get_torrent_downloader};
+use crate::common::{get_json_fetcher, get_no_spawner, get_text_fetcher, get_torrent_downloader, get_repository};
 use std::path::PathBuf;
 use std::sync::Arc;
 use app_lib::adaptors::YoutubeFetcher;
@@ -10,12 +10,14 @@ use app_lib::services::{
 };
 use super::get_task_manager;
 
-pub fn get_search_service(engine: SearchEngine) -> SearchService {
+pub async fn get_search_service(engine: SearchEngine) -> SearchService {
     let task_manager = get_task_manager();
+
+    let repo = get_repository().await;
 
     let engines = vec![Arc::new(engine)];
 
-    SearchService::new(task_manager, engines)
+    SearchService::new(task_manager, engines, repo)
 }
 
 pub async fn get_youtube_search(fixture: &str) -> SearchService {
@@ -29,7 +31,7 @@ pub async fn get_youtube_search(fixture: &str) -> SearchService {
 
     let downloader = Arc::new(YoutubeFetcher::new(spawner.clone()));
 
-    get_search_service( SearchEngine::new(YouTube, youtube, downloader))
+    get_search_service( SearchEngine::new(YouTube, youtube, downloader)).await
 }
 
 pub async fn get_pirate_search(torrent_fixture: &str, pirate_fixture: &str) -> SearchService {
@@ -43,5 +45,5 @@ pub async fn get_pirate_search(torrent_fixture: &str, pirate_fixture: &str) -> S
 
     let pirate_bay: Searcher = Arc::new(PirateClient::new(fetcher, None));
 
-    get_search_service(SearchEngine::new(Torrent, pirate_bay, torrents))
+    get_search_service(SearchEngine::new(Torrent, pirate_bay, torrents)).await
 }

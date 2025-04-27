@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use sqlx::{Error, Sqlite, Row};
 use sqlx::migrate::{
     MigrateDatabase, 
@@ -87,7 +87,7 @@ impl SqlRepository {
         let mut video_details = Self::from_record(row);
 
         video_details.last_viewed = row.get::<Option<NaiveDateTime>, _>("last_viewed");
-        video_details.play_from = row.get::<Option<NaiveDateTime>, _>("play_from");
+        video_details.play_from = row.get::<Option<f32>, _>("play_from");
 
         video_details
     }
@@ -468,17 +468,12 @@ impl Databaser for SqlRepository {
             WHERE checksum = ?
         "#;
 
-        // Convert current_time from seconds to a timestamp
-        let timestamp = DateTime::<Utc>::from_timestamp(current_time as i64, 0)
-            .unwrap_or_else(|| Utc::now())
-            .naive_local();
-
         sqlx::query(query)
             .bind(checksum)
-            .bind(timestamp)
-            .bind(timestamp)
-            .bind(timestamp)
-            .bind(timestamp)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(current_time)
             .bind(checksum)
             .execute(&self.pool)
             .await?;

@@ -47,6 +47,7 @@ impl MessageExchange {
             })(client_map.clone()),
         );
 
+        #[cfg(feature = "webserver")]
         let _ = tokio::spawn((|client_map: ClientMap| async move {
             loop {
                 MessageExchange::check_clients(client_map.clone()).await
@@ -76,10 +77,6 @@ impl MessageExchange {
 
     pub async fn get(&self, key: &String) -> Option<Arc<dyn RemotePlayer>> {
         self.client_map.read().await.get(key)
-    }
-
-    pub async fn remove(&self, key: String) {
-        self.client_map.write().await.remove(&key).await
     }
 
     pub async fn list_players(&self) -> Vec<PlayerListItem> {
@@ -206,6 +203,12 @@ impl MessageExchange {
             },
             LocalMessage::Video(video_event) => {
                 let remote_message = RemoteMessage::Video(vec![video_event.clone()]);
+                
+                // Broadcast to all clients
+                MessageExchange::broadcast_to_all(client_map, remote_message).await;
+            },
+            LocalMessage::PlayerState(player_state) => {
+                let remote_message = RemoteMessage::State(player_state.clone());
                 
                 // Broadcast to all clients
                 MessageExchange::broadcast_to_all(client_map, remote_message).await;

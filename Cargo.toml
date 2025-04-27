@@ -66,3 +66,14 @@ strip = true # Ensures debug symbols are removed.
 vlc = []
 ai-descriptions = []
 webserver = []
+
+# Fix for OpenSSL issues when cross-compiling for Android
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.11.20", features = ["json", "rustls-tls"], default-features = false }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "chrono", "sqlite", "migrate", "json"], default-features = false }
+tauri = { version = "2.5.0", features = ["protocol-asset"], default-features = false }
+
+# Remove OpenSSL dependency completely for Android
+[target.'cfg(target_os = "android")'.dependencies.openssl-sys]
+optional = true
+version = "0.9"

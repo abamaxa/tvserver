@@ -5,6 +5,7 @@ pub enum SearchEngineType {
     YouTube = 0,
     #[default]
     Torrent = 1,
+    CopyServer = 2,
 }
 
 #[derive(Debug, Default, Clone, Eq, Hash, Serialize, Deserialize, PartialEq)]

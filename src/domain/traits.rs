@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::messages::{MediaItem, RemoteMessage, TaskState};
@@ -30,10 +30,8 @@ pub type Searcher = Arc<dyn MediaSearcher<DownloadableItem>>;
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
     async fn list(&self, collection: &str) -> anyhow::Result<MediaItem>;
-    async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
-    //async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
+    async fn add_file(&self, full_path: &Path, suggested_series: Option<String>) -> anyhow::Result<PathBuf>;
     async fn delete(&self, video_id: i64) -> anyhow::Result<()>;
-    //fn as_local_path(&self, collection: &str, video: &str) -> String;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
@@ -122,7 +120,7 @@ pub type StoreObject = Arc<dyn Filer>;
 /// a thin wrapper around a file system, S3 object store etc.
 #[async_trait]
 pub trait FileStore: Sync + Send {
-    async fn create_folder(&self, path: &str) -> anyhow::Result<()>;
+    async fn create_folder(&self, path: &Path) -> anyhow::Result<()>;
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;

@@ -1,6 +1,6 @@
 use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender, MediaEvent};
 use crate::domain::services::generate_video_metadatas;
-use crate::domain::traits::Repository;
+use crate::domain::traits::{Repository, Storer};
 use tokio::task::JoinHandle;
 use tokio::sync::Semaphore;
 use std::sync::Arc;
@@ -16,14 +16,16 @@ static WORKER_SEMAPHORE: Lazy<Arc<Semaphore>> = Lazy::new(|| {
 
 pub struct MetaDataManager {
     repo: Repository,
+    storer: Storer,
     receiver: LocalMessageReceiver,
     _sender: LocalMessageSender,
 }
 
 impl MetaDataManager {
-    fn new(repo: Repository, receiver: LocalMessageReceiver, sender: LocalMessageSender) -> Self {
+    fn new(repo: Repository, storer: Storer, receiver: LocalMessageReceiver, sender: LocalMessageSender) -> Self {
         Self {
             repo,
+            storer,
             receiver,
             _sender: sender,
         }
@@ -31,11 +33,12 @@ impl MetaDataManager {
 
     pub fn consume(
         repo: Repository,
+        storer: Storer,
         receiver: LocalMessageReceiver,
         sender: LocalMessageSender,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut manager = Self::new(repo, receiver, sender);
+            let mut manager = Self::new(repo, storer, receiver, sender);
             manager.event_loop().await;
             eprintln!("local event loop exiting");
         })
@@ -60,6 +63,7 @@ impl MetaDataManager {
                 let full_path = event.full_path;
                 let search = event.search;
                 let repo = self.repo.clone();
+                let storer = self.storer.clone();
                 let semaphore = WORKER_SEMAPHORE.clone();
                 
                 // Spawn a new task to process the media event
@@ -68,7 +72,7 @@ impl MetaDataManager {
                     let permit = semaphore.acquire().await.unwrap();
                     
                     // Process the media event
-                    if let Err(err) = generate_video_metadatas(full_path, repo, search).await {
+                    if let Err(err) = generate_video_metadatas(full_path, storer, repo, search).await {
                         tracing::error!("processing MediaAvailable: {}", err);
                     }
                     

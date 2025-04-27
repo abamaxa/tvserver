@@ -3,9 +3,9 @@ use crate::domain::traits::{RemotePlayer, SendError};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use tauri::{AppHandle, Runtime};
+use tauri::{Emitter, Listener};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
-use tauri::{Emitter, Listener};
 
 /// A struct that implements RemotePlayer for Tauri channels
 #[derive(Debug)]
@@ -33,16 +33,13 @@ impl RemotePlayer for TauriChannelPlayer {
 }
 
 impl TauriChannelPlayer {
-    pub fn create(
-        app: AppHandle,
-        channel_name: String,
-    ) -> TauriChannelPlayer {
+    pub fn create(app: AppHandle, channel_name: String) -> TauriChannelPlayer {
         let (in_tx, in_rx) = channel(100);
-        
+
         // Spawn a task to forward messages from the channel to the frontend
         tokio::spawn(handle_sending(app.clone(), in_rx, channel_name.clone()));
-        
-        TauriChannelPlayer { 
+
+        TauriChannelPlayer {
             app,
             in_tx,
             channel_name,
@@ -51,38 +48,38 @@ impl TauriChannelPlayer {
 }
 
 /// Handle sending messages to the frontend
-async fn handle_sending(
-    app: AppHandle,
-    mut input: Receiver<RemoteMessage>,
-    channel_name: String,
-) {
-    while let Some(message) = input.recv().await {
-        if let Err(e) = app.emit(&channel_name, message) {
-            tracing::error!("Error sending message to frontend: {}", e);
+async fn handle_sending(app: AppHandle, mut input: Receiver<RemoteMessage>, channel_name: String) {
+    loop {
+        match input.recv().await {
+            Some(message) => {
+                if let Err(e) = app.emit(&channel_name, message) {
+                    tracing::error!("Error sending message to frontend: {}", e);
+                }
+            }
+            _ => {}
         }
     }
 }
 
 /// Setup a channel listener for incoming messages from the frontend
 pub fn setup_frontend_listener<R: Runtime>(
-    app: AppHandle<R>, 
-    channel_name: String,
+    app: AppHandle<R>,
+    channel_name: &str,
     output: Sender<ReceivedRemoteMessage>,
 ) -> JoinHandle<()> {
+    let event_name = channel_name.to_string();
     tokio::spawn(async move {
-        let event_name = channel_name.clone();
-        
         // Use app.listen which requires Listener trait
-        let _unlisten = app.listen(&event_name, move |event| {
+        let _unlisten = app.listen(&event_name.clone(), move |event| {
             // event.payload() returns &str directly, no need for if let Some
-            let payload = event.payload(); 
+            let payload = event.payload();
             match serde_json::from_str::<RemoteMessage>(payload) {
                 Ok(message) => {
                     let received = ReceivedRemoteMessage {
                         message,
-                        from_address: channel_name.clone(),
+                        from_address: event_name.clone(),
                     };
-                    
+
                     // Spawn a task to send the message to the message bus
                     let output_clone = output.clone();
                     tokio::spawn(async move {
@@ -93,17 +90,17 @@ pub fn setup_frontend_listener<R: Runtime>(
                 }
                 Err(e) => {
                     tracing::error!(
-                        "Error deserializing message from frontend: {} payload: {}", 
+                        "Error deserializing message from frontend: {} payload: {}",
                         e,
                         payload
                     );
                 }
             }
         });
-        
+
         // Keep the task alive as long as the application is running
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
         }
     })
-} 
+}

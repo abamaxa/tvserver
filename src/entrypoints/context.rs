@@ -110,6 +110,10 @@ pub async fn create_context() -> Result<Context, Error> {
 
     let youtube_fetcher = Arc::new(YoutubeFetcher::new(spawner.clone()));
 
+    let repository = Arc::new(
+        SqlRepository::new(&get_database_url(), Some(local_message_exchange.new_sender())).await?
+    );
+
     let torrent_search = Arc::new(
         SearchEngine::new(
             SearchEngineType::Torrent, 
@@ -126,18 +130,15 @@ pub async fn create_context() -> Result<Context, Error> {
         )
     );
 
-    let search = SearchService::new(
+    let search_service = SearchService::new(
         task_manager.clone(),
-        vec![torrent_search, youtube_search]
+        vec![torrent_search, youtube_search],
+        repository.clone()
     );
 
     let messenger = MessageExchange::new(
         local_message_exchange.new_sender(), 
         local_message_exchange.listen_for_messages( MessageFilter::All).await.unwrap()
-    );
-
-    let repository = Arc::new(
-        SqlRepository::new(&get_database_url(), Some(local_message_exchange.new_sender())).await?
     );
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
@@ -156,7 +157,7 @@ pub async fn create_context() -> Result<Context, Error> {
     
     Ok(Context::new(
         Arc::new(MediaStore::new(file_storer, repository.clone())),
-        search,
+        search_service,
         messenger,
         task_manager,
         repository,

@@ -154,7 +154,7 @@ impl From<i64> for VideoState {
 
 #[serde_with::skip_serializing_none]
 #[derive(Default, Clone, Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct VideoDetails {
     pub video: String,
     pub collection: String,
@@ -168,7 +168,7 @@ pub struct VideoDetails {
     pub state: VideoState,
     pub created_on: NaiveDateTime,
     pub updated_on: NaiveDateTime,
-    pub play_from: Option<NaiveDateTime>,
+    pub play_from: Option<f32>,
     pub last_viewed: Option<NaiveDateTime>,
     #[serde(skip)]
     pub dir_path: Option<PathBuf>,
@@ -194,6 +194,8 @@ impl VideoDetails {
     pub fn new(video: String, collection: String, path: &PathBuf, suggested_series: Option<String>) -> Self {
         let now = Local::now().naive_local();
         let series = SeriesDetails::parse_collection_video(&collection, &video, suggested_series);
+        let dir_path = path.parent().map(|dir| dir.to_path_buf());
+
         Self {
             video,
             collection,
@@ -208,7 +210,7 @@ impl VideoDetails {
             updated_on: now,
             play_from: None,
             last_viewed: None,
-            dir_path: Some(path.to_path_buf()),
+            dir_path,
         }
     }
 

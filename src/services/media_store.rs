@@ -28,9 +28,9 @@ impl MediaStore {
     }
 
     async fn get_new_video_path(&self, path: &Path, collection: &str) -> anyhow::Result<PathBuf> {
-        let dest_dir = Path::new(&get_movie_dir()).join("New");
+        let dest_dir = Path::new(&get_movie_dir()).join(collection);
 
-        self.store.create_folder(collection).await?;
+        self.store.create_folder(&dest_dir).await?;
 
         Ok(dest_dir.join(path.file_name().unwrap_or_default()))
     }
@@ -68,26 +68,28 @@ impl MediaStorer for MediaStore {
     }
 
     /// Add a file to the media store.
-    async fn add_file(&self, full_path: &Path) -> anyhow::Result<()> {
+    async fn add_file(&self, full_path: &Path, suggested_series: Option<String>) -> anyhow::Result<PathBuf> {
         let full_path_str = full_path.to_str().unwrap_or_default();
         if skip_file(full_path_str) {
             // Skip file if it meets the skip criteria.
-            return Ok(());
+            return Err(anyhow::anyhow!("Skipping file: {}", full_path_str));
         }
 
-        // Determine the collection and file name from the path.
-        let collection = title_case(&get_collection_from_path(full_path));
+        let collection = match suggested_series {
+            Some(series) => title_case(&series),
+            None => get_collection_from_path(full_path)
+        };
 
         let dest_path = self.get_new_video_path(full_path, &collection).await?;
 
         // If the source path is the same as the destination, nothing needs to be done.
         if full_path == dest_path {
-            return Ok(());
+            return Ok(dest_path);
         }
 
         tracing::info!("Moving file from {:?} to {:?}", full_path, dest_path);
         self.store.rename(full_path_str, dest_path.to_str().unwrap_or_default()).await?;
-        Ok(())
+        Ok(dest_path)
     }
 
     /// Delete a media file, ensuring that the file path is within the movie directory.
