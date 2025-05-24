@@ -39,7 +39,7 @@ impl From<&Item> for DownloadableItem {
         Self {
             title: decode_html_entities(&item.snippet.title).to_string(),
             description: item.snippet.description.clone(),
-            link: item.id.video_id.to_string(),
+            link: item.id.video_id.clone().unwrap_or_default(),
             engine: YouTube,
         }
     }

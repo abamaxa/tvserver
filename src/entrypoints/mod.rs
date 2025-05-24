@@ -2,7 +2,7 @@ pub mod api;
 mod context;
 mod tvserver;
 #[cfg(feature = "webserver")]
-mod webserver;
+pub mod webserver;
 #[cfg(not(feature = "webserver"))]
 mod app;
 #[cfg(not(feature = "webserver"))]

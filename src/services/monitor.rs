@@ -1,5 +1,5 @@
 use crate::domain::messages::{LocalMessage, LocalMessageSender};
-use crate::domain::traits::{Checker, Storer};
+use crate::domain::traits::{Checker, ProcessSpawner, Storer};
 use crate::services::TaskManager;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
@@ -20,6 +20,9 @@ impl Monitor {
         sender: LocalMessageSender,
     ) -> JoinHandle<()> {
         task::spawn(async move {
+            tracing::info!("updating yt-dlp");
+            task_manager.execute("Update yt-dlp", "pip", vec!["install", "--upgrade", "yt-dlp"]).await;
+
             tracing::info!("starting download monitor");
             let monitor = Self {
                 checker,

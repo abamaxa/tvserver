@@ -49,6 +49,7 @@ impl YoutubeClient {
             yt_response
                 .items
                 .iter()
+                .filter(|item| item.id.video_id.is_some())
                 .map(DownloadableItem::from)
                 .collect::<Vec<DownloadableItem>>(),
         )

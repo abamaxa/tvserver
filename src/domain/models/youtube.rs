@@ -31,7 +31,7 @@ pub struct Item {
 #[serde(rename_all = "camelCase")]
 pub struct Id {
     pub kind: String,
-    pub video_id: String,
+    pub video_id: Option<String>,
     //pub channel_id: Option<String>,
     //pub playlist_id: Option<String>,
 }
