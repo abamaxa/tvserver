@@ -164,7 +164,13 @@ fn is_subdirectory(path: &Path, base: &Path) -> bool {
 }
 
 pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
-    let file = File::open(&path).await?;
+    let file = match File::open(&path).await {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::error!("Failed to open file {}: {}", path.as_ref().display(), e);
+            return Err(e);
+        }
+    };
     let mut reader = BufReader::new(file);
     let mut hasher = DefaultHasher::new();
     let mut buffer = vec![0; 1024 * 1024]; // Read in chunks of 4MB
