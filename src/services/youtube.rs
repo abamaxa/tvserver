@@ -104,7 +104,7 @@ mod test {
                 ..Default::default()
             },
             id: Id {
-                video_id: url.to_string(),
+                video_id: Some(url.to_string()),
                 ..Default::default()
             },
             ..Default::default()

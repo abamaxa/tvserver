@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use std::{collections::HashMap, path::{Path, PathBuf}};
 use crate::domain::algorithm::{title_case, parse_file_path, get_video_url, get_thumbnails_url};
 use serde::ser::SerializeStruct;
+use serde_json;
+use thiserror::Error;
 
+use crate::domain::messages::MediaItem;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CollectionItem {
@@ -71,6 +74,23 @@ impl CollectionDetails {
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct AudioTrack {
+    pub id: i64,
+    pub language: String,
+    pub title: Option<String>,
+    pub codec: Option<String>,
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleTrack {
+    pub id: i64,
+    pub language: String,
+    pub title: Option<String>,
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoMetadata {
     pub duration: f64,
     pub width: u32,
@@ -78,6 +98,11 @@ pub struct VideoMetadata {
     pub aspect_width: u32,
     pub aspect_height: u32,
     pub audio_tracks: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_track_list: Option<Vec<AudioTrack>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_tracks: Option<Vec<SubtitleTrack>>,
+    #[serde(skip)]
     pub probe_data: Option<String>,
 }
 
@@ -91,9 +116,19 @@ pub struct SeriesDetails {
     pub episode_title: String,
 }
 
-use thiserror::Error;
+#[derive(Deserialize, Debug)]
+struct FFProbeStream {
+    index: i64,
+    codec_type: String,
+    codec_name: Option<String>,
+    tags: Option<HashMap<String, String>>,
+}
 
-use crate::domain::messages::MediaItem;
+#[derive(Deserialize, Debug)]
+struct FFProbeData {
+    streams: Vec<FFProbeStream>,
+}
+
 #[derive(Error, Debug)]
 #[error("{message:}")]
 pub struct VideoParseError {
@@ -172,13 +207,6 @@ pub struct VideoDetails {
     pub last_viewed: Option<NaiveDateTime>,
     #[serde(skip)]
     pub dir_path: Option<PathBuf>,
-}
-
-fn serialize_i64_to_string<S>(value: &i64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&value.to_string())
 }
 
 fn deserialize_string_to_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
@@ -375,6 +403,64 @@ impl SeriesDetails {
         }
         
         title
+    }
+}
+
+impl VideoMetadata {
+    pub fn from_probe_data(mut self, probe_data_str: &Option<String>) -> Self {
+        if let Some(data) = probe_data_str {
+            if let Ok(probe_output) = serde_json::from_str::<FFProbeData>(data) {
+                let audio_tracks: Vec<AudioTrack> = probe_output
+                    .streams
+                    .iter()
+                    .filter(|s| s.codec_type == "audio")
+                    .map(|s| {
+                        let tags = s.tags.as_ref();
+                        AudioTrack {
+                            id: s.index,
+                            language: tags
+                                .and_then(|t| t.get("language").cloned())
+                                .unwrap_or_else(|| "und".to_string()),
+                            title: tags.and_then(|t| t.get("title").cloned()),
+                            codec: s.codec_name.clone(),
+                        }
+                    })
+                    .collect();
+
+                if !audio_tracks.is_empty() {
+                    tracing::debug!("Found {} audio tracks", audio_tracks.len());
+                    self.audio_track_list = Some(audio_tracks);
+                } else {
+                    tracing::debug!("No audio tracks found in probe data");
+                }
+
+                let subtitle_tracks: Vec<SubtitleTrack> = probe_output
+                    .streams
+                    .iter()
+                    .filter(|s| s.codec_type == "subtitle")
+                    .map(|s| {
+                        let tags = s.tags.as_ref();
+                        SubtitleTrack {
+                            id: s.index,
+                            language: tags
+                                .and_then(|t| t.get("language").cloned())
+                                .unwrap_or_else(|| "und".to_string()),
+                            title: tags.and_then(|t| t.get("title").cloned()),
+                        }
+                    })
+                    .collect();
+
+                if !subtitle_tracks.is_empty() {
+                    tracing::debug!("Found {} subtitle tracks", subtitle_tracks.len());
+                    self.subtitle_tracks = Some(subtitle_tracks);
+                }
+            } else {
+                tracing::warn!("Failed to parse probe data as JSON");
+            }
+        } else {
+            tracing::debug!("No probe data available");
+        }
+        self
     }
 }
 

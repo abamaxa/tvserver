@@ -1,4 +1,6 @@
-use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
+use crate::domain::config::get_movie_dir;
+#[cfg(not(feature = "webserver"))]
+use crate::domain::config::get_thumbnail_dir;
 use mockall::lazy_static;
 use regex::Regex;
 use std::{collections::HashSet, path::{Path, PathBuf}};

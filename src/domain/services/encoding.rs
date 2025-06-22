@@ -252,7 +252,13 @@ pub async fn re_encode_video(
     );
     
 
-    let mut args = vec!["-i", current_path.to_str().unwrap_or_default(), "-y"];
+    let mut args = vec![
+        "-i", 
+        current_path.to_str().unwrap_or_default(), 
+        "-y",
+        "-map",
+        "0"
+    ];
     
     // Convert String vec to &str vec and extend args
     args.extend(codec_args.video_args.iter().map(|s| s.as_str()));

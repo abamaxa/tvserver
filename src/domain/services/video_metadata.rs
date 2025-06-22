@@ -277,8 +277,10 @@ async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Bo
         aspect_width,
         aspect_height,
         audio_tracks: audio_track_count,
-        probe_data: Some(output_str),
-    })
+        probe_data: Some(output_str.clone()),
+        audio_track_list: None,
+        subtitle_tracks: None,
+    }.from_probe_data(&Some(output_str)))
 }
 
 async fn extract_random_frame<P: AsRef<Path>>(
