@@ -1,9 +1,12 @@
+.PHONY: webserver
+webserver:
+	DATABASE_URL="sqlite:memory:" DATABASE_MIGRATION_DIR="migrations" cargo build --bin=tvserver --package=tvserver --manifest-path=./Cargo.toml --features=webserver
 
 .PHONY: test
 test: test_rust test-js
 	echo "All tests passed"
 
- .PHONY: build
+.PHONY: build
 build:
 	@cd client_src/remote_player && \
     npm run export && \
@@ -14,7 +17,7 @@ build:
 test_rust:
 	DATABASE_URL="sqlite:memory:" DATABASE_MIGRATION_DIR="migrations" cargo test --tests
 
- .PHONY: test-js
+.PHONY: test-js
 test-js:
 	@cd client_src/remote_player && \
     npm run test -- --watchAll=false && \
