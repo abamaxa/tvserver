@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::domain::messages::{MediaItem, RemoteMessage, TaskState};
-use crate::domain::models::{SearchResults, VideoDetails};
+use super::messages::{MediaItem, RemoteMessage, TaskState};
+use super::models::{CollectionItem, DownloadableItem, SearchResults, VideoDetails};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -15,14 +15,6 @@ The following are higher level traits that provide polymorphism
 at the service layer.
  */
 
-/// This trait is used to provide an interface to allow the VLC player to be controlled,
-/// which was the original video player. Unlike the RemotePlayer interface it doesn't
-/// provide an async interface and will be removed in the future.
-#[automock]
-pub trait Player: Send + Sync {
-    fn send_command(&self, command: &str, wait_secs: i32) -> Result<String, String>;
-}
-
 /// Interface to a allow searching of a media source, currently implemented
 /// for the Youtube Data API and a PirateBay proxy scrapper.
 #[async_trait]
@@ -30,31 +22,48 @@ pub trait MediaSearcher<T>: Send + Sync {
     async fn search(&self, query: &str) -> anyhow::Result<SearchResults<T>>;
 }
 
+pub type Searcher = Arc<dyn MediaSearcher<DownloadableItem>>;
+
 /// Interface to a repository of available media files, currently implemented
 /// for the file system but could also support an S3 object store for instance.
 #[automock]
 #[async_trait]
 pub trait MediaStorer: Send + Sync {
     async fn list(&self, collection: &str) -> anyhow::Result<MediaItem>;
-    async fn add_file(&self, full_path: &Path) -> anyhow::Result<()>;
-    async fn rename(&self, current: &str, new_name: &str) -> anyhow::Result<()>;
-    async fn delete(&self, path: &str) -> anyhow::Result<()>;
-    async fn check_video_information(&self) -> anyhow::Result<()>;
-    fn as_local_path(&self, collection: &str, video: &str) -> String;
+    async fn add_file(&self, full_path: &Path, suggested_series: Option<String>) -> anyhow::Result<PathBuf>;
+    async fn delete(&self, video_id: i64) -> anyhow::Result<()>;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
 
-/// Provides methods for retrieving content, for instance downloading a torrent, or a URL
+/// Provides methods for checking the integrity of a video file.
 #[automock]
 #[async_trait]
-pub trait MediaDownloader: Send + Sync {
-    async fn fetch(&self, name: &str, link: &str) -> Result<String, String>;
-    async fn list_in_progress(&self) -> Result<Vec<Task>, String>;
-    async fn remove(&self, id: &str, delete_local_data: bool) -> Result<(), String>;
+pub trait MediaChecker: Send + Sync {
+    async fn check_video_information(&self) -> anyhow::Result<()>;
 }
 
-pub type Downloader = Arc<dyn MediaDownloader>;
+pub type Checker = Arc<dyn MediaChecker>;
+
+
+/// Provides an interface to observe the progress of a download
+#[automock]
+#[async_trait]
+pub trait DownloadProgress: Send + Sync {
+    fn terminate(&self);
+    async fn observe(&self) -> super::messages::DownloadInfo;
+}
+
+pub type DownloadProgressMonitor = Arc<dyn DownloadProgress>;
+
+
+#[automock]
+#[async_trait]
+pub trait Download: Send + Sync {
+    async fn download(&self, request: super::messages::DownloadRequest) -> Result<DownloadProgressMonitor, anyhow::Error>;
+}
+
+pub type Downloader = Arc<dyn Download>;
 
 /*
 The following are low level traits implemented at the adaptor layer
@@ -82,7 +91,17 @@ pub trait JsonFetcher<'a, T: DeserializeOwned, Q: Serialize>: Send + Sync {
 #[automock]
 #[async_trait]
 pub trait RemotePlayer: Send + Sync {
-    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String>;
+    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, SendError>;
+}
+
+/// Error type for the RemotePlayer trait's send method
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    #[error("Channel is disconnected: {0}")]
+    Disconnected(String),
+    
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 #[async_trait]
@@ -101,7 +120,7 @@ pub type StoreObject = Arc<dyn Filer>;
 /// a thin wrapper around a file system, S3 object store etc.
 #[async_trait]
 pub trait FileStore: Sync + Send {
-    async fn create_folder(&self, path: &str) -> anyhow::Result<()>;
+    async fn create_folder(&self, path: &Path) -> anyhow::Result<()>;
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
@@ -142,23 +161,28 @@ pub trait Databaser: Sync + Send {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
     async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;
+    async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error>;
+    async fn list_series_details(&self, series: &str, season: Option<&str>) -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error>;
-    async fn retrieve_video_by_name_and_collection(&self, name: &str, collection: &str) -> Result<VideoDetails, sqlx::Error>;
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;
+    async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
+    async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
 }
 
 pub type Repository = Arc<dyn Databaser>;
 
+
 #[async_trait]
-pub trait ChannelReceiver<T>: Sync + Send {
-    async fn recv(&mut self) -> anyhow::Result<T>;
+pub trait MediaSharer: Sync + Send {
+    async fn share(&self, series_or_id: &str) -> anyhow::Result<()>;
 }
 
-pub type Receiver<T> = Arc<dyn ChannelReceiver<T>>;
+pub type Sharer = Arc<dyn MediaSharer>;
 
-pub trait ChannelBroadcaster<T>: Sync + Send + Clone {
-    fn subscribe(&self) -> Receiver<T>;
-    fn send(&self, message: T) -> anyhow::Result<()>;
+#[async_trait]
+pub trait InstantMessegeService: Sync + Send {
+	async fn send_link(&self, title: &str, link: &str) -> anyhow::Result<()>;
+	async fn send_error(&self, video: String, error: &str) -> anyhow::Result<()>;
 }
 
-pub type Broadcaster<T> = Arc<dyn ChannelBroadcaster<T>>;
+pub type InstantMessenger = Arc<dyn InstantMessegeService>;

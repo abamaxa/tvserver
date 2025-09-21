@@ -38,7 +38,7 @@ impl<'a, Q: Serialize + Sync + Send + 'a> JsonFetcher<'a, YoutubeResponse, Q> fo
         match response.status() {
             StatusCode::OK => Ok(response.json::<YoutubeResponse>().await?),
             StatusCode::UNAUTHORIZED => Err(anyhow!(ACCESS_DENIED_MSG)),
-            _ => Err(anyhow!("Error code {}", response.status())),
+            _ => Err(anyhow!("Error code {}, response: {}", response.status(), response.text().await?)),
         }
     }
 }
@@ -84,7 +84,7 @@ mod tests {
     use crate::domain::models::YoutubeResponse;
     use axum::extract::Query;
     use axum::routing::get;
-    use axum::{Json, Router};
+    use axum::{Json, Router, http};
     use std::collections::HashMap;
     use tokio::task::JoinHandle;
     use tokio::time;
@@ -152,10 +152,11 @@ mod tests {
         Ok(())
     }
 
+
     #[tokio::test]
     async fn test_access_denied() -> Result<()> {
         const HOST_ADDR: &str = "127.0.0.1:35095";
-        let app = Router::new().route("/", get(|| async { StatusCode::UNAUTHORIZED }));
+        let app = Router::new().route("/", get(|| async {http::StatusCode::UNAUTHORIZED}));
 
         let http_server = setup_http_server(app, HOST_ADDR).await;
 
@@ -176,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn test_general_error() -> Result<()> {
         const HOST_ADDR: &str = "127.0.0.1:35096";
-        const ERROR_CODE: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
+        const ERROR_CODE: http::StatusCode = http::StatusCode::INTERNAL_SERVER_ERROR;
 
         let app = Router::new().route("/", get(|| async { ERROR_CODE }));
 
@@ -235,9 +236,7 @@ mod tests {
 
     async fn setup_http_server(app: Router, host: &'static str) -> JoinHandle<Result<()>> {
         let task = tokio::spawn(async move {
-            axum::Server::bind(&host.parse().unwrap())
-                .serve(app.into_make_service())
-                .await?;
+            axum::serve(tokio::net::TcpListener::bind(&host).await?, app).await?;
             Ok(())
         });
 

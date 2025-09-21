@@ -1,6 +1,5 @@
-use crate::domain::config::get_movie_dir;
 use crate::domain::models::{DownloadableItem, SearchResults, YoutubeResponse};
-use crate::domain::traits::{JsonFetcher, MediaDownloader, MediaSearcher, Spawner, Task};
+use crate::domain::traits::{JsonFetcher, MediaSearcher};
 use anyhow;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -17,7 +16,6 @@ pub type YoutubeFetcher =
 pub struct YoutubeClient {
     key: String,
     client: YoutubeFetcher,
-    spawner: Spawner,
 }
 
 #[async_trait]
@@ -39,11 +37,10 @@ impl MediaSearcher<DownloadableItem> for YoutubeClient {
 }
 
 impl YoutubeClient {
-    pub fn new(key: &str, client: YoutubeFetcher, spawner: Spawner) -> Self {
+    pub fn new(key: &str, client: YoutubeFetcher) -> Self {
         Self {
             key: String::from(key),
             client,
-            spawner,
         }
     }
 
@@ -52,52 +49,19 @@ impl YoutubeClient {
             yt_response
                 .items
                 .iter()
+                .filter(|item| item.id.video_id.is_some())
                 .map(DownloadableItem::from)
                 .collect::<Vec<DownloadableItem>>(),
         )
     }
 }
 
-#[async_trait]
-impl MediaDownloader for YoutubeClient {
-    async fn fetch(&self, name: &str, link: &str) -> Result<String, String> {
-        let output_dir = format!("home:{}/YouTube", get_movie_dir());
-        self.spawner
-            .execute(
-                name,
-                "yt-dlp",
-                vec![
-                    "--no-update",
-                    "--sponsorblock-remove",
-                    "all",
-                    "--paths",
-                    output_dir.as_str(),
-                    "-o",
-                    "%(title)s.%(ext)s",
-                    link,
-                ],
-            )
-            .await;
-
-        Ok(String::from("queued"))
-    }
-
-    async fn list_in_progress(&self) -> Result<Vec<Task>, String> {
-        Ok(vec![])
-    }
-
-    async fn remove(&self, _id: &str, _delete_local_data: bool) -> Result<(), String> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::adaptors::{HTTPClient, TokioProcessSpawner};
+    use crate::adaptors::HTTPClient;
     use crate::domain::config::get_google_key;
     use crate::domain::models::{Id, Item, Snippet};
-    use crate::domain::traits::{MockTaskMonitor, ProcessSpawner, Task};
     use anyhow::anyhow;
 
     #[derive(Default, Debug, Clone)]
@@ -140,20 +104,10 @@ mod test {
                 ..Default::default()
             },
             id: Id {
-                video_id: url.to_string(),
+                video_id: Some(url.to_string()),
                 ..Default::default()
             },
             ..Default::default()
-        }
-    }
-
-    #[derive(Default, Debug, Clone)]
-    struct MockProcessSpawner {}
-
-    #[async_trait]
-    impl ProcessSpawner for MockProcessSpawner {
-        async fn execute(&self, _name: &str, _cmd: &str, _args: Vec<&str>) -> Task {
-            Arc::new(MockTaskMonitor::new())
         }
     }
 
@@ -165,10 +119,9 @@ mod test {
         let fetcher = MockFetcher {
             ..Default::default()
         };
-        let spawner = MockProcessSpawner {};
 
         let client: &dyn MediaSearcher<DownloadableItem> =
-            &YoutubeClient::new(THE_KEY, Arc::new(fetcher), Arc::new(spawner));
+            &YoutubeClient::new(THE_KEY, Arc::new(fetcher));
 
         let response = client.search(THE_QUERY).await?;
 
@@ -207,10 +160,8 @@ mod test {
             ..Default::default()
         };
 
-        let spawner = MockProcessSpawner {};
-
         let client: &dyn MediaSearcher<DownloadableItem> =
-            &YoutubeClient::new("", Arc::new(fetcher), Arc::new(spawner));
+            &YoutubeClient::new("", Arc::new(fetcher));
 
         let response = client.search("").await;
 
@@ -227,8 +178,7 @@ mod test {
     #[ignore]
     async fn test_live_search_youtube() {
         let client = Arc::new(HTTPClient::new());
-        let spawner = Arc::new(TokioProcessSpawner::new());
-        let pc = YoutubeClient::new(&get_google_key(), client, spawner);
+        let pc = YoutubeClient::new(&get_google_key(), client);
 
         match pc.search("Dragons Den 2023").await {
             Ok(response) => {

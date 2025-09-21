@@ -9,6 +9,21 @@ use reqwest::Url;
 use scraper::{ElementRef, Html, Selector};
 use std::sync::Arc;
 use urlencoding::decode;
+use tracing::debug;
+
+// Debug logging for this module can be enabled at runtime without recompilation:
+//
+// Option 1: Enable debug for just this module:
+//   RUST_LOG=app_lib::services::pirate_bay=debug cargo run
+//
+// Option 3: Mixed log levels with this module at debug:
+//   RUST_LOG=info,app_lib::services::pirate_bay=debug cargo run
+//
+// You can also target specific functions:
+//   RUST_LOG=info,app_lib::services::pirate_bay::parse_item=debug cargo run
+//
+// Or enable debug for all services:
+//   RUST_LOG=app_lib::services=debug cargo run
 
 pub type PirateFetcher = Arc<dyn TextFetcher>;
 
@@ -72,28 +87,91 @@ impl PirateClient {
             ..Default::default()
         };
         let mut seeders: i32 = 0;
+        let mut date = String::new();
+        let mut size = String::new();
+        let mut uploader = String::new();
+
+        // Debug: print the entire row HTML
+        debug!("Parsing row HTML: {}", row.html());
 
         for (idx, cell) in row.select(&TD_SELECTOR).enumerate() {
+            // Debug: print cell content
+            debug!("Cell {} content: {}", idx, cell.html());
+            
             match idx {
-                1 => {
-                    let mut itr = cell.select(&LINK_SELECTOR);
-                    let title = itr.next()?.text().collect::<Vec<_>>();
-                    let link = decode(itr.next().unwrap().value().attr("href")?);
-                    let desc = PirateClient::get_element_text(&cell.select(&DESC_SELECTOR).next()?);
-
-                    record.title = (*title.first()?).replace('.', " ");
-                    record.description = desc.to_owned();
-                    record.link = link.unwrap_or_else(|_| String::new().into()).to_string();
+                0 => {
+                    // Category - skip
                 }
-                2 => seeders = PirateClient::get_element_i32(&cell)?,
-                //3 => record.leechers = PirateClient::get_element_i32(&cell)?,
+                1 => {
+                    // Cell 1 contains the title link
+                    let title_link = cell.select(&LINK_SELECTOR).next()?;
+                    let title = title_link.text().collect::<Vec<_>>();
+                    record.title = (*title.first()?).replace('.', " ");
+                }
+                2 => {
+                    // Date
+                    date = PirateClient::get_element_text(&cell);
+                }
+                3 => {
+                    // Cell 3 contains the magnet link
+                    if let Some(magnet_link) = cell.select(&LINK_SELECTOR)
+                        .find(|elem| elem.value().attr("href")
+                            .map(|href| href.starts_with("magnet:"))
+                            .unwrap_or(false)) 
+                    {
+                        let link = decode(magnet_link.value().attr("href").unwrap())
+                            .unwrap_or_else(|_| String::new().into())
+                            .to_string();
+                        record.link = link;
+                        debug!("Found magnet link in cell 3");
+                    } else {
+                        debug!("No magnet link found in cell 3");
+                    }
+                }
+                4 => {
+                    // Size
+                    size = PirateClient::get_element_text(&cell);
+                }
+                5 => {
+                    // Seeders
+                    seeders = PirateClient::get_element_i32(&cell).unwrap_or(0);
+                }
+                6 => {
+                    // Leechers
+                    // let leechers = PirateClient::get_element_i32(&cell).unwrap_or(0);
+                }
+                7 => {
+                    // Uploader
+                    uploader = PirateClient::get_element_text(&cell);
+                }
                 _ => continue,
             }
         }
 
-        match seeders {
-            0 => None,
-            _ => Some(record),
+        // Construct description from the collected parts
+        if !date.is_empty() || !size.is_empty() || !uploader.is_empty() {
+            record.description = format!(
+                "Uploaded {}, Size {}, ULed by {}",
+                date.replace("&nbsp;", " "),
+                size.replace("&nbsp;", " "),
+                uploader
+            );
+        }
+
+        // Skip results with no seeders or no magnet link
+        match (seeders, record.link.is_empty()) {
+            (0, _) => {
+                debug!("Skipping item with 0 seeders");
+                None
+            }
+            (_, true) => {
+                debug!("Skipping item '{}' with no magnet link", record.title);
+                None
+            }
+            _ => {
+                debug!("Successfully parsed item: {} (seeders: {})", record.title, seeders);
+                Some(record)
+            }
         }
     }
 
@@ -143,7 +221,7 @@ mod test {
         assert_eq!(first.link, "magnet:?first-link");
         assert_eq!(
             first.description,
-            "Uploaded 03-03 00:50, Size 520.6 MiB, ULed by  jajaja"
+            "Uploaded 03-03 00:50, Size 520.6 MiB, ULed by jajaja"
         );
 
         Ok(())

@@ -1,7 +1,6 @@
 use crate::domain::messages::{PlayerListItem, RemoteMessage};
-use crate::domain::traits::RemotePlayer;
+use crate::domain::traits::{RemotePlayer, SendError};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -43,31 +42,31 @@ impl Client {
 
 #[derive(Clone, Default)]
 pub struct MessengerMap {
-    inner: HashMap<SocketAddr, Client>,
+    inner: HashMap<String, Client>,
     default_player: Option<Arc<dyn RemotePlayer>>,
-    default_player_key: Option<SocketAddr>,
+    default_player_key: Option<String>,
 }
 
 impl MessengerMap {
     // Create a new ClientMap
     pub fn new() -> Self {
         Self {
-            inner: HashMap::<SocketAddr, Client>::new(),
+            inner: HashMap::<String, Client>::new(),
             ..Default::default()
         }
     }
 
     // Update the timestamp on a given client
-    pub fn update_timestamp(&mut self, addr: &SocketAddr) {
+    pub fn update_timestamp(&mut self, key: &String) {
         let new_time = SystemTime::now();
         self.inner
-            .get_mut(addr)
+            .get_mut(key)
             .map(|client| client.timestamp = new_time);
     }
 
-    pub fn update_last_message(&mut self, addr: &SocketAddr, message: RemoteMessage) {
+    pub fn update_last_message(&mut self, key: &String, message: RemoteMessage) {
         let new_time = SystemTime::now();
-        self.inner.get_mut(addr).map(|client| {
+        self.inner.get_mut(key).map(|client| {
             client.timestamp = new_time;
             client.last_message = Some(message);
         });
@@ -78,39 +77,46 @@ impl MessengerMap {
         self.inner.retain(|_, client| client.timestamp > older_than);
     }
 
-    pub fn add_player(&mut self, key: SocketAddr, client: Arc<dyn RemotePlayer>) {
-        self.inner.insert(key, Client::new_player(&client));
+    pub fn add_player(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
+        self.inner.insert(key.clone(), Client::new_player(&client));
         self.default_player = Some(client);
         self.default_player_key = Some(key);
     }
 
-    pub fn add_control(&mut self, key: SocketAddr, client: Arc<dyn RemotePlayer>) {
+    pub fn add_control(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
         self.inner.insert(key, Client::new_remote_control(&client));
     }
 
-    pub fn get(&self, key: SocketAddr) -> Option<Arc<dyn RemotePlayer>> {
-        if let Some(entry) = self.inner.get(&key) {
+    pub fn get(&self, key: &String) -> Option<Arc<dyn RemotePlayer>> {
+        if let Some(entry) = self.inner.get(key) {
             return Some(entry.client.clone());
         }
 
         self.default_player.clone()
     }
 
-    pub async fn remove(&mut self, key: SocketAddr) {
+    pub async fn remove(&mut self, key: &String) {
         let mut clear_default = false;
 
-        if let Some(client) = self.inner.remove(&key) {
+        if let Some(client) = self.inner.remove(key) {
             if client.role == ClientRole::Player {
                 // TODO: should check if no more players in Map, or even
                 clear_default = self.inner.is_empty();
             }
 
-            if let Err(e) = client.client.send(RemoteMessage::Close(key)).await {
-                tracing::info!("error sending close to {}: {}", key, e);
+            if let Err(e) = client.client.send(RemoteMessage::Close(key.clone())).await {
+                match e {
+                    SendError::Disconnected(msg) => {
+                        tracing::info!("client already disconnected {}: {}", key, msg);
+                    },
+                    SendError::Other(msg) => {
+                        tracing::error!("error sending close to {}: {}", key, msg);
+                    }
+                }
             }
         }
 
-        if clear_default || self.default_player_key == Some(key) {
+        if clear_default || self.default_player_key.as_ref() == Some(key) {
             self.default_player = None;
             self.default_player_key = None;
         }
@@ -121,7 +127,7 @@ impl MessengerMap {
             .iter()
             .filter_map(|(key, client)| match client.role {
                 ClientRole::Player => Some(PlayerListItem {
-                    name: key.to_string(),
+                    name: key.clone(),
                     last_message: client.last_message.clone(),
                 }),
                 _ => None,
@@ -138,11 +144,21 @@ impl MessengerMap {
         let message = RemoteMessage::Ping(ping_msg);
 
         let mut js = JoinSet::new();
-        for item in self.inner.values() {
+        for (key, item) in self.inner.iter() {
+            let client_key = key.clone();
             js.spawn(
-                (|client: Arc<dyn RemotePlayer>, message: RemoteMessage| async move {
-                    client.send(message).await
-                })(item.client.clone(), message.clone()),
+                (|client: Arc<dyn RemotePlayer>, message: RemoteMessage, key: String| async move {
+                    if let Err(err) = client.send(message).await {
+                        match err {
+                            SendError::Disconnected(msg) => {
+                                tracing::debug!("ping to disconnected client {}: {}", key, msg);
+                            },
+                            SendError::Other(msg) => {
+                                tracing::error!("error sending ping to {}: {}", key, msg);
+                            }
+                        }
+                    }
+                })(item.client.clone(), message.clone(), client_key),
             );
         }
 
@@ -150,26 +166,40 @@ impl MessengerMap {
         while let Some(_) = js.join_next().await {}
     }
 
-    pub async fn send_last_message(&self, to_host: SocketAddr) {
-        if let Some(destination) = self.inner.get(&to_host) {
+    pub async fn send_last_message(&self, to_key: &String) {
+        if let Some(destination) = self.inner.get(to_key) {
             for item in self.inner.values() {
                 if item.role != ClientRole::Player {
                     continue;
                 }
                 if let Some(message) = &item.last_message {
                     if let Err(err) = destination.client.send(message.clone()).await {
-                        tracing::error!("could not send last message {}, {}", to_host, err);
+                        match err {
+                            SendError::Disconnected(msg) => {
+                                tracing::warn!("could not send last message to disconnected client {}: {}", to_key, msg);
+                            },
+                            SendError::Other(msg) => {
+                                tracing::error!("could not send last message {}: {}", to_key, msg);
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    pub fn get_clients(&self, exclude: SocketAddr) -> Vec<Arc<dyn RemotePlayer>> {
+    pub fn get_all_clients(&self) -> HashMap<String, Arc<dyn RemotePlayer>> {
+        self.inner
+            .iter()
+            .map(|(key, client)| (key.clone(), client.client.clone()))
+            .collect()
+    }
+
+    pub fn get_clients(&self, exclude: &String) -> Vec<Arc<dyn RemotePlayer>> {
         self.inner
             .iter()
             .filter_map(|(key, item)| {
-                if *key != exclude {
+                if key != exclude {
                     Some(item.client.clone())
                 } else {
                     None

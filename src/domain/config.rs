@@ -1,7 +1,7 @@
 use reqwest::Url;
 use std::env;
 use std::env::VarError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Environment Variables
 const CLIENT_DIR: &str = "CLIENT_DIR";
@@ -10,7 +10,7 @@ const DATABASE_MIGRATION_DIR: &str = "DATABASE_MIGRATION_DIR";
 const ENABLE_VLC: &str = "ENABLE_VLC";
 pub const GOOGLE_KEY: &str = "GOOGLE_KEY";
 pub const MOVIE_DIR: &str = "MOVIE_DIR";
-const TORRENT_DIR: &str = "TORRENT_DIR";
+const DOWNLOAD_DIR: &str = "DOWNLOAD_DIR";
 const TRANSMISSION_USER: &str = "TRANSMISSION_USER";
 const TRANSMISSION_PWD: &str = "TRANSMISSION_PWD";
 const TRANSMISSION_URL: &str = "TRANSMISSION_URL";
@@ -18,7 +18,9 @@ const PIRATE_BAY_PROXY_URL: &str = "PIRATE_BAY_PROXY_URL";
 const DELAY_REAPING_TASKS_SECS: &str = "DELAY_REAPING_TASKS_SECS";
 const THUMBNAIL_DIR: &str = "THUMBNAIL_DIR";
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
-
+const SHARING_SERVER: &str = "SHARING_SERVER";
+const TELEGRAM_TOKEN: &str = "TELEGRAM_TOKEN";
+const TELEGRAM_CHAT_ID: &str = "TELEGRAM_CHAT_ID";
 //  Defaults
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
@@ -26,6 +28,7 @@ const DEFAULT_TRANSMISSION_URL: &str = "http://higo.abamaxa.com:9091/transmissio
 const DEFAULT_CLIENT_DIR: &str = "client";
 const DEFAULT_PB_URL: &str = "https://thehiddenbay.com";
 const DEFAULT_DELAY_REAPING_TASKS_SECS: i64 = 60;
+const DEFAULT_DOWNLOAD_DIR: &str = ".downloads";
 
 pub fn get_movie_dir() -> String {
     env::var(MOVIE_DIR).expect("MOVIE_DIR environment variable is not set")
@@ -46,14 +49,31 @@ pub fn get_database_url() -> String {
 }
 
 pub fn get_database_migration_dir() -> String {
-    env::var(DATABASE_MIGRATION_DIR).unwrap_or_else(|_| String::from(DEFAULT_MIGRATIONS_DIR))
+    match env::var(DATABASE_MIGRATION_DIR) {
+        Ok(dir) => dir,
+        Err(_) => {
+            let default_path = Path::new(DEFAULT_MIGRATIONS_DIR);
+            if default_path.is_dir() {
+                return String::from(DEFAULT_MIGRATIONS_DIR);
+            }
+
+            let secondary_path_str = format!("./src-tauri/{}", DEFAULT_MIGRATIONS_DIR);
+            let secondary_path = Path::new(&secondary_path_str);
+            if secondary_path.is_dir() {
+                secondary_path_str
+            } else {
+                panic!(
+                    "Database migrations directory not found. Set DATABASE_MIGRATION_DIR or ensure '{}' or '{}' exists.",
+                    DEFAULT_MIGRATIONS_DIR, secondary_path_str
+                );
+            }
+        }
+    }
 }
 
-pub fn get_torrent_dir(default: Option<&String>) -> String {
-    env::var(TORRENT_DIR).unwrap_or_else(|_| {
-        default
-            .expect("TORRENT_DIR not set and default available")
-            .clone()
+pub fn get_downloads_dir() -> String {
+    env::var(DOWNLOAD_DIR).unwrap_or_else(|_| {
+        PathBuf::from(get_movie_dir()).join(DEFAULT_DOWNLOAD_DIR).to_string_lossy().to_string()
     })
 }
 
@@ -93,4 +113,16 @@ pub fn get_thumbnail_dir(movie_dir: &str) -> PathBuf {
 
 pub fn get_openai_api_key() -> String {
     env::var(OPENAI_API_KEY).unwrap_or_default()
+}
+
+pub fn get_sharing_server() -> String {
+    env::var(SHARING_SERVER).unwrap_or_default()
+}
+
+pub fn  get_telegram_token() -> String {
+	env::var(TELEGRAM_TOKEN).unwrap_or_default()
+}
+
+pub fn  get_telegram_chat_id() -> String {
+	env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
 }

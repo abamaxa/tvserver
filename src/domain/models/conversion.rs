@@ -1,5 +1,7 @@
 use crate::domain::algorithm::get_next_version_name;
 use crate::domain::traits::{ProcessSpawner, Task};
+use crate::entrypoints::SharedState;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -51,7 +53,7 @@ const TO_H264_AAC_MP4: Conversion = Conversion {
     name: "Convert to H.264, AAC + MP4",
     description: "Encodes video with H.264 codec, audio with AAC codec and saves as MP4 file",
     exec: "ffmpeg",
-    args: "-i '{source}' -c:v libx264 -profile:v high -level 4.0 -preset slow -crf 22 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
+    args: "-i '{source}' -map 0 -c:v libx264 -profile:v high -level 4.0 -preset slow -crf 22 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -59,7 +61,7 @@ const TO_H265_AAC_MP4: Conversion = Conversion {
     name: "Convert to H.265, AAC + MP4",
     description: "Encodes video with H.265 codec, audio with AAC codec and saves as MP4 file",
     exec: "ffmpeg",
-    args: "-i '{source}' ffmpeg -i input_video.ext -c:v libx265 -profile:v main -crf 28 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
+    args: "-i '{source}' -map 0 -c:v libx265 -profile:v main -crf 28 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -69,7 +71,7 @@ const TO_MPEG4_AAC_MP4: Conversion = Conversion {
         "Encodes video with MPEG-4 Part 2 codec, audio with AAC codec and saves as MP4 file",
     exec: "ffmpeg",
     args:
-        "-i '{source}' -c:v mpeg4 -q:v 5 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
+        "-i '{source}' -map 0 -c:v mpeg4 -q:v 5 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -78,7 +80,7 @@ const TO_VP9_AAC_MKV: Conversion = Conversion {
     description: "Encodes video with VP9 codec, audio with AAC codec and saves as MKV file",
     exec: "ffmpeg",
     args:
-    "-i '{source}' -c:v libvpx-vp9 -crf 30 -b:v 0 -c:a libopus -b:a 128k -movflags +faststart -y '{destination}'",
+    "-i '{source}' -map 0 -c:v libvpx-vp9 -crf 30 -b:v 0 -c:a libopus -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mkv"),
 };
 
@@ -94,6 +96,20 @@ pub const AVAILABLE_CONVERSIONS: [Conversion; 8] = [
 ];
 
 impl Conversion {
+    pub async fn do_conversion(state: SharedState, name: &str, video_id: i64) -> Result<Task> {
+        let conversion = Conversion::find(name)
+            .ok_or_else(|| anyhow::anyhow!("{} not recognized", name))?;
+            
+        let video = state.get_repository().retrieve_video(video_id).await?;
+        
+        conversion.execute(
+            state.get_spawner(), 
+            &video.get_full_path().to_string_lossy().to_string()
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Failed to create conversion task"))
+    }
+
     pub fn find(name: &str) -> Option<&Conversion> {
         AVAILABLE_CONVERSIONS
             .iter()
@@ -112,7 +128,7 @@ impl Conversion {
         }
     }
 
-    fn make_args<'a>(&'a self, source: &'a str, destination: &'a str) -> Vec<&str> {
+    fn make_args<'a>(&'a self, source: &'a str, destination: &'a str) -> Vec<&'a str> {
         self.args
             .split(' ')
             .map(|arg| match arg {

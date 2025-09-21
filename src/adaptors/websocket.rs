@@ -1,5 +1,5 @@
 use crate::domain::messages::{ReceivedRemoteMessage, RemoteMessage};
-use crate::domain::traits::RemotePlayer;
+use crate::domain::traits::{RemotePlayer, SendError};
 use async_trait::async_trait;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -19,10 +19,14 @@ pub struct RemoteBrowserPlayer {
 
 #[async_trait]
 impl RemotePlayer for RemoteBrowserPlayer {
-    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, String> {
+    async fn send(&self, message: RemoteMessage) -> Result<StatusCode, SendError> {
         match self.in_tx.send(message).await {
             Ok(_) => Ok(StatusCode::OK),
-            Err(err) => Err(err.to_string()),
+            Err(err) => {
+                // In tokio's channel SendError, we can only tell that the receiver is closed
+                // Check if the receiver has been closed (dropped)
+                Err(SendError::Disconnected(err.to_string()))
+            }
         }
     }
 }
@@ -45,7 +49,7 @@ impl RemoteBrowserPlayer {
                 if let Err(err) = on_message
                     .send(ReceivedRemoteMessage {
                         message,
-                        from_address: who,
+                        from_address: who.to_string(),
                     })
                     .await
                 {
@@ -87,7 +91,7 @@ async fn handle_sending(
         };
 
         let result = match message {
-            RemoteMessage::Ping(n) => sender.send(Message::Ping(n.to_be_bytes().to_vec())).await,
+            RemoteMessage::Ping(n) => sender.send(Message::Ping(n.to_be_bytes().to_vec().into())).await,
             _ => {
                 let as_bytes: Vec<u8> = match serde_json::to_vec(&message) {
                     Ok(result) => result,
@@ -144,7 +148,7 @@ async fn handle_receiving(
             }
             Message::Close(_) => {
                 tracing::info!("websocket {} close message", who);
-                if let Err(e) = output.send(RemoteMessage::Close(who)).await {
+                if let Err(e) = output.send(RemoteMessage::Close(who.to_string())).await {
                     tracing::error!("output.send close message failed: {}", e);
                 }
             }

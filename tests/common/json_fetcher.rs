@@ -5,8 +5,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use serde::Serialize;
 use tokio::fs;
-use tvserver::domain::models::YoutubeResponse;
-use tvserver::domain::traits::JsonFetcher;
+use app_lib::domain::models::YoutubeResponse;
+use app_lib::domain::traits::JsonFetcher;
 
 #[derive(Default, Debug, Clone)]
 pub struct MockFetcher {

@@ -1,4 +1,4 @@
-use crate::domain::models::youtube::Item;
+use crate::domain::{messages::TaskState, models::youtube::Item};
 use crate::domain::SearchEngineType;
 use crate::domain::SearchEngineType::YouTube;
 use html_escape::decode_html_entities;
@@ -39,8 +39,10 @@ impl From<&Item> for DownloadableItem {
         Self {
             title: decode_html_entities(&item.snippet.title).to_string(),
             description: item.snippet.description.clone(),
-            link: item.id.video_id.to_string(),
+            link: item.id.video_id.clone().unwrap_or_default(),
             engine: YouTube,
         }
     }
 }
+
+pub type TaskListResults = SearchResults<TaskState>;

@@ -1,38 +1,47 @@
 use chrono::{NaiveDateTime, Local, Duration};
-use mockall::lazy_static;
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use serde::{Deserialize, Serialize, Serializer};
+use std::{collections::HashMap, path::{Path, PathBuf}};
+use crate::domain::algorithm::{title_case, parse_file_path, get_video_url, get_thumbnails_url};
+use serde::ser::SerializeStruct;
+use serde_json;
+use thiserror::Error;
 
+use crate::domain::messages::MediaItem;
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CollectionItem {
+    pub collection: String,
+    pub thumbnail: Vec<String>,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CollectionDetails {
     pub collection: String,
     pub parent_collection: String,
-    pub child_collections: Vec<String>,
+    pub child_collections: Vec<CollectionItem>,
+    pub series: HashMap<String, Vec<VideoDetails>>,
     pub videos: Vec<MediaItem>,
     pub errors: Vec<String>,
 }
 
 impl CollectionDetails {
-    pub fn from(
-        collection: &str,
-        child_collections: Vec<String>,
-        videos: Vec<MediaItem>,
-    ) -> CollectionDetails {
-        let mut parent_collection = String::new();
-
-        if collection.find('/').is_some() {
-            let v: Vec<&str> = collection.rsplitn(2, '/').collect();
-            parent_collection = v[1].to_string();
-        }
+    pub fn new(
+        collection: String,
+        child_collections: Vec<CollectionItem>,
+        items: Vec<VideoDetails>,
+    ) -> Self {
+        // Convert `VideoDetails` items into `MediaItem`s.
+        let videos: Vec<MediaItem> = items.iter().cloned().map(MediaItem::Video).collect();
+        // Group VideoDetails by series.
+        let series = Self::group_by_series(&items);
 
         CollectionDetails {
-            collection: collection.to_string(),
-            parent_collection,
+            collection: collection.clone(),
+            parent_collection: Self::parent_collection(&collection),
             child_collections,
             videos,
-            ..Default::default()
+            series,
+            errors: Vec::new(),
         }
     }
 
@@ -42,6 +51,42 @@ impl CollectionDetails {
             ..Default::default()
         }
     }
+
+    /// Helper function to extract the parent collection from a collection string.
+    /// If the string contains a '/', it returns the part before the slash; otherwise, an empty string.
+    fn parent_collection(collection: &str) -> String {
+        if let Some(pos) = collection.find('/') {
+            collection[..pos].to_string()
+        } else {
+            "".to_string()
+        }
+    }
+
+    fn group_by_series(items: &Vec<VideoDetails>) -> HashMap<String, Vec<VideoDetails>> {
+        // For demonstration purposes, we return an empty HashMap.
+        let mut series = HashMap::new();
+        for item in items {
+            series.entry(item.series.season.clone()).or_insert(Vec::new()).push(item.clone());
+        }
+        series
+    }
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTrack {
+    pub id: i64,
+    pub language: String,
+    pub title: Option<String>,
+    pub codec: Option<String>,
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleTrack {
+    pub id: i64,
+    pub language: String,
+    pub title: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -53,7 +98,14 @@ pub struct VideoMetadata {
     pub aspect_width: u32,
     pub aspect_height: u32,
     pub audio_tracks: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_track_list: Option<Vec<AudioTrack>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_tracks: Option<Vec<SubtitleTrack>>,
+    #[serde(skip)]
+    pub probe_data: Option<String>,
 }
+
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -64,9 +116,19 @@ pub struct SeriesDetails {
     pub episode_title: String,
 }
 
-use thiserror::Error;
+#[derive(Deserialize, Debug)]
+struct FFProbeStream {
+    index: i64,
+    codec_type: String,
+    codec_name: Option<String>,
+    tags: Option<HashMap<String, String>>,
+}
 
-use crate::domain::messages::MediaItem;
+#[derive(Deserialize, Debug)]
+struct FFProbeData {
+    streams: Vec<FFProbeStream>,
+}
+
 #[derive(Error, Debug)]
 #[error("{message:}")]
 pub struct VideoParseError {
@@ -126,38 +188,57 @@ impl From<i64> for VideoState {
 
 
 #[serde_with::skip_serializing_none]
-#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Default, Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
 pub struct VideoDetails {
     pub video: String,
     pub collection: String,
     pub description: String,
     pub series: SeriesDetails,
-    pub thumbnail: PathBuf,
+    pub thumbnail: Vec<String>,
     pub metadata: VideoMetadata,
+    #[serde(serialize_with = "serialize_i64_to_string", deserialize_with = "deserialize_string_to_i64")]
     pub checksum: i64,
     pub search_phrase: Option<String>,
     pub state: VideoState,
     pub created_on: NaiveDateTime,
     pub updated_on: NaiveDateTime,
+    pub play_from: Option<f32>,
+    pub last_viewed: Option<NaiveDateTime>,
+    #[serde(skip)]
+    pub dir_path: Option<PathBuf>,
 }
 
+fn deserialize_string_to_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let s = String::deserialize(deserializer)?;
+    s.parse::<i64>().map_err(D::Error::custom)
+}
 
 impl VideoDetails {
-    pub fn new(video: String, collection: String, path: &PathBuf) -> Self {
+    pub fn new(video: String, collection: String, path: &PathBuf, suggested_series: Option<String>) -> Self {
         let now = Local::now().naive_local();
+        let series = SeriesDetails::parse_collection_video(&collection, &video, suggested_series);
+        let dir_path = path.parent().map(|dir| dir.to_path_buf());
+
         Self {
             video,
             collection,
             description: "".to_string(),
-            series: SeriesDetails::from(path.as_path()),
-            thumbnail: PathBuf::new(),
+            series,
+            thumbnail: Vec::new(),
             metadata: VideoMetadata{..VideoMetadata::default()},
             checksum: 0,
             search_phrase: None,
             state: VideoState::NewFile,
             created_on: now,
-            updated_on: now
+            updated_on: now,
+            play_from: None,
+            last_viewed: None,
+            dir_path,
         }
     }
 
@@ -182,6 +263,76 @@ impl VideoDetails {
         duration_since_given >= Duration::hours(num_hours)
     }
     
+    /// Returns the full path to the video file.
+    /// 
+    /// If dir_path is set, joins dir_path and video.
+    /// Otherwise, uses the movie directory from config and joins with collection and video.
+    pub fn get_full_path(&self) -> PathBuf {
+        if let Some(dir_path) = &self.dir_path {
+            dir_path.join(&self.video)
+        } else if self.collection.is_empty() {
+            Path::new(&crate::domain::config::get_movie_dir()).join(&self.video)
+        } else {
+            Path::new(&crate::domain::config::get_movie_dir())
+                .join(&self.collection)
+                .join(&self.video)
+        }
+    }
+    
+    /// Returns the relative path to the video file for download/sharing purposes.
+    /// 
+    /// This is the path relative to the movie directory, used for URLs.
+    pub fn get_download_path(&self) -> String {
+        if self.collection.is_empty() {
+            self.video.clone()
+        } else {
+            format!("{}/{}", self.collection, self.video)
+        }
+    }
+}
+
+impl Serialize for VideoDetails {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Calculate the number of fields dynamically based on Option values and the added url
+        let mut field_count = 11; // Base fields + url
+        if self.search_phrase.is_none() { field_count -= 1; }
+        if self.play_from.is_none() { field_count -= 1; }
+        if self.last_viewed.is_none() { field_count -= 1; }
+
+        let mut state = serializer.serialize_struct("VideoDetails", field_count)?;
+        let thumbnails = get_thumbnails_url(&self.thumbnail);
+
+        state.serialize_field("video", &self.video)?;
+        state.serialize_field("collection", &self.collection)?;
+        state.serialize_field("description", &self.description)?;
+        state.serialize_field("series", &self.series)?;
+        state.serialize_field("thumbnail", &thumbnails)?;
+        state.serialize_field("metadata", &self.metadata)?;
+        // Apply custom i64 to string serialization for checksum explicitly
+        state.serialize_field("checksum", &self.checksum.to_string())?;
+
+        // Handle Option fields honoring skip_serializing_none implicitly by checking is_some()
+        if let Some(ref sp) = self.search_phrase {
+            state.serialize_field("searchPhrase", sp)?;
+        }
+        state.serialize_field("state", &self.state)?;
+        state.serialize_field("createdOn", &self.created_on)?;
+        state.serialize_field("updatedOn", &self.updated_on)?;
+        if let Some(ref pf) = self.play_from {
+            state.serialize_field("playFrom", pf)?;
+        }
+        if let Some(ref lv) = self.last_viewed {
+             state.serialize_field("lastViewed", lv)?;
+        }
+
+        // Add the computed url field
+        state.serialize_field("url", &get_video_url(&self.collection, &self.video))?;
+
+        state.end()
+    }
 }
 
 impl SeriesDetails {
@@ -199,118 +350,117 @@ impl SeriesDetails {
         }
     }
 
-    pub fn full_title(&self) -> String {
-        let mut title = self.series_title.clone();
+    pub fn parse_collection_video(collection: &str, video: &str, suggested_series: Option<String>) -> Self {
 
-        if !self.season.is_empty() {
-            title = format!("{}, Season {}", title, self.season);
+        // Clean and check if collection path is absolute
+        let clean_collection = Path::new(collection).to_string_lossy().into_owned();
+        if clean_collection.len() != 1 && Path::new(&clean_collection).is_absolute() {
+            return Self::parse_file_name_with_series(video, suggested_series);
         }
 
-        if !self.episode.is_empty() {
-            title = format!("{}, Episode {}", title, self.episode);
-        }
-
-        if !self.episode_title.is_empty() {
-            title = format!("{}, {}", title, self.episode_title);
-        }
-
-        title
-    }
-
-    fn parse_file_name(file_name: &str) -> Option<Self> {
-        lazy_static! {
-            static ref PARSER_EX: [Regex; 7] = [
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/Series (?P<season>\d+)/S[\d]+E(?P<episode>\d+) - (?P<episode_title>[^\\/\n]+)").unwrap(),
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/Series (?P<season>\d+)/.*\d+-(?P<episode>\d+) (?P<episode_title>[^\\/\n]+)").unwrap(),
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/(?P<season>[^\\/\n]+)/S[\d]+E(?P<episode>\d+) - (?P<episode_title>[^\\/\n]+)").unwrap(),
-                Regex::new(r"^(?P<series_title>[^\\/\n]+) (?P<season>\d+)-(?P<episode>\d+) (?P<episode_title>[^\\/\n]+)$").unwrap(),
-                Regex::new(r"(?P<series_title>[^\\/\n]+)/.*S(?P<season>\d+)E(?P<episode>\d+)").unwrap(),
-                Regex::new(r"^(?P<series_title>[^\\/\n]+) S(?P<season>\d+)E(?P<episode>\d+)").unwrap(),
-                Regex::new(r"^S(?P<season>\d+)E(?P<episode>\d+) - (?P<series_title>[^\\/\n]+)").unwrap(),
-            ];
-        }
-
-        let file_name = &file_name[..file_name.find('.').unwrap_or(file_name.len())];
-
-        PARSER_EX
-            .iter()
-            .find_map(|regex| Self::parse_tv_series_info(file_name, regex))
-    }
-
-    fn parse_tv_series_info(file_name: &str, regex: &Regex) -> Option<Self> {
-        let captures = regex.captures(&file_name)?;
-
-        let series_title = captures.name("series_title")?.as_str().to_string();
-        let season_str = captures.name("season")?.as_str();
-        let episode_str = captures.name("episode")?.as_str();
-
-        let season = match season_str.parse::<u32>() {
-            Ok(s) => s.to_string(),
-            _ => season_str.to_string(),
+        let path = if !collection.is_empty() {
+            format!("{}/{}", collection, video)
+        } else {
+            video.to_string()
         };
 
-        let episode = match episode_str.parse::<u32>() {
-            Ok(s) => s.to_string(),
-            _ => episode_str.to_string(),
+        Self::parse_file_name_with_series(&path, suggested_series)
+    }
+
+    pub fn parse_file_name_with_series(file_name: &str, suggested_series: Option<String>) -> Self {
+        let result = parse_file_path(file_name);
+        
+        let series_title = if let Some(series) = suggested_series {
+            title_case(&series)
+        } else {
+            result.series_details.series_title
         };
-
-        // allow failure to map episode name
-        let episode_title = captures
-            .name("episode_title")
-            .map_or(String::new(), |m| m.as_str().to_string());
-
-        Some(Self {
-            series_title,
-            season,
-            episode,
-            episode_title,
-        })
-    }
-}
-
-impl TryFrom<&str> for SeriesDetails {
-    type Error = VideoParseError;
-
-    fn try_from(value: &str) -> Result<Self, VideoParseError> {
-        match Self::parse_file_name(value) {
-            Some(details) => Ok(details),
-            _ => Err(VideoParseError {
-                message: format!("could not parse name: {}", value),
-            }),
-        }
-    }
-}
-
-impl From<&Path> for SeriesDetails {
-    fn from(value: &Path) -> Self {
-        let binding = value.with_extension("");
-        let file_name = binding
-            .file_name()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default();
-
-        // Create an iterator over the path components
-        let mut components = binding.iter();
-
-        // Loop until there are no more components left
-        while let Some(_) = components.next() {
-            // Create a new PathBuf from the remaining components
-            let new_path = components.clone().collect::<PathBuf>();
-
-            if new_path.parent().is_none() {
-                break;
-            }
-
-            if let Some(details) = Self::parse_file_name(file_name) {
-                return details;
-            }
-        }
 
         Self {
-            series_title: file_name.to_string(),
-            ..Default::default()
+            series_title,
+            season: result.series_details.season,
+            episode: result.series_details.episode,
+            episode_title: result.series_details.episode_title,
         }
+    }
+
+    pub fn full_title(&self) -> String {
+        use std::fmt::Write;
+        let mut title = String::new();
+        
+        write!(&mut title, "{}", self.series_title).unwrap();
+        
+        if !self.season.is_empty() {
+            write!(&mut title, ", Season {}", self.season).unwrap();
+        }
+        
+        if !self.episode.is_empty() {
+            write!(&mut title, ", Episode {}", self.episode).unwrap();
+        }
+        
+        if !self.episode_title.is_empty() {
+            write!(&mut title, ", {}", self.episode_title).unwrap();
+        }
+        
+        title
+    }
+}
+
+impl VideoMetadata {
+    pub fn from_probe_data(mut self, probe_data_str: &Option<String>) -> Self {
+        if let Some(data) = probe_data_str {
+            if let Ok(probe_output) = serde_json::from_str::<FFProbeData>(data) {
+                let audio_tracks: Vec<AudioTrack> = probe_output
+                    .streams
+                    .iter()
+                    .filter(|s| s.codec_type == "audio")
+                    .map(|s| {
+                        let tags = s.tags.as_ref();
+                        AudioTrack {
+                            id: s.index,
+                            language: tags
+                                .and_then(|t| t.get("language").cloned())
+                                .unwrap_or_else(|| "und".to_string()),
+                            title: tags.and_then(|t| t.get("title").cloned()),
+                            codec: s.codec_name.clone(),
+                        }
+                    })
+                    .collect();
+
+                if !audio_tracks.is_empty() {
+                    tracing::debug!("Found {} audio tracks", audio_tracks.len());
+                    self.audio_track_list = Some(audio_tracks);
+                } else {
+                    tracing::debug!("No audio tracks found in probe data");
+                }
+
+                let subtitle_tracks: Vec<SubtitleTrack> = probe_output
+                    .streams
+                    .iter()
+                    .filter(|s| s.codec_type == "subtitle")
+                    .map(|s| {
+                        let tags = s.tags.as_ref();
+                        SubtitleTrack {
+                            id: s.index,
+                            language: tags
+                                .and_then(|t| t.get("language").cloned())
+                                .unwrap_or_else(|| "und".to_string()),
+                            title: tags.and_then(|t| t.get("title").cloned()),
+                        }
+                    })
+                    .collect();
+
+                if !subtitle_tracks.is_empty() {
+                    tracing::debug!("Found {} subtitle tracks", subtitle_tracks.len());
+                    self.subtitle_tracks = Some(subtitle_tracks);
+                }
+            } else {
+                tracing::warn!("Failed to parse probe data as JSON");
+            }
+        } else {
+            tracing::debug!("No probe data available");
+        }
+        self
     }
 }
 
@@ -318,40 +468,39 @@ impl From<&Path> for SeriesDetails {
 pub mod test {
     use super::*;
     use std::iter::zip;
-
+    use std::path::PathBuf;
     #[test]
     fn test_parse_file_name() {
         let tests = [
-            "Line Of Duty S02E03",
-            "Line Of Duty S02E03.mp4",
-            "Line of Duty/Line Of Duty S02E03.mp4",
             "S00E07 - The Frog's Legacy.mkv",
-            "Only Fools and Horses/Specials/S00E07 - The Frog's Legacy.mkv",
-            "The Sweeney 4-01 Messenger Of The Gods.mkv",
-            "The Sweeney/Series 4/The Sweeney 4-01 Messenger Of The Gods.mkv",
+            "Line Of Duty S02E03",
+            "Line Of Duty S04E05.mp4",
+            &PathBuf::from("Line of Duty").join("Line Of Duty S06E07.mp4").to_string_lossy().to_string(),
+            &PathBuf::from("Only Fools and Horses").join("Specials").join("S00E07 - The Frog's Legacy.mkv").to_string_lossy().to_string(),
+            "The Sweeney 5-02 Messenger Of The Gods.mkv",
+            &PathBuf::from("The Sweeney").join("Series 4").join("The Sweeney 4-01 Messenger Of The Gods.mkv").to_string_lossy().to_string(),
         ];
 
         let expected_results = [
-            SeriesDetails::new("Line Of Duty", "2", "3", None),
-            SeriesDetails::new("Line Of Duty", "2", "3", None),
-            SeriesDetails::new("Line of Duty", "2", "3", None),
-            SeriesDetails::new("The Frog's Legacy", "0", "7", None),
+            SeriesDetails::new("The Frog's Legacy", "", "07", None),
+            SeriesDetails::new("Line Of Duty", "2", "03", None),
+            SeriesDetails::new("Line Of Duty", "4", "05", None),
+            SeriesDetails::new("Line of Duty", "6", "07", None),
             SeriesDetails::new(
                 "Only Fools and Horses",
-                "Specials",
-                "7",
+                "0",
+                "07",
                 Some("The Frog's Legacy"),
             ),
-            SeriesDetails::new("The Sweeney", "4", "1", Some("Messenger Of The Gods")),
-            SeriesDetails::new("The Sweeney", "4", "1", Some("Messenger Of The Gods")),
+            SeriesDetails::new("The Sweeney", "5", "02", Some("Messenger Of The Gods")),
+            SeriesDetails::new("The Sweeney", "4", "01", Some("Messenger Of The Gods")),
         ];
 
         assert_eq!(tests.len(), expected_results.len());
 
         for (test, expected) in zip(tests, expected_results) {
-            let result = SeriesDetails::try_from(test);
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), expected);
+            let result = SeriesDetails::parse_file_name_with_series(test, None);
+            assert_eq!(result, expected);
         }
     }
 }

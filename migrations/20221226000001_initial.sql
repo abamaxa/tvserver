@@ -1,3 +1,12 @@
+CREATE TABLE IF NOT EXISTS collections (
+    name TEXT PRIMARY KEY NOT NULL,
+    path TEXT NOT NULL,
+    description TEXT,
+    thumbnail TEXT,
+    created_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS video_details (
     checksum INTEGER PRIMARY KEY NOT NULL,
     video TEXT NOT NULL,
@@ -14,16 +23,21 @@ CREATE TABLE IF NOT EXISTS video_details (
     aspect_width INTEGER,
     aspect_height INTEGER,
     audio_tracks INTEGER,
+    probe_data TEXT,
     search_phrase TEXT,
     state INTEGER DEFAULT 0,
     created_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_collection ON video_details(collection, video);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_collection ON video_details(collection, video);
 
 CREATE TABLE IF NOT EXISTS history (
     checksum INTEGER PRIMARY KEY NOT NULL,
-    started TIMESTAMP,
-    stopped TIMESTAMP
+    started REAL,
+    stopped REAL,
+    created_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_history_updated_on ON history(updated_on);

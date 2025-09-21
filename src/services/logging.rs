@@ -3,7 +3,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 //const FILTER: &str = "tvserver=debug,tower_http=debug";
 pub const TVSERVER_LOG: &str = "tvserver=info,tower_http=debug";
 pub const DBTOOL_LOG: &str = "dbtool=info,tvserver=info";
-
+pub const TAURI_LOG: &str = "app_lib=info,tauri=info";
 
 pub fn setup_logging(filter: &str) {
     let format = fmt::format()
