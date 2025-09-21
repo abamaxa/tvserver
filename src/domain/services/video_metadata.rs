@@ -1,7 +1,7 @@
 use crate::domain::algorithm::get_collection_and_video_from_path;
 use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
 use crate::domain::models::{VideoDetails, VideoMetadata, VideoState};
-use crate::domain::traits::Repository;
+use crate::domain::traits::{Repository, Storer};
 use rand::Rng;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
@@ -24,7 +24,8 @@ pub enum MetaDataErrorCode {
     CalculateChecksum = 4,
     ExtractFrame = 5,
     SaveVideo = 6,
-    GetVideoMetaData = 7
+    GetVideoMetaData = 7,
+    AddFile = 8,
 }
 
 
@@ -62,7 +63,7 @@ impl MetaDataError {
     }
 }
 
-pub async fn generate_video_metadatas(path: PathBuf, repo: Repository, suggested_series: Option<String>) -> Result<Option<VideoDetails>, MetaDataError> {
+pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repository, suggested_series: Option<String>) -> Result<Option<VideoDetails>, MetaDataError> {
     eprintln!("processing: {}", path.to_str().unwrap());
     let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
     if !thumbnail_dir.exists() {
@@ -76,21 +77,31 @@ pub async fn generate_video_metadatas(path: PathBuf, repo: Repository, suggested
         return Ok(None);
     }
 
-    let (details, err) = match make_video_metadatas(&path, suggested_series).await {
-        Ok(details) => (details, None),
-        Err(err) => (err.video_details.clone(), Some(err))
+    let mut details = match make_video_metadatas(&path, suggested_series.clone()).await {
+        Ok(details) => details,
+        Err(err) => return Err(err)
     };
 
-    if details.checksum != 0 {
-        if let Err(err) = repo.save_video(&details).await {
-            return Err(MetaDataError::from_error(MetaDataErrorCode::SaveVideo, &err, &path, details));
-        };
+    if details.checksum == 0 {
+        return Err(MetaDataError::new(MetaDataErrorCode::ZeroFileSize, &path, details));
     }
 
-    match err {
-        Some(err) => Err(err),
-        None => Ok(Some(details))
-    }
+    let new_path = match storer.add_file(&details.get_full_path(), suggested_series.clone()).await {
+        Ok(path) => path,
+        Err(err) => return Err(MetaDataError::from_error(MetaDataErrorCode::AddFile, err.as_ref(), &path, details))
+    };
+
+    let (collection, video) = get_collection_and_video_from_path(&new_path);
+
+    details.collection = collection;
+    details.video = video;
+    details.search_phrase = suggested_series;
+
+    if let Err(err) = repo.save_video(&details).await {
+        return Err(MetaDataError::from_error(MetaDataErrorCode::SaveVideo, &err, &path, details));
+    };
+
+    Ok(Some(details))
 }
 
 
@@ -153,7 +164,13 @@ fn is_subdirectory(path: &Path, base: &Path) -> bool {
 }
 
 pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
-    let file = File::open(&path).await?;
+    let file = match File::open(&path).await {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::error!("Failed to open file {}: {}", path.as_ref().display(), e);
+            return Err(e);
+        }
+    };
     let mut reader = BufReader::new(file);
     let mut hasher = DefaultHasher::new();
     let mut buffer = vec![0; 1024 * 1024]; // Read in chunks of 4MB
@@ -260,8 +277,10 @@ async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Bo
         aspect_width,
         aspect_height,
         audio_tracks: audio_track_count,
-        probe_data: Some(output_str),
-    })
+        probe_data: Some(output_str.clone()),
+        audio_track_list: None,
+        subtitle_tracks: None,
+    }.from_probe_data(&Some(output_str)))
 }
 
 async fn extract_random_frame<P: AsRef<Path>>(

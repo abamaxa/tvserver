@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use std::sync::Arc;
 
-use tvserver::domain::traits::{ MockRemotePlayer, RemotePlayer};
+use app_lib::domain::traits::{ MockRemotePlayer, RemotePlayer};
 
 
 pub fn get_remote_player() -> Arc<dyn RemotePlayer> {

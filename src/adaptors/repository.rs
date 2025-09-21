@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use sqlx::{Error, Sqlite, Row};
 use sqlx::migrate::{
     MigrateDatabase, 
@@ -9,9 +9,15 @@ use sqlx::sqlite::{SqlitePool, SqliteRow};
 use std::path;
 use serde_json;
 
+use crate::domain::algorithm::get_thumbnails_url;
 use crate::domain::config::get_database_migration_dir;
-use crate::domain::messages::{LocalMessage, LocalMessageSender, VideoEvent};
-use crate::domain::models::{SeriesDetails, VideoDetails, VideoMetadata, CollectionItem};
+use crate::domain::messages::{LocalMessage, LocalMessageSender, VideoEvent };
+use crate::domain::models::{
+    CollectionItem, 
+    SeriesDetails, 
+    VideoDetails, 
+    VideoMetadata, 
+};
 use crate::domain::traits::Databaser;
 use itertools::Itertools;
 
@@ -51,6 +57,19 @@ impl SqlRepository {
         let thumbnail_str = row.get::<Option<String>, _>("thumbnail").unwrap_or_default();
         let thumbnail: Vec<String> = serde_json::from_str(&thumbnail_str).unwrap_or_default();
 
+        let probe_data_str = row.get::<Option<String>, _>("probe_data");
+        let metadata = VideoMetadata {
+            duration: row.get::<Option<f64>, _>("duration").unwrap_or_default(),
+            width: row.get::<Option<i32>, _>("width").unwrap_or(0) as u32,
+            height: row.get::<Option<i32>, _>("height").unwrap_or(0) as u32,
+            aspect_width: row.get::<Option<i32>, _>("aspect_width").unwrap_or(0) as u32,
+            aspect_height: row.get::<Option<i32>, _>("aspect_height").unwrap_or(0) as u32,
+            audio_tracks: row.get::<Option<i32>, _>("audio_tracks").unwrap_or(1) as u32,
+            probe_data: probe_data_str.clone(),
+            audio_track_list: None,
+            subtitle_tracks: None,
+        }.from_probe_data(&probe_data_str);
+
         VideoDetails {
             video: row.get("video"),
             collection: row.get("collection"),
@@ -62,15 +81,7 @@ impl SqlRepository {
                 episode_title: row.get::<Option<String>, _>("episode_title").unwrap_or_default(),
             },
             thumbnail,
-            metadata: VideoMetadata {
-                duration: row.get::<Option<f64>, _>("duration").unwrap_or_default(),
-                width: row.get::<Option<i32>, _>("width").unwrap_or(0) as u32,
-                height: row.get::<Option<i32>, _>("height").unwrap_or(0) as u32,
-                aspect_width: row.get::<Option<i32>, _>("aspect_width").unwrap_or(0) as u32,
-                aspect_height: row.get::<Option<i32>, _>("aspect_height").unwrap_or(0) as u32,
-                audio_tracks: row.get::<Option<i32>, _>("audio_tracks").unwrap_or(1) as u32,
-                probe_data: row.get::<Option<String>, _>("probe_data"),
-            },
+            metadata,
             checksum: row.get("checksum"),
             search_phrase: row.get("search_phrase"),
             state: row.get::<i32,_>("state").into(),
@@ -86,7 +97,7 @@ impl SqlRepository {
         let mut video_details = Self::from_record(row);
 
         video_details.last_viewed = row.get::<Option<NaiveDateTime>, _>("last_viewed");
-        video_details.play_from = row.get::<Option<NaiveDateTime>, _>("play_from");
+        video_details.play_from = row.get::<Option<f32>, _>("play_from");
 
         video_details
     }
@@ -343,7 +354,7 @@ impl Databaser for SqlRepository {
             // Create a new CollectionItem and add it to the result list.
             series.push(CollectionItem {
                 collection: row.series_title.unwrap_or_default(),
-                thumbnail: thumbnails,
+                thumbnail: get_thumbnails_url(&thumbnails),
             });
         }
         Ok(series)
@@ -467,17 +478,12 @@ impl Databaser for SqlRepository {
             WHERE checksum = ?
         "#;
 
-        // Convert current_time from seconds to a timestamp
-        let timestamp = DateTime::<Utc>::from_timestamp(current_time as i64, 0)
-            .unwrap_or_else(|| Utc::now())
-            .naive_local();
-
         sqlx::query(query)
             .bind(checksum)
-            .bind(timestamp)
-            .bind(timestamp)
-            .bind(timestamp)
-            .bind(timestamp)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(current_time)
+            .bind(current_time)
             .bind(checksum)
             .execute(&self.pool)
             .await?;
@@ -551,6 +557,8 @@ mod tests {
                 aspect_height: 1080,
                 audio_tracks: 2,
                 probe_data: None,
+                audio_track_list: None,
+                subtitle_tracks: None,
             },
             checksum: 1234,
             search_phrase: None,

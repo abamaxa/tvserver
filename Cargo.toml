@@ -8,15 +8,16 @@ license = "MIT"
 readme = "README.md"
 description = "Transmission JRPC client"
 keywords = ["transmission", "torrent", "youtube", "ffmpeg"]
+default-run = "tvserver"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.59"
 async-recursion = "1.0.4"
 async-trait = "0.1.64"
-axum = { version = "0.8.1", features = ["ws", "macros", "tokio"]}
-bytesize = {version = "1.1.0", features = ["serde"]}
-chrono = {version = "0.4.25", features=["serde"]}
+axum = { version = "0.8.1", features = ["ws", "macros", "tokio"] }
+bytesize = {version = "1.1.0", features = ["serde"] }
+chrono = {version = "0.4.25", features= ["serde"] }
 futures = "0.3" 
 html-escape = "0.2.13"
 mockall = "0.11.3"
@@ -33,7 +34,6 @@ thiserror = "1.0.40"
 tokio = { version = "1.25.0", features = ["full"] }
 tokio-util = "0.7.4"
 tower-http = { version = "0.6.1", features = ["fs", "trace", "cors"] }
-# tower = { version = "0.4.13", features = ["util"] }
 titlecase = "2.2.1"
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
@@ -43,6 +43,17 @@ itertools = "0.11.0"
 librqbit = "8.0.0"
 num_cpus = "1.16.0"
 once_cell = "1.21.3"
+# tauri
+log = "0.4"
+tauri = { version = "2.5.0", features = ["protocol-asset"] }
+tauri-plugin-log = "2.0.0-rc"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.2.0", features = [] }
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.
@@ -54,3 +65,15 @@ strip = true # Ensures debug symbols are removed.
 [features]
 vlc = []
 ai-descriptions = []
+webserver = []
+
+# Fix for OpenSSL issues when cross-compiling for Android
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.11.20", features = ["json", "rustls-tls"], default-features = false }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "chrono", "sqlite", "migrate", "json"], default-features = false }
+tauri = { version = "2.5.0", features = ["protocol-asset"], default-features = false }
+
+# Remove OpenSSL dependency completely for Android
+[target.'cfg(target_os = "android")'.dependencies.openssl-sys]
+optional = true
+version = "0.9"

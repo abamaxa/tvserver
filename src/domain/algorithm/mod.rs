@@ -9,7 +9,9 @@ pub use naming::{
     get_next_version_name, 
     get_collection_from_path,
     title_case,
-    replace_extension
+    replace_extension,
+    get_video_url,
+    get_thumbnails_url
 };
 
 pub use video_utils::{

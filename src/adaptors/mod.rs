@@ -6,6 +6,7 @@ mod websocket;
 mod torrent_fetcher;
 mod youtube_fetcher;
 mod telegram;
+mod tauri_channel;
 
 pub use http_fetcher::HTTPClient;
 pub use object_store::FileSystemStore;
@@ -15,3 +16,4 @@ pub use websocket::RemoteBrowserPlayer;
 pub use torrent_fetcher::TorrentFetcher;
 pub use youtube_fetcher::YoutubeFetcher;
 pub use telegram::TelegramBot;
+pub use tauri_channel::{TauriChannelPlayer, setup_frontend_listener};

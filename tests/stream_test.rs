@@ -6,10 +6,10 @@ use common::{get_checker, get_pirate_search};
 use reqwest::{header::RANGE, StatusCode};
 use std::env;
 use std::sync::Arc;
-use tvserver::adaptors::{FileSystemStore, SqlRepository};
-use tvserver::domain::config::MOVIE_DIR;
-use tvserver::domain::traits::{FileStorer, Repository};
-use tvserver::services::MediaStore;
+use app_lib::adaptors::{FileSystemStore, SqlRepository};
+use app_lib::domain::config::MOVIE_DIR;
+use app_lib::domain::traits::{FileStorer, Repository};
+use app_lib::services::MediaStore;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
 

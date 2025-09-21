@@ -149,7 +149,7 @@ pub async fn ws_player_handler(
 
     let (client, response) = RemoteBrowserPlayer::create(ws, addr, messenger.get_sender());
 
-    messenger.add_player(addr, Arc::new(client)).await;
+    messenger.add_player(addr.to_string(), Arc::new(client)).await;
 
     response
 }
@@ -164,7 +164,7 @@ pub async fn ws_control_handler(
 
     let (client, response) = RemoteBrowserPlayer::create(ws, addr, state.get_messenger().get_sender());
 
-    state.get_messenger().add_control(addr, Arc::new(client)).await;
+    state.get_messenger().add_control(addr.to_string(), Arc::new(client)).await;
 
     response
 }
@@ -172,10 +172,11 @@ pub async fn ws_control_handler(
 
 #[debug_handler]
 async fn remote_play(state: State<SharedState>, Json(payload): Json<PlayRequest>) -> StdResponse {
-    let key = payload.address();
-    state
-        .execute(key, payload.make_remote_command())
-        .await
+    let key = payload.address().to_string();
+    match state.get_messenger().execute(key, payload.make_remote_command()).await {
+        Ok(()) => (OK, Json(Response::success("success".to_string()))),
+        Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 #[debug_handler]
@@ -183,9 +184,13 @@ async fn remote_command(
     State(state): State<SharedState>,
     Json(payload): Json<Command>,
 ) -> StdResponse {
-    state
+    match state
+        .get_messenger()
         .execute(payload.address(), payload.message)
-        .await
+        .await {
+            Ok(()) => (OK, Json(Response::success("success".to_string()))),
+            Err(e) => std_error(INTERNAL_SERVER_ERROR, e.to_string()),
+        }
 }
 
 #[debug_handler]

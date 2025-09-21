@@ -8,7 +8,7 @@ use tower_http::{
 use anyhow::Result;
 use tokio::{task::JoinHandle, time};
 
-use tvserver::{
+use app_lib::{
     domain::config::{get_client_path, get_movie_dir},
     entrypoints::{register, Context},
 };

@@ -1,13 +1,10 @@
-use axum::http::StatusCode;
-use axum::Json;
 use sqlx::Error;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::adaptors::{FileSystemStore, HTTPClient, SqlRepository, TelegramBot, TokioProcessSpawner, TorrentFetcher, YoutubeFetcher};
 use crate::domain::config::{get_database_url, get_google_key, get_movie_dir, get_telegram_token, get_telegram_chat_id};
 use crate::domain::messagebus::{LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter};
-use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender, RemoteMessage, Response};
+use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
 use crate::domain::services::MediaCheck;
 use crate::domain::traits::FileStorer;
 use crate::domain::SearchEngineType;
@@ -87,9 +84,9 @@ impl Context {
         self.search.clone()
     }
 
-    pub async fn execute(&self, key: SocketAddr, command: RemoteMessage) -> (StatusCode, Json<Response>) {
+    /*pub async fn execute(&self, key: SocketAddr, command: RemoteMessage) -> (StatusCode, Json<Response>) {
         self.messenger.execute(key, command).await
-    }
+    }*/
 
     pub fn get_messenger(&self) -> &MessageExchange {
         &self.messenger
@@ -113,6 +110,10 @@ pub async fn create_context() -> Result<Context, Error> {
 
     let youtube_fetcher = Arc::new(YoutubeFetcher::new(spawner.clone()));
 
+    let repository = Arc::new(
+        SqlRepository::new(&get_database_url(), Some(local_message_exchange.new_sender())).await?
+    );
+
     let torrent_search = Arc::new(
         SearchEngine::new(
             SearchEngineType::Torrent, 
@@ -129,18 +130,15 @@ pub async fn create_context() -> Result<Context, Error> {
         )
     );
 
-    let search = SearchService::new(
+    let search_service = SearchService::new(
         task_manager.clone(),
-        vec![torrent_search, youtube_search]
+        vec![torrent_search, youtube_search],
+        repository.clone()
     );
 
     let messenger = MessageExchange::new(
         local_message_exchange.new_sender(), 
         local_message_exchange.listen_for_messages( MessageFilter::All).await.unwrap()
-    );
-
-    let repository = Arc::new(
-        SqlRepository::new(&get_database_url(), Some(local_message_exchange.new_sender())).await?
     );
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
@@ -159,7 +157,7 @@ pub async fn create_context() -> Result<Context, Error> {
     
     Ok(Context::new(
         Arc::new(MediaStore::new(file_storer, repository.clone())),
-        search,
+        search_service,
         messenger,
         task_manager,
         repository,

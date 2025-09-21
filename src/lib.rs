@@ -10,53 +10,21 @@ pub mod adaptors;
 pub mod domain;
 pub mod entrypoints;
 pub mod services;
+#[cfg(not(feature = "webserver"))]
+use entrypoints::run_tauri;
+#[cfg(feature = "webserver")]
+use entrypoints::run_webserver;
 
-use std::{net::SocketAddr, sync::Arc};
-use tower_http::{
-    cors::CorsLayer,
-    services::ServeDir,
-    trace::{DefaultMakeSpan, TraceLayer},
-};
-use crate::services::{setup_logging, TVSERVER_LOG};
-use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
-use crate::entrypoints::TVServer;
-use crate::entrypoints::register;
-
+#[cfg(feature = "webserver")]
 pub async fn run() -> anyhow::Result<()> {
-    setup_logging(TVSERVER_LOG);
-
-    let tvserver = TVServer::new().await?;
-
-    run_http_server(&tvserver).await?;
-
-    tvserver.shutdown();
-
-    Ok(())
+    run_webserver().await
 }
 
-async fn run_http_server(tvserver: &TVServer) -> anyhow::Result<()> {
-    let context = tvserver.get_context().clone();
-
-    let app = register(Arc::new(context))
-        .fallback_service(ServeDir::new(get_client_path("newapp")))
-        .nest_service("/player", ServeDir::new(get_client_path("player")))
-        .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
-        .nest_service(
-            "/api/thumbnails",
-            ServeDir::new(get_thumbnail_dir(&get_movie_dir())),
-        )
-        .layer(CorsLayer::permissive())
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::default().include_headers(false)),
-        );
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], 80));
-    tracing::info!("listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
-
-    Ok(())
+#[cfg(not(feature = "webserver"))]
+#[cfg_attr(not(mobile), tokio::main)]
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub async fn run() {
+    // on desktop, tokio::main handles the async runtime
+    // on mobile, mobile_entry_point handles the async runtime
+    run_tauri().await;
 }

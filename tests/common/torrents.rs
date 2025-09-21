@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::fs;
 use transmission_rpc::types::Torrent;
 
-use tvserver::domain::{messages::DownloadInfo, traits::{Downloader, MockDownload, MockDownloadProgress}};
+use app_lib::domain::{messages::DownloadInfo, traits::{Downloader, MockDownload, MockDownloadProgress}};
 
 #[derive(Deserialize)]
 pub struct TorrentGetResult {

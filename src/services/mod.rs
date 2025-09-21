@@ -9,7 +9,7 @@ mod video_information;
 mod youtube;
 mod sharing;
 
-pub use logging::{TVSERVER_LOG, DBTOOL_LOG, setup_logging};
+pub use logging::{TVSERVER_LOG, DBTOOL_LOG, TAURI_LOG, setup_logging};
 pub use media_store::MediaStore;
 pub use monitor::Monitor;
 pub use pirate_bay::{PirateClient, PirateFetcher};

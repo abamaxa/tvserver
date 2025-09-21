@@ -4,13 +4,20 @@ use super::super::messages::{LocalMessage, PlayerListItem, ReceivedRemoteMessage
 use super::super::traits::{RemotePlayer, SendError};
 use super::client_manager::{ClientMap, MessengerMap};
 use axum::{http::StatusCode, Json};
-use std::net::SocketAddr;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MessageExchangeError {
+    #[error("No players connected")]
+    NoPlayers,
+    #[error("Internal server error")]
+    ExecuteError,
+}
 
 #[derive(Clone)]
 pub struct MessageExchange {
@@ -40,6 +47,7 @@ impl MessageExchange {
             })(client_map.clone()),
         );
 
+        #[cfg(feature = "webserver")]
         let _ = tokio::spawn((|client_map: ClientMap| async move {
             loop {
                 MessageExchange::check_clients(client_map.clone()).await
@@ -59,20 +67,16 @@ impl MessageExchange {
         exchanger
     }
 
-    pub async fn add_player(&self, key: SocketAddr, client: Arc<dyn RemotePlayer>) {
+    pub async fn add_player(&self, key: String, client: Arc<dyn RemotePlayer>) {
         self.client_map.write().await.add_player(key, client)
     }
 
-    pub async fn add_control(&self, key: SocketAddr, client: Arc<dyn RemotePlayer>) {
+    pub async fn add_control(&self, key: String, client: Arc<dyn RemotePlayer>) {
         self.client_map.write().await.add_control(key, client);
     }
 
-    pub async fn get(&self, key: SocketAddr) -> Option<Arc<dyn RemotePlayer>> {
+    pub async fn get(&self, key: &String) -> Option<Arc<dyn RemotePlayer>> {
         self.client_map.read().await.get(key)
-    }
-
-    pub async fn remove(&self, key: SocketAddr) {
-        self.client_map.write().await.remove(key).await
     }
 
     pub async fn list_players(&self) -> Vec<PlayerListItem> {
@@ -93,16 +97,16 @@ impl MessageExchange {
 
     pub async fn on_player_message(
         client_map: ClientMap,
-        player_key: SocketAddr,
+        player_key: String,
         message: RemoteMessage,
         _local_sender: LocalMessageSender,
     ) {
         let _ = match message {
             RemoteMessage::Ping(who) => _ = who,
-            RemoteMessage::Pong(who) => client_map.write().await.update_timestamp(&who),
-            RemoteMessage::Close(who) => client_map.write().await.remove(who).await,
+            RemoteMessage::Pong(who) => client_map.write().await.update_timestamp(&who.to_string()),
+            RemoteMessage::Close(who) => client_map.write().await.remove(&who).await,
             RemoteMessage::SendLastState => {
-                client_map.read().await.send_last_message(player_key).await
+                client_map.read().await.send_last_message(&player_key).await
             }
             RemoteMessage::State(state) => {
                 if let Err(e) = _local_sender.send(LocalMessage::PlayerState(state.clone())).await {
@@ -116,14 +120,14 @@ impl MessageExchange {
 
     async fn dispatch_message(
         client_map: ClientMap,
-        player_key: SocketAddr,
+        player_key: String,
         message: RemoteMessage,
     ) {
         let mut clients = vec![];
         {
             let mut map = client_map.write().await;
 
-            clients.extend(map.get_clients(player_key));
+            clients.extend(map.get_clients(&player_key));
 
             map.update_last_message(&player_key, message.clone());
         }
@@ -145,27 +149,21 @@ impl MessageExchange {
         }
     }
 
-    pub async fn execute(
-        &self,
-        key: SocketAddr,
-        command: RemoteMessage,
-    ) -> (StatusCode, Json<Response>) {
+    pub async fn execute(&self, key: String, command: RemoteMessage) -> Result<(), MessageExchangeError> {
         // hold the lock for as short a time as possible.
-        let remote_client = match self.get(key).await {
+        let remote_client = match self.get(&key).await {
             Some(client) => client,
-            _ => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(Response::error("no players have connected yet".to_string())),
-                )
-            }
+            _ => return Err(MessageExchangeError::NoPlayers)
         };
 
         // send the command over a websocket to be received by a browser, which should
         // execute the command.
         match remote_client.send(command).await {
-            Ok(result) => (result, Json(Response::success("success".to_string()))),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(Response::error(e.to_string()))),
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::error!("Error sending message to {}: {}", &key, e);
+                Err(MessageExchangeError::ExecuteError)
+            }
         }
     }
 
@@ -209,6 +207,12 @@ impl MessageExchange {
                 // Broadcast to all clients
                 MessageExchange::broadcast_to_all(client_map, remote_message).await;
             },
+            LocalMessage::PlayerState(player_state) => {
+                let remote_message = RemoteMessage::State(player_state.clone());
+                
+                // Broadcast to all clients
+                MessageExchange::broadcast_to_all(client_map, remote_message).await;
+            },
             _ => tracing::warn!("Received unknown local message type: {:?}", message),
         }
     }
@@ -221,7 +225,7 @@ impl MessageExchange {
                 match e {
                     SendError::Disconnected(msg) => {
                         tracing::info!("client already disconnected {}: {}", key, msg);
-                        client_map.write().await.remove(key).await;
+                        client_map.write().await.remove(&key).await;
                     },
                     SendError::Other(msg) => {
                         tracing::error!("error sending message to {}: {}", key, msg);

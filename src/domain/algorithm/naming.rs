@@ -1,4 +1,6 @@
 use crate::domain::config::get_movie_dir;
+#[cfg(not(feature = "webserver"))]
+use crate::domain::config::get_thumbnail_dir;
 use mockall::lazy_static;
 use regex::Regex;
 use std::{collections::HashSet, path::{Path, PathBuf}};
@@ -92,15 +94,6 @@ pub fn generate_display_name(name: &Option<String>) -> String {
     titlecase(&result)
 }
 
-/*
-pub fn get_collection_and_video(path: &str) -> (String, String) {
-    if let Some(pos) = path.rfind("/") {
-        return (path[..pos].to_string(), path[pos..].to_string());
-    } else {
-        return (String::new(), path.to_string());
-    }
-}*/
-
 pub fn get_collection_from_path(path: &Path) -> String {
     let short_path = match path.strip_prefix(&get_movie_dir()) {
         Ok(p) => PathBuf::from(p),
@@ -176,6 +169,41 @@ pub fn title_case(input: &str) -> String {
     }
 
     result.join(" ")
+}
+
+#[cfg(feature = "webserver")]
+pub fn get_video_url(collection: &str, video: &str) -> String {
+    if collection.is_empty() {
+        format!("/api/stream/{}", video)
+    } else {
+        format!("/api/stream/{}/{}", collection, video)
+    }
+}
+
+#[cfg(not(feature = "webserver"))]
+pub fn get_video_url(collection: &str, video: &str) -> String {
+    if collection.is_empty() {
+        format!("{}/{}", get_movie_dir(), video)
+    } else {
+        format!("{}/{}/{}", get_movie_dir(), collection, video)
+    }
+}
+
+#[cfg(feature = "webserver")]
+pub fn get_thumbnails_url(thumbnails: &Vec<String>) -> Vec<String> {
+    thumbnails
+        .iter()
+        .map(|t| format!("/api/thumbnails/{}", t))
+        .collect::<Vec<String>>()
+}
+
+#[cfg(not(feature = "webserver"))]
+pub fn get_thumbnails_url(thumbnails: &Vec<String>) -> Vec<String> {
+    let thumbnail_dir = get_thumbnail_dir(&get_movie_dir()).to_str().unwrap_or_default().to_string();
+    thumbnails
+        .iter()
+        .map(|t| format!("{}/{}", thumbnail_dir, t))
+        .collect::<Vec<String>>()
 }
 
 #[cfg(test)]

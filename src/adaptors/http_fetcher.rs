@@ -38,7 +38,7 @@ impl<'a, Q: Serialize + Sync + Send + 'a> JsonFetcher<'a, YoutubeResponse, Q> fo
         match response.status() {
             StatusCode::OK => Ok(response.json::<YoutubeResponse>().await?),
             StatusCode::UNAUTHORIZED => Err(anyhow!(ACCESS_DENIED_MSG)),
-            _ => Err(anyhow!("Error code {}", response.status())),
+            _ => Err(anyhow!("Error code {}, response: {}", response.status(), response.text().await?)),
         }
     }
 }

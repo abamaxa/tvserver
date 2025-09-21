@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tvserver::{domain::messagebus::MessageFilter, entrypoints::create_context, services::{setup_logging, MetaDataManager, DBTOOL_LOG}};
+use app_lib::{domain::messagebus::MessageFilter, entrypoints::create_context, services::{setup_logging, MetaDataManager, DBTOOL_LOG}};
 
 
 #[tokio::main]
@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
 
     let metadata_manager = MetaDataManager::consume(
         context.get_repository(),
+        context.get_store(),
         context.listen_for_messages(MessageFilter::All).await?,
         context.get_local_sender(),
     );

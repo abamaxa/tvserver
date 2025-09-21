@@ -4,16 +4,16 @@ use crate::common::{get_context, get_repository, get_task_manager};
 use anyhow::Result;
 use common::{get_checker, get_pirate_search};
 use reqwest::StatusCode;
-use tvserver::domain::config::MOVIE_DIR;
+use app_lib::domain::config::MOVIE_DIR;
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
-use tvserver::adaptors::{FileSystemStore, SqlRepository};
-use tvserver::domain::messages::Response;
-use tvserver::domain::traits::{FileStorer, Repository};
-use tvserver::services::MediaStore;
+use app_lib::adaptors::{FileSystemStore, SqlRepository};
+use app_lib::domain::messages::Response;
+use app_lib::domain::traits::{FileStorer, Repository};
+use app_lib::services::MediaStore;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
 

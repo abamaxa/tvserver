@@ -27,8 +27,17 @@ impl DownloadProgress for TorrentDownload {
         let download_dir = config::get_downloads_dir();
         let files = match metadata.as_ref() {
             Some(m) => {
+                let torrent_name = m.name.clone().unwrap_or_default();
+                let potential_subdir = Path::new(&download_dir).join(&torrent_name);
+
+                let base_path = if !torrent_name.is_empty() && potential_subdir.is_dir() {
+                    potential_subdir
+                } else {
+                    PathBuf::from(&download_dir)
+                };
+
                 m.file_infos.iter().map(|f| {
-                    Path::new(&download_dir).join(PathBuf::from(m.name.clone().unwrap_or_else(String::new))).join(&f.relative_filename).to_string_lossy().to_string()
+                    base_path.join(&f.relative_filename).to_string_lossy().to_string()
                 }).collect()
             },
             None => vec![],
@@ -103,9 +112,14 @@ impl TorrentFetcher {
     pub async fn new() -> Self {
         let downloads_dir = config::get_downloads_dir();
         tracing::info!("Downloads directory: {}", downloads_dir);
+        
+        // Set the RUST_LOG environment variable to filter noisy logs
+        std::env::set_var("RUST_LOG", "librqbit_dht::dht=warn,librqbit::torrent_state::live=warn,chunk_requester=warn,peer_connection=warn");
+        
         let client = Session::new(PathBuf::from(downloads_dir))
             .await
             .unwrap();
+            
         TorrentFetcher {client}
     }
 
@@ -129,6 +143,10 @@ impl TorrentFetcher {
                 match response {
                     AddTorrentResponse::Added(_, handle) => {
                         tracing::info!("Torrent added successfully");
+                        Ok(handle)
+                    },
+                    AddTorrentResponse::AlreadyManaged(_, handle) => {
+                        tracing::info!("Torrent already exists");
                         Ok(handle)
                     },
                     _ => {

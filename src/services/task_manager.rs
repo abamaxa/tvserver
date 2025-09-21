@@ -186,7 +186,7 @@ mod test {
         mock_store
             .expect_add_file()
             .times(count_move_file)
-            .returning(|_| Ok(()));
+            .returning(|path, _suggested_series| Ok(std::path::PathBuf::from(path)));
 
         Arc::new(mock_store)
     }

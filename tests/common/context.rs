@@ -1,7 +1,7 @@
-use tvserver::domain::traits::{Checker, Repository, Storer};
-use tvserver::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
-use tvserver::entrypoints::Context;
-use tvserver::services::{SearchService, TaskManager};
+use app_lib::domain::traits::{Checker, Repository, Storer};
+use app_lib::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
+use app_lib::entrypoints::Context;
+use app_lib::services::{SearchService, TaskManager};
 use std::sync::Arc;
 use anyhow::Result;
 

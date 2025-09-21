@@ -28,6 +28,7 @@ impl TVServer {
     
         let metadata_manager = MetaDataManager::consume(
             context.get_repository(),
+            context.get_store(),
             context.listen_for_messages(MessageFilter::All).await.unwrap(),
             context.get_local_sender(),
         );
