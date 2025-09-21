@@ -16,8 +16,8 @@ use entrypoints::run_tauri;
 use entrypoints::run_webserver;
 
 #[cfg(feature = "webserver")]
-pub async fn run() -> anyhow::Result<()> {
-    run_webserver().await
+pub async fn run(port: Option<u16>) -> anyhow::Result<()> {
+    run_webserver(port).await
 }
 
 #[cfg(not(feature = "webserver"))]

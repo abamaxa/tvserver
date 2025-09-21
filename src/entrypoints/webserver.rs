@@ -22,19 +22,19 @@ use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
 use crate::entrypoints::TVServer;
 use crate::entrypoints::register;
 
-pub async fn run_webserver() -> anyhow::Result<()> {
+pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
     setup_logging(TVSERVER_LOG);
 
     let tvserver = TVServer::new().await?;
 
-    run_http_server(&tvserver).await?;
+    run_http_server(&tvserver, port).await?;
 
     tvserver.shutdown();
 
     Ok(())
 }
 
-async fn run_http_server(tvserver: &TVServer) -> anyhow::Result<()> {
+async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Result<()> {
     let context = tvserver.get_context().clone();
 
     let app = register(Arc::new(context))
@@ -51,7 +51,8 @@ async fn run_http_server(tvserver: &TVServer) -> anyhow::Result<()> {
                 .make_span_with(DefaultMakeSpan::default().include_headers(false)),
         );
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 80));
+    let port = port.unwrap_or(80);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
