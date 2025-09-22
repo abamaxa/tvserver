@@ -6,6 +6,7 @@ mod websocket;
 mod torrent_fetcher;
 mod youtube_fetcher;
 mod telegram;
+#[cfg(not(feature = "webserver"))]
 mod tauri_channel;
 
 pub use http_fetcher::HTTPClient;

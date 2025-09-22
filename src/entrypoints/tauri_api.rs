@@ -1,16 +1,26 @@
+#[cfg(not(feature = "webserver"))]
 use std::sync::Arc;
+#[cfg(not(feature = "webserver"))]
 use tauri::ipc::Invoke;
+#[cfg(not(feature = "webserver"))]
 use crate::adaptors::TauriChannelPlayer;
+#[cfg(not(feature = "webserver"))]
 use crate::domain::messages::{
     ClientLogMessage, Command, ConversionRequest, CopyFromServerRequest, DownloadRequest, MediaItem, PlayRequest, PlayerList, Response
 };
+#[cfg(not(feature = "webserver"))]
 use crate::domain::models::{Conversion, DownloadableItem, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
+#[cfg(not(feature = "webserver"))]
 use crate::domain::traits::MediaSharer;
+#[cfg(not(feature = "webserver"))]
 use crate::domain::{SearchEngineType, TaskType};
+#[cfg(not(feature = "webserver"))]
 use super::context::Context;
 
+#[cfg(not(feature = "webserver"))]
 pub type SharedState = Arc<Context>;
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn tasks_add(
     state: tauri::State<'_, SharedState>,
@@ -22,6 +32,7 @@ pub async fn tasks_add(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn tasks_delete(
     state: tauri::State<'_, SharedState>,
@@ -34,6 +45,7 @@ pub async fn tasks_delete(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn tasks_list(
     state: tauri::State<'_, SharedState>
@@ -49,6 +61,7 @@ pub async fn tasks_list(
     Ok(TaskListResults::success(tasks))
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn pirate_search(
     state: tauri::State<'_, SharedState>,
@@ -62,6 +75,7 @@ pub async fn pirate_search(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn youtube_search(
     state: tauri::State<'_, SharedState>,
@@ -75,6 +89,7 @@ pub async fn youtube_search(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn list_root_collection(
     state: tauri::State<'_, SharedState>
@@ -82,6 +97,7 @@ pub async fn list_root_collection(
     list_media(&state, "").await
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn list_collection(
     state: tauri::State<'_, SharedState>,
@@ -90,6 +106,7 @@ pub async fn list_collection(
     list_media(&state, &collection).await
 }
 
+#[cfg(not(feature = "webserver"))]
 async fn list_media(state: &SharedState, collection: &str) -> Result<MediaItem, String> {
     match state.get_store().list(collection).await {
         Ok(result) => Ok(result),
@@ -97,6 +114,7 @@ async fn list_media(state: &SharedState, collection: &str) -> Result<MediaItem, 
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn log_client_message(
     payload: ClientLogMessage
@@ -107,6 +125,7 @@ pub async fn log_client_message(
     Ok(())
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn remote_play(
     state: tauri::State<'_, SharedState>,
@@ -119,6 +138,7 @@ pub async fn remote_play(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn remote_command(
     state: tauri::State<'_, SharedState>,
@@ -130,6 +150,7 @@ pub async fn remote_command(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn list_player(
     state: tauri::State<'_, SharedState>
@@ -138,6 +159,7 @@ pub async fn list_player(
     Ok(players)
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn delete_video(
     state: tauri::State<'_, SharedState>,
@@ -150,6 +172,7 @@ pub async fn delete_video(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn share_video(
     state: tauri::State<'_, SharedState>,
@@ -166,6 +189,7 @@ pub async fn share_video(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn convert_video(
     state: tauri::State<'_, SharedState>,
@@ -179,11 +203,13 @@ pub async fn convert_video(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn list_conversions() -> Result<SearchResults<Conversion>, String> {
     Ok(SearchResults::success(AVAILABLE_CONVERSIONS.to_vec()))
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn channel_connect(
     app: tauri::AppHandle,
@@ -207,6 +233,7 @@ pub async fn channel_connect(
     Ok(Response::success("Channel connection established".to_string()))
 }
 
+#[cfg(not(feature = "webserver"))]
 #[tauri::command]
 pub async fn download_videos(
     state: tauri::State<'_, SharedState>,
@@ -218,6 +245,7 @@ pub async fn download_videos(
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 // Helper function to register all commands
 pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -239,4 +267,4 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         channel_connect,
         download_videos
     ]
-} 
+}
