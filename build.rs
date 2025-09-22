@@ -1,5 +1,6 @@
 // This build script handles platform-specific setup
-fn main() {
+#[cfg(not(feature = "webserver"))]
+fn main() {    
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     
     // Special handling for Android builds to avoid OpenSSL dependency issues
@@ -8,6 +9,11 @@ fn main() {
         println!("cargo:rustc-cfg=no_openssl");
         println!("cargo:rustc-cfg=ossl_no_verify");
     }
-    
+
     tauri_build::build()
+}
+
+#[cfg(feature = "webserver")]
+fn main() {
+
 }

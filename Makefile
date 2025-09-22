@@ -1,6 +1,6 @@
 .PHONY: webserver
 webserver:
-	SQLX_OFFLINE=true DATABASE_URL="sqlite:memory:" DATABASE_MIGRATION_DIR="migrations" cargo build --bin=tvserver --package=tvserver --manifest-path=./Cargo.toml --features=webserver
+	SQLX_OFFLINE=true DATABASE_URL="sqlite:memory:" DATABASE_MIGRATION_DIR="migrations" cargo build --bin=tvserver --package=tvserver --manifest-path=./Cargo.toml --features=webserver --no-default-features
 
 .PHONY: test
 test: test_rust test-js
