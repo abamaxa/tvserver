@@ -16,4 +16,5 @@ pub use websocket::RemoteBrowserPlayer;
 pub use torrent_fetcher::TorrentFetcher;
 pub use youtube_fetcher::YoutubeFetcher;
 pub use telegram::TelegramBot;
+#[cfg(not(feature = "webserver"))]
 pub use tauri_channel::{TauriChannelPlayer, setup_frontend_listener};
