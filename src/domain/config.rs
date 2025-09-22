@@ -1,6 +1,5 @@
 use reqwest::Url;
 use std::env;
-use std::env::VarError;
 use std::path::{Path, PathBuf};
 
 // Environment Variables
@@ -11,9 +10,6 @@ const ENABLE_VLC: &str = "ENABLE_VLC";
 pub const GOOGLE_KEY: &str = "GOOGLE_KEY";
 pub const MOVIE_DIR: &str = "MOVIE_DIR";
 const DOWNLOAD_DIR: &str = "DOWNLOAD_DIR";
-const TRANSMISSION_USER: &str = "TRANSMISSION_USER";
-const TRANSMISSION_PWD: &str = "TRANSMISSION_PWD";
-const TRANSMISSION_URL: &str = "TRANSMISSION_URL";
 const PIRATE_BAY_PROXY_URL: &str = "PIRATE_BAY_PROXY_URL";
 const DELAY_REAPING_TASKS_SECS: &str = "DELAY_REAPING_TASKS_SECS";
 const THUMBNAIL_DIR: &str = "THUMBNAIL_DIR";
@@ -24,7 +20,6 @@ const TELEGRAM_CHAT_ID: &str = "TELEGRAM_CHAT_ID";
 //  Defaults
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
-const DEFAULT_TRANSMISSION_URL: &str = "http://higo.abamaxa.com:9091/transmission/rpc";
 const DEFAULT_CLIENT_DIR: &str = "client";
 const DEFAULT_PB_URL: &str = "https://thehiddenbay.com";
 const DEFAULT_DELAY_REAPING_TASKS_SECS: i64 = 60;
@@ -79,15 +74,6 @@ pub fn get_downloads_dir() -> String {
 
 pub fn get_google_key() -> String {
     env::var(GOOGLE_KEY).unwrap_or_default()
-}
-
-pub fn get_transmission_url() -> Url {
-    let url = env::var(TRANSMISSION_URL).unwrap_or(String::from(DEFAULT_TRANSMISSION_URL));
-    url.parse().expect("TRANSMISSION_URL is malformed")
-}
-
-pub fn get_transmission_credentials() -> (Result<String, VarError>, Result<String, VarError>) {
-    (env::var(TRANSMISSION_USER), env::var(TRANSMISSION_PWD))
 }
 
 pub fn get_pirate_bay_url() -> Url {

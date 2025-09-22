@@ -157,13 +157,14 @@ pub async fn re_encode(
     replace_original: bool,
     spawner: Arc<dyn ProcessSpawner>,
 ) -> Result<(), Box<dyn Error>> {
-    re_encode_video(
+    /*re_encode_video(
         video,
         replace_original,
         VIDEO_CODECS,
         AUDIO_CODECS,
         spawner,
-    ).await
+    ).await*/
+    Ok(())
 }
 
 /// Checks if a video should be re-encoded
@@ -251,7 +252,6 @@ pub async fn re_encode_video(
         codec_args.current_codecs
     );
     
-
     let mut args = vec![
         "-i", 
         current_path.to_str().unwrap_or_default(), 
