@@ -176,11 +176,15 @@ impl MessageExchange {
         // hold the lock for as short a time as possible.
         let remote_client = match self.get(&key).await {
             Some(client) => client,
-            _ => return Err(MessageExchangeError::NoPlayers)
+            _ => {
+                MessageExchange::broadcast_to_all(&self.client_map, command).await;
+                return Ok(());
+            }
         };
 
         // send the command over a websocket to be received by a browser, which should
         // execute the command.
+        tracing::info!("Sending command to {}: {:?}", &key, command);
         match remote_client.send(command).await {
             Ok(_) => Ok(()),
             Err(e) => {
