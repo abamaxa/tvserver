@@ -31,6 +31,7 @@ impl TVServer {
             context.get_store(),
             context.listen_for_messages(MessageFilter::All).await.unwrap(),
             context.get_local_sender(),
+            context.get_spawner(),
         );
 
         let hs = HistoryService::new(  

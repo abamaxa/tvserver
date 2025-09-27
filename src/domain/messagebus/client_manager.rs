@@ -72,6 +72,10 @@ impl MessengerMap {
         });
     }
 
+    pub fn get_last_message(&self, key: &String) -> Option<RemoteMessage> {
+        self.inner.get(key).and_then(|c| c.last_message.clone())
+    }
+
     // Remove Client entries that have a timestamp older than the specified time
     pub async fn remove_old_entries(&mut self, older_than: SystemTime) {
         self.inner.retain(|_, client| client.timestamp > older_than);
