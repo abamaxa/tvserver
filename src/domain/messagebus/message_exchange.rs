@@ -1,6 +1,6 @@
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
 
-use super::super::messages::{LocalMessage, PlayerListItem, ReceivedRemoteMessage, RemoteMessage, Response};
+use super::super::messages::{LocalMessage, PlayerListItem, ReceivedRemoteMessage, RemoteMessage, Response, RemotePlayerState};
 use super::super::traits::{RemotePlayer, SendError};
 use super::client_manager::{ClientMap, MessengerMap};
 use axum::{http::StatusCode, Json};
@@ -113,6 +113,29 @@ impl MessageExchange {
                     tracing::error!("Error sending player state: {}", e);
                 }
                 Self::dispatch_message(client_map, player_key, RemoteMessage::State(state)).await
+            }
+            RemoteMessage::SetPlaybackRate { rate } => {
+                // Merge into last known state and broadcast as State
+                let prev = match client_map.read().await.get_last_message(&player_key) {
+                    Some(RemoteMessage::State(last)) => Some(last.clone()),
+                    _ => None,
+                };
+                let merged = RemotePlayerState::merge_playback_rate(prev, rate);
+                if let Err(e) = _local_sender.send(LocalMessage::PlayerState(merged.clone())).await {
+                    tracing::error!("Error sending player state: {}", e);
+                }
+                Self::dispatch_message(client_map, player_key, RemoteMessage::State(merged)).await
+            }
+            RemoteMessage::SetSubtitleTrack { track_id } => {
+                let prev = match client_map.read().await.get_last_message(&player_key) {
+                    Some(RemoteMessage::State(last)) => Some(last.clone()),
+                    _ => None,
+                };
+                let merged = RemotePlayerState::merge_subtitle_track(prev, track_id);
+                if let Err(e) = _local_sender.send(LocalMessage::PlayerState(merged.clone())).await {
+                    tracing::error!("Error sending player state: {}", e);
+                }
+                Self::dispatch_message(client_map, player_key, RemoteMessage::State(merged)).await
             }
             _ => Self::dispatch_message(client_map, player_key, message).await,
         };

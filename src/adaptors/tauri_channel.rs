@@ -1,12 +1,21 @@
+#[cfg(not(feature = "webserver"))]
 use crate::domain::messages::{ReceivedRemoteMessage, RemoteMessage};
+#[cfg(not(feature = "webserver"))]
 use crate::domain::traits::{RemotePlayer, SendError};
+#[cfg(not(feature = "webserver"))]
 use async_trait::async_trait;
+#[cfg(not(feature = "webserver"))]
 use axum::http::StatusCode;
+#[cfg(not(feature = "webserver"))]
 use tauri::{AppHandle, Runtime};
+#[cfg(not(feature = "webserver"))]
 use tauri::{Emitter, Listener};
+#[cfg(not(feature = "webserver"))]
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+#[cfg(not(feature = "webserver"))]
 use tokio::task::JoinHandle;
 
+#[cfg(not(feature = "webserver"))]
 /// A struct that implements RemotePlayer for Tauri channels
 #[derive(Debug)]
 pub struct TauriChannelPlayer {
@@ -15,6 +24,7 @@ pub struct TauriChannelPlayer {
     channel_name: String,
 }
 
+#[cfg(not(feature = "webserver"))]
 #[async_trait]
 impl RemotePlayer for TauriChannelPlayer {
     async fn send(&self, message: RemoteMessage) -> Result<StatusCode, SendError> {
@@ -32,6 +42,7 @@ impl RemotePlayer for TauriChannelPlayer {
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 impl TauriChannelPlayer {
     pub fn create(app: AppHandle, channel_name: String) -> TauriChannelPlayer {
         let (in_tx, in_rx) = channel(100);
@@ -47,6 +58,7 @@ impl TauriChannelPlayer {
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 /// Handle sending messages to the frontend
 async fn handle_sending(app: AppHandle, mut input: Receiver<RemoteMessage>, channel_name: String) {
     loop {
@@ -61,6 +73,7 @@ async fn handle_sending(app: AppHandle, mut input: Receiver<RemoteMessage>, chan
     }
 }
 
+#[cfg(not(feature = "webserver"))]
 /// Setup a channel listener for incoming messages from the frontend
 pub fn setup_frontend_listener<R: Runtime>(
     app: AppHandle<R>,

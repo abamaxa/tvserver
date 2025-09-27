@@ -62,8 +62,8 @@ pub fn skip_file(name: &str) -> bool {
         ".svi", ".3gp", ".3g2", ".mxf", ".roq", ".nsv", ".flv", ".f4v",
         ".f4p", ".f4a", ".f4b", 
         // subtitles
-        ".srt", ".sub", ".idx", ".ass", ".ssa", ".sup", ".vtt", ".ttml", ".dfxp", ".ttx", ".xml", ".sbv", ".usf",
-        ".usm", ".usx", ".usx2", ".usx3", ".usx4", ".usx5", ".usx6", ".usx7", ".usx8", ".usx9", ".usx10"
+        //".srt", ".sub", ".idx", ".ass", ".ssa", ".sup", ".vtt", ".ttml", ".dfxp", ".ttx", ".xml", ".sbv", ".usf",
+        //".usm", ".usx", ".usx2", ".usx3", ".usx4", ".usx5", ".usx6", ".usx7", ".usx8", ".usx9", ".usx10"
     ];
 
     // Convert the file name to lowercase and extract the extension.

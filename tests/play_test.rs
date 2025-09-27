@@ -95,6 +95,7 @@ async fn test_remote_play() -> Result<()> {
         aspect_width: 1920,
         aspect_height: 1080,
         video_id: (1234567890 as i64).to_string(),
+        metadata: None,
     };
 
     let body = client

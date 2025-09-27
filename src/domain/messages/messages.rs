@@ -1,4 +1,4 @@
-use crate::domain::models::VideoDetails;
+use crate::domain::models::{VideoDetails, VideoMetadata};
 use crate::domain::TaskType;
 use crate::domain::algorithm::get_video_url;
 use mockall::lazy_static;
@@ -20,6 +20,33 @@ pub struct RemotePlayerState {
     pub video: String,
     #[serde(rename = "videoId")]
     pub video_id: String,
+    pub paused: bool,
+    #[serde(rename = "playbackRate")]
+    pub playback_rate: f64,
+    #[serde(rename = "currentSubtitleTrack")]
+    pub current_subtitle_track: Option<i32>,
+}
+
+impl RemotePlayerState {
+    pub fn merge_playback_rate(prev: Option<RemotePlayerState>, rate: f64) -> RemotePlayerState {
+        match prev {
+            Some(mut s) => {
+                s.playback_rate = rate;
+                s
+            }
+            None => RemotePlayerState { playback_rate: rate, ..Default::default() }
+        }
+    }
+
+    pub fn merge_subtitle_track(prev: Option<RemotePlayerState>, track_id: Option<i32>) -> RemotePlayerState {
+        match prev {
+            Some(mut s) => {
+                s.current_subtitle_track = track_id;
+                s
+            }
+            None => RemotePlayerState { current_subtitle_track: track_id, ..Default::default() }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,10 +66,14 @@ pub enum RemoteMessage {
         aspect_width: i32,
         #[serde(rename = "aspectHeight")]
         aspect_height: i32,
+        metadata: Option<VideoMetadata>,
     },
     Seek {
         interval: i32,
     },
+    SetAudioTrack { #[serde(rename = "trackId")] track_id: i32 },
+    SetPlaybackRate { rate: f64 },
+    SetSubtitleTrack { #[serde(rename = "trackId")] track_id: Option<i32> },
     Stop,
     TogglePause(String),
 
@@ -92,6 +123,7 @@ pub struct PlayRequest {
     pub aspect_height: i32,
     #[serde(rename = "videoId")]
     pub video_id: String,
+    pub metadata: Option<VideoMetadata>,
 }
 
 impl PlayRequest {
@@ -107,6 +139,7 @@ impl PlayRequest {
             aspect_width: self.aspect_width,
             aspect_height: self.aspect_height,
             video_id: self.video_id.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 

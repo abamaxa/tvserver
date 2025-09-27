@@ -1,8 +1,12 @@
+#[cfg(not(feature = "webserver"))]
 use crate::{adaptors::setup_frontend_listener, services::{setup_logging, TAURI_LOG}};
 
+#[cfg(not(feature = "webserver"))]
 use super::{tauri_api, tvserver::TVServer};
+#[cfg(not(feature = "webserver"))]
 use std::sync::Arc;
 
+#[cfg(not(feature = "webserver"))]
 pub async fn run_tauri() {
   setup_logging(TAURI_LOG);
   // Create and manage the shared state

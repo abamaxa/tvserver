@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -157,6 +157,8 @@ pub async fn re_encode(
     replace_original: bool,
     spawner: Arc<dyn ProcessSpawner>,
 ) -> Result<(), Box<dyn Error>> {
+    extract_subtitles(video, spawner.clone()).await?;
+    
     re_encode_video(
         video,
         replace_original,
@@ -236,11 +238,11 @@ pub async fn re_encode_video(
     spawner: Arc<dyn ProcessSpawner>,
 ) -> Result<(), Box<dyn Error>> {
     let codec_args = get_re_encoding_args(video, skip_video_codecs, skip_audio_codecs)?;
-    
+
     let current_path = video.get_full_path();
     let file_stem = current_path.file_stem().unwrap_or_default();
     let parent_dir = current_path.parent().unwrap_or_else(|| Path::new(""));
-    
+
     let tmp_output_path = parent_dir.join(format!("{}.tmp.mp4", file_stem.to_string_lossy()));
     let output_path = parent_dir.join(format!("{}.mp4", file_stem.to_string_lossy()));
 
@@ -250,16 +252,15 @@ pub async fn re_encode_video(
         output_path.display(),
         codec_args.current_codecs
     );
-    
 
     let mut args = vec![
-        "-i", 
-        current_path.to_str().unwrap_or_default(), 
+        "-i",
+        current_path.to_str().unwrap_or_default(),
         "-y",
         "-map",
         "0"
     ];
-    
+
     // Convert String vec to &str vec and extend args
     args.extend(codec_args.video_args.iter().map(|s| s.as_str()));
     args.extend(codec_args.audio_args.iter().map(|s| s.as_str()));
@@ -305,7 +306,7 @@ pub async fn re_encode_video(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-            
+
         return Ok(());
     }
 
@@ -321,4 +322,86 @@ pub async fn re_encode_video(
     // video.metadata = metadata;
 
     Ok(())
+}
+
+/// Extracts subtitles from a video file to VTT format
+pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpawner>) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let subtitle_tracks = match &video.metadata.subtitle_tracks {
+        Some(tracks) if !tracks.is_empty() => tracks,
+        _ => {
+            return Ok(Vec::new());
+        }
+    };
+
+    let current_path = video.get_full_path();
+    let file_stem = current_path.file_stem().unwrap_or_default();
+    let parent_dir = current_path.parent().unwrap_or_else(|| Path::new(""));
+
+    let mut extracted_files = Vec::new();
+
+    for (index, track) in subtitle_tracks.iter().enumerate() {
+        let lang_code = if track.language != "und" && !track.language.is_empty() {
+            track.language.to_uppercase()
+        } else {
+            format!("track{}", index)
+        };
+
+        let output_path = parent_dir.join(format!("{}-{}.vtt", file_stem.to_string_lossy(), lang_code));
+
+        tracing::info!(
+            "Extracting subtitle track {} (language: {}) from {} to {}",
+            track.id,
+            track.language,
+            current_path.display(),
+            output_path.display()
+        );
+
+        let current_path_str = current_path.to_string_lossy();
+        let output_path_str = output_path.to_string_lossy();
+
+        let task_cmd = format!("0:s:{}", index);
+        let args = vec![
+            "-i",
+            &current_path_str,
+            "-map",
+            &task_cmd,
+            "-c:s",
+            "webvtt",
+            "-y",
+            &output_path_str,
+        ];
+
+        let task_name = format!("Extract Subtitles {}", video.video);
+        let task = spawner.execute(&task_name,"ffmpeg", args).await;
+        // Wait for the task to complete
+        for _ in 0..7200 {
+            if task.has_finished() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+
+        // Get the task state
+        let result = task.get_state().await;
+
+        if !result.error_string.is_empty() {
+            tracing::info!("Successfully extracted subtitle track {} to {}", track.id, output_path.display());
+            extracted_files.push(output_path);
+        } else {
+            let stderr = result.error_string;
+            tracing::warn!(
+                "Failed to extract subtitle track {} (language: {}): {}",
+                track.id,
+                track.language,
+                stderr
+            );
+            // Continue with other tracks even if one fails
+        }
+    }
+
+    if extracted_files.is_empty() && !subtitle_tracks.is_empty() {
+        return Err(format!("Failed to extract any subtitle tracks from {}", video.video).into());
+    }
+
+    Ok(extracted_files)
 }

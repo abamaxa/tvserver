@@ -1,12 +1,14 @@
 use crate::domain::algorithm::get_collection_and_video_from_path;
 use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
 use crate::domain::models::{VideoDetails, VideoMetadata, VideoState};
-use crate::domain::traits::{Repository, Storer};
+use crate::domain::traits::{ProcessSpawner, Repository, Storer};
+use crate::domain::services::extract_subtitles;
 use rand::Rng;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::Hasher;
+use std::sync::Arc;
 use std::{io, fmt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -26,6 +28,7 @@ pub enum MetaDataErrorCode {
     SaveVideo = 6,
     GetVideoMetaData = 7,
     AddFile = 8,
+    ExtractSubtitles = 9,
 }
 
 
@@ -63,7 +66,7 @@ impl MetaDataError {
     }
 }
 
-pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repository, suggested_series: Option<String>) -> Result<Option<VideoDetails>, MetaDataError> {
+pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repository, suggested_series: Option<String>, spawner: Arc<dyn ProcessSpawner>) -> Result<Option<VideoDetails>, MetaDataError> {
     eprintln!("processing: {}", path.to_str().unwrap());
     let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
     if !thumbnail_dir.exists() {
@@ -100,6 +103,10 @@ pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repos
     if let Err(err) = repo.save_video(&details).await {
         return Err(MetaDataError::from_error(MetaDataErrorCode::SaveVideo, &err, &path, details));
     };
+
+    if let Err(err) = extract_subtitles(&details, spawner).await {
+        return Err(MetaDataError::from_error(MetaDataErrorCode::ExtractSubtitles, &err.as_ref(), &path, details));
+    }
 
     Ok(Some(details))
 }
