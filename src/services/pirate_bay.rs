@@ -87,9 +87,6 @@ impl PirateClient {
             ..Default::default()
         };
         let mut seeders: i32 = 0;
-        let mut date = String::new();
-        let mut size = String::new();
-        let mut uploader = String::new();
 
         // Debug: print the entire row HTML
         debug!("Parsing row HTML: {}", row.html());
@@ -103,17 +100,19 @@ impl PirateClient {
                     // Category - skip
                 }
                 1 => {
-                    // Cell 1 contains the title link
-                    let title_link = cell.select(&LINK_SELECTOR).next()?;
-                    let title = title_link.text().collect::<Vec<_>>();
-                    record.title = (*title.first()?).replace('.', " ");
-                }
-                2 => {
-                    // Date
-                    date = PirateClient::get_element_text(&cell);
-                }
-                3 => {
-                    // Cell 3 contains the magnet link
+                    // Cell 1 now contains title, magnet link, and description (date, size, uploader)
+                    // Get title from <div class="detName"> -> <a class="detLink">
+                    if let Some(title_link) = cell.select(&LINK_SELECTOR)
+                        .find(|elem| elem.value().attr("class")
+                            .map(|c| c.contains("detLink"))
+                            .unwrap_or(false)) 
+                    {
+                        let title = title_link.text().collect::<Vec<_>>();
+                        record.title = (*title.first()?).replace('.', " ");
+                        debug!("Found title: {}", record.title);
+                    }
+                    
+                    // Get magnet link
                     if let Some(magnet_link) = cell.select(&LINK_SELECTOR)
                         .find(|elem| elem.value().attr("href")
                             .map(|href| href.starts_with("magnet:"))
@@ -123,39 +122,29 @@ impl PirateClient {
                             .unwrap_or_else(|_| String::new().into())
                             .to_string();
                         record.link = link;
-                        debug!("Found magnet link in cell 3");
+                        debug!("Found magnet link");
                     } else {
-                        debug!("No magnet link found in cell 3");
+                        debug!("No magnet link found in cell 1");
+                    }
+                    
+                    // Get description from <font class="detDesc">
+                    if let Some(desc_elem) = cell.select(&DESC_SELECTOR).next() {
+                        let desc_text = PirateClient::get_element_text(&desc_elem);
+                        record.description = desc_text.replace("&nbsp;", " ");
+                        debug!("Found description: {}", record.description);
                     }
                 }
-                4 => {
-                    // Size
-                    size = PirateClient::get_element_text(&cell);
-                }
-                5 => {
+                2 => {
                     // Seeders
                     seeders = PirateClient::get_element_i32(&cell).unwrap_or(0);
+                    debug!("Seeders: {}", seeders);
                 }
-                6 => {
+                3 => {
                     // Leechers
                     // let leechers = PirateClient::get_element_i32(&cell).unwrap_or(0);
                 }
-                7 => {
-                    // Uploader
-                    uploader = PirateClient::get_element_text(&cell);
-                }
                 _ => continue,
             }
-        }
-
-        // Construct description from the collected parts
-        if !date.is_empty() || !size.is_empty() || !uploader.is_empty() {
-            record.description = format!(
-                "Uploaded {}, Size {}, ULed by {}",
-                date.replace("&nbsp;", " "),
-                size.replace("&nbsp;", " "),
-                uploader
-            );
         }
 
         // Skip results with no seeders or no magnet link
