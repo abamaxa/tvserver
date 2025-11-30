@@ -172,6 +172,11 @@ impl FileStore for FileSystemStore {
             Err(e) => Err(anyhow!(e)),
         }
     }
+
+    async fn remove_empty_dir(&self, path: &Path) -> Result<()> {
+        fs::remove_dir(path).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -352,6 +352,12 @@ async fn extract_random_frame<P: AsRef<Path>>(
     ];
 
     let thumbnail_dir = get_thumbnail_dir(&get_movie_dir());
+    
+    // Ensure the thumbnail directory exists
+    if !thumbnail_dir.exists() {
+        std::fs::create_dir_all(&thumbnail_dir)?;
+    }
+    
     let mut paths = Vec::with_capacity(sizes.len());
 
     for (width, height) in sizes {
@@ -372,10 +378,12 @@ async fn extract_random_frame<P: AsRef<Path>>(
             .arg("1")
             .arg("-q:v")
             .arg("2")
+            .arg("-update")
+            .arg("1")
             .arg("-y")
             .arg(&output_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .output()
             .await?;
 

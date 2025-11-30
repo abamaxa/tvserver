@@ -31,7 +31,7 @@ pub type Searcher = Arc<dyn MediaSearcher<DownloadableItem>>;
 pub trait MediaStorer: Send + Sync {
     async fn list(&self, collection: &str) -> anyhow::Result<MediaItem>;
     async fn add_file(&self, full_path: &Path, suggested_series: Option<String>) -> anyhow::Result<PathBuf>;
-    async fn delete(&self, video_id: i64) -> anyhow::Result<()>;
+    async fn delete(&self, video_id: String) -> anyhow::Result<()>;
 }
 
 pub type Storer = Arc<dyn MediaStorer>;
@@ -126,6 +126,7 @@ pub trait FileStore: Sync + Send {
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
+    async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()>;
 }
 
 pub type FileStorer = Arc<dyn FileStore>;
