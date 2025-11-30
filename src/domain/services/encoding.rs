@@ -89,7 +89,9 @@ pub async fn convert_to_mp4(video: &mut VideoDetails) -> Result<(), Box<dyn Erro
             "-i", 
             &current_path_str, 
             "-map", 
-            "0", 
+            "0:v", 
+            "-map", 
+            "0:a", 
             "-c:v", 
             "copy", 
             "-c:a", 
@@ -258,7 +260,9 @@ pub async fn re_encode_video(
         current_path.to_str().unwrap_or_default(),
         "-y",
         "-map",
-        "0"
+        "0:v",
+        "-map",
+        "0:a"
     ];
 
     // Convert String vec to &str vec and extend args

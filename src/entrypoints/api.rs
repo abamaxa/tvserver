@@ -200,7 +200,7 @@ async fn list_player(State(state): State<SharedState>) -> (StatusCode, Json<Play
 }
 
 #[debug_handler]
-async fn delete_video(state: State<SharedState>, video_id: Path<i64>) -> StdResponse {
+async fn delete_video(state: State<SharedState>, video_id: Path<String>) -> StdResponse {
     /*
     Cannot delete filenames with the `#` character in the name, think this is due
     to axum seeing everything past the # as being part of the query instead of the

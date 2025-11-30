@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::algorithm::{get_collection_from_path, get_videos_for_series_or_id, skip_file, title_case};
-use crate::domain::config::get_movie_dir;
+use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
 use crate::domain::messages::MediaItem;
 use async_trait::async_trait;
 
@@ -56,6 +56,32 @@ impl MediaStore {
             ))
         }
     }
+
+    /// Deletes the parent directory of the given path if empty, then recursively
+    /// deletes empty parent directories up to (but not including) movie_dir.
+    async fn cleanup_empty_directories(&self, file_path: &Path, movie_dir: &str) {
+        let movie_dir_path = Path::new(movie_dir);
+        let mut current_dir = file_path.parent();
+
+        while let Some(dir) = current_dir {
+            // Stop if we've reached or gone above movie_dir
+            if dir == movie_dir_path || !dir.starts_with(movie_dir_path) {
+                break;
+            }
+
+            // Try to remove the directory (only succeeds if empty)
+            match self.store.remove_empty_dir(dir).await {
+                Ok(_) => {
+                    tracing::info!("Deleted empty directory: {}", dir.display());
+                    current_dir = dir.parent();
+                }
+                Err(_) => {
+                    // Directory not empty or other error, stop climbing
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -93,18 +119,43 @@ impl MediaStorer for MediaStore {
     }
 
     /// Delete a media file, ensuring that the file path is within the movie directory.
-    async fn delete(&self, video_id: i64) -> anyhow::Result<()> {
-        let video = self.repo.retrieve_video(video_id).await?;
-        let mut full_path = video.get_full_path();
-        let movie_dir = get_movie_dir();
-        if !full_path.starts_with(&movie_dir) {
-            full_path = PathBuf::from(movie_dir).join(full_path);
+    /// Also deletes associated thumbnails and cleans up empty directories.
+    async fn delete(&self, video_id: String) -> anyhow::Result<()> {
+        let videos = get_videos_for_series_or_id(self.repo.clone(), &video_id).await?;
+        if videos.is_empty() {
+            return Err(anyhow::anyhow!("Video not found: {}", video_id));
         }
-        // there's a race here, where the video is deleted from the filesystem but
-        // could be picked up by the media checker and queued for insertion into 
-        // the database.
-        self.store.delete(full_path.to_str().unwrap_or_default()).await?;
-        self.repo.delete_video(video_id).await?;
+
+        let movie_dir = get_movie_dir();
+        let thumbnail_dir = get_thumbnail_dir(&movie_dir);
+
+        for video in videos {
+            // Delete thumbnails first
+            for thumbnail_filename in &video.thumbnail {
+                let thumbnail_path = thumbnail_dir.join(thumbnail_filename);
+                if let Err(e) = self.store.delete(thumbnail_path.to_str().unwrap_or_default()).await {
+                    tracing::warn!("Failed to delete thumbnail {:?}: {}", thumbnail_path, e);
+                }
+            }
+
+            // Delete video file
+            let mut full_path = video.get_full_path();
+            if !full_path.starts_with(&movie_dir) {
+                full_path = PathBuf::from(&movie_dir).join(full_path);
+            }
+            // there's a race here, where the video is deleted from the filesystem but
+            // could be picked up by the media checker and queued for insertion into
+            // the database.
+            tracing::info!("Deleting video from filesystem: {}", full_path.display());
+            self.store.delete(full_path.to_str().unwrap_or_default()).await?;
+
+            // Delete from database
+            tracing::info!("Deleting video from database: {}", video.checksum);
+            self.repo.delete_video(video.checksum).await?;
+
+            // Clean up empty directories
+            self.cleanup_empty_directories(&full_path, &movie_dir).await;
+        }
         Ok(())
     }
 }

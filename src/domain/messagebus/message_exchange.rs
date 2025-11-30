@@ -4,6 +4,7 @@ use super::super::messages::{LocalMessage, PlayerListItem, ReceivedRemoteMessage
 use super::super::traits::{RemotePlayer, SendError};
 use super::client_manager::{ClientMap, MessengerMap};
 use axum::{http::StatusCode, Json};
+use std::net::SocketAddr;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -102,7 +103,19 @@ impl MessageExchange {
         _local_sender: LocalMessageSender,
     ) {
         let _ = match message {
-            RemoteMessage::Ping(who) => _ = who,
+            RemoteMessage::Ping(_timestamp) => {
+                // Send Pong response back to the client that sent the Ping
+                if let Some(client) = client_map.read().await.get(&player_key) {
+                    // Parse player_key as SocketAddr for the Pong response
+                    if let Ok(addr) = player_key.parse::<SocketAddr>() {
+                        if let Err(e) = client.send(RemoteMessage::Pong(addr)).await {
+                            tracing::debug!("Failed to send Pong to {}: {}", player_key, e);
+                        }
+                    } else {
+                        tracing::debug!("Could not parse player_key as SocketAddr: {}", player_key);
+                    }
+                }
+            }
             RemoteMessage::Pong(who) => client_map.write().await.update_timestamp(&who.to_string()),
             RemoteMessage::Close(who) => client_map.write().await.remove(&who).await,
             RemoteMessage::SendLastState => {
@@ -176,11 +189,15 @@ impl MessageExchange {
         // hold the lock for as short a time as possible.
         let remote_client = match self.get(&key).await {
             Some(client) => client,
-            _ => return Err(MessageExchangeError::NoPlayers)
+            _ => {
+                MessageExchange::broadcast_to_all(&self.client_map, command).await;
+                return Ok(());
+            }
         };
 
         // send the command over a websocket to be received by a browser, which should
         // execute the command.
+        tracing::info!("Sending command to {}: {:?}", &key, command);
         match remote_client.send(command).await {
             Ok(_) => Ok(()),
             Err(e) => {

@@ -43,8 +43,6 @@ impl Client {
 #[derive(Clone, Default)]
 pub struct MessengerMap {
     inner: HashMap<String, Client>,
-    default_player: Option<Arc<dyn RemotePlayer>>,
-    default_player_key: Option<String>,
 }
 
 impl MessengerMap {
@@ -83,8 +81,6 @@ impl MessengerMap {
 
     pub fn add_player(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
         self.inner.insert(key.clone(), Client::new_player(&client));
-        self.default_player = Some(client);
-        self.default_player_key = Some(key);
     }
 
     pub fn add_control(&mut self, key: String, client: Arc<dyn RemotePlayer>) {
@@ -96,18 +92,11 @@ impl MessengerMap {
             return Some(entry.client.clone());
         }
 
-        self.default_player.clone()
+        None
     }
 
     pub async fn remove(&mut self, key: &String) {
-        let mut clear_default = false;
-
         if let Some(client) = self.inner.remove(key) {
-            if client.role == ClientRole::Player {
-                // TODO: should check if no more players in Map, or even
-                clear_default = self.inner.is_empty();
-            }
-
             if let Err(e) = client.client.send(RemoteMessage::Close(key.clone())).await {
                 match e {
                     SendError::Disconnected(msg) => {
@@ -118,11 +107,6 @@ impl MessengerMap {
                     }
                 }
             }
-        }
-
-        if clear_default || self.default_player_key.as_ref() == Some(key) {
-            self.default_player = None;
-            self.default_player_key = None;
         }
     }
 

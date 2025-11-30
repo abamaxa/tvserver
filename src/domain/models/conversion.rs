@@ -19,7 +19,7 @@ const TO_MP4: Conversion = Conversion {
     name: "Convert to MP4",
     description: "Copies all video and audio streams to a new file in the MP4 file format",
     exec: "ffmpeg",
-    args: "-i '{source}' -map 0 -c:v copy -c:a copy -y '{destination}'",
+    args: "-i '{source}' -map 0:v -map 0:a -c:v copy -c:a copy -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -36,7 +36,7 @@ const TO_X265: Conversion = Conversion {
     description:
     "Encodes the video stream with the x265 codec, all audio streams are copied unchanged",
     exec: "ffmpeg",
-    args: "-i '{source}' -map 0 -c:v libx265 -vtag hvc1 -vprofile main -c:a copy -pix_fmt yuv420p -y '{destination}'",
+    args: "-i '{source}' -map 0:v -map 0:a -c:v libx265 -vtag hvc1 -vprofile main -c:a copy -pix_fmt yuv420p -y '{destination}'",
     extension: None,
 };
 
@@ -53,7 +53,7 @@ const TO_H264_AAC_MP4: Conversion = Conversion {
     name: "Convert to H.264, AAC + MP4",
     description: "Encodes video with H.264 codec, audio with AAC codec and saves as MP4 file",
     exec: "ffmpeg",
-    args: "-i '{source}' -map 0 -c:v libx264 -profile:v high -level 4.0 -preset slow -crf 22 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
+    args: "-i '{source}' -map 0:v -map 0:a -c:v libx264 -profile:v high -level 4.0 -preset slow -crf 22 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -61,7 +61,7 @@ const TO_H265_AAC_MP4: Conversion = Conversion {
     name: "Convert to H.265, AAC + MP4",
     description: "Encodes video with H.265 codec, audio with AAC codec and saves as MP4 file",
     exec: "ffmpeg",
-    args: "-i '{source}' -map 0 -c:v libx265 -profile:v main -crf 28 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
+    args: "-i '{source}' -map 0:v -map 0:a -c:v libx265 -profile:v main -crf 28 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -71,7 +71,7 @@ const TO_MPEG4_AAC_MP4: Conversion = Conversion {
         "Encodes video with MPEG-4 Part 2 codec, audio with AAC codec and saves as MP4 file",
     exec: "ffmpeg",
     args:
-        "-i '{source}' -map 0 -c:v mpeg4 -q:v 5 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
+        "-i '{source}' -map 0:v -map 0:a -c:v mpeg4 -q:v 5 -c:a aac -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mp4"),
 };
 
@@ -80,7 +80,7 @@ const TO_VP9_AAC_MKV: Conversion = Conversion {
     description: "Encodes video with VP9 codec, audio with AAC codec and saves as MKV file",
     exec: "ffmpeg",
     args:
-    "-i '{source}' -map 0 -c:v libvpx-vp9 -crf 30 -b:v 0 -c:a libopus -b:a 128k -movflags +faststart -y '{destination}'",
+    "-i '{source}' -map 0:v -map 0:a -c:v libvpx-vp9 -crf 30 -b:v 0 -c:a libopus -b:a 128k -movflags +faststart -y '{destination}'",
     extension: Some("mkv"),
 };
 

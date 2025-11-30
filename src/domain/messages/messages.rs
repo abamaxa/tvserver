@@ -100,6 +100,7 @@ pub struct ReceivedRemoteMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Command {
     pub remote_address: Option<String>,
     pub message: RemoteMessage,

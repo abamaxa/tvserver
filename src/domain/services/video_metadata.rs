@@ -29,6 +29,7 @@ pub enum MetaDataErrorCode {
     GetVideoMetaData = 7,
     AddFile = 8,
     ExtractSubtitles = 9,
+    FileStillBeingWritten = 11,
 }
 
 
@@ -78,6 +79,21 @@ pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repos
 
     if is_subdirectory(&path, &thumbnail_dir) {
         return Ok(None);
+    }
+
+    // Check if file is still being written to
+    match is_file_being_written(&path).await {
+        Ok(true) => {
+            tracing::info!("Skipping file that is still being written: {}", path.display());
+            return Ok(None);
+        }
+        Ok(false) => {
+            // File is stable, continue processing
+        }
+        Err(e) => {
+            tracing::warn!("Could not check if file is being written: {}", e);
+            // Continue processing anyway
+        }
     }
 
     let mut details = match make_video_metadatas(&path, suggested_series.clone()).await {
@@ -168,6 +184,22 @@ fn is_subdirectory(path: &Path, base: &Path) -> bool {
 
     // Check if the canonical path starts with the canonical base path
     canonical_path.starts_with(&canonical_base)
+}
+
+async fn is_file_being_written<P: AsRef<Path>>(path: P) -> io::Result<bool> {
+    // Get initial metadata
+    let initial_metadata = fs::metadata(&path).await?;
+    let initial_size = initial_metadata.len();
+
+    // Wait a short time
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Get metadata again
+    let current_metadata = fs::metadata(&path).await?;
+    let current_size = current_metadata.len();
+
+    // If size changed, file is still being written
+    Ok(initial_size != current_size)
 }
 
 pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
@@ -320,6 +352,12 @@ async fn extract_random_frame<P: AsRef<Path>>(
     ];
 
     let thumbnail_dir = get_thumbnail_dir(&get_movie_dir());
+    
+    // Ensure the thumbnail directory exists
+    if !thumbnail_dir.exists() {
+        std::fs::create_dir_all(&thumbnail_dir)?;
+    }
+    
     let mut paths = Vec::with_capacity(sizes.len());
 
     for (width, height) in sizes {
@@ -340,10 +378,12 @@ async fn extract_random_frame<P: AsRef<Path>>(
             .arg("1")
             .arg("-q:v")
             .arg("2")
+            .arg("-update")
+            .arg("1")
             .arg("-y")
             .arg(&output_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .output()
             .await?;
 
@@ -372,6 +412,13 @@ fn get_thumbnail_path_with_size<P: AsRef<Path>>(thumbnail_dir: &PathBuf, video: 
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy();
-    let output_filename = format!("{}_thumbnail_{}.jpg", input_filename, width);
+    // Replace problematic characters to avoid ffmpeg image2 muxer pattern matching issues
+    // Spaces and dots can confuse the image2 muxer into thinking the filename is a pattern
+    let sanitized_filename = input_filename
+        .replace('.', "_")
+        .replace(' ', "_")
+        .replace('(', "_")
+        .replace(')', "_");
+    let output_filename = format!("{}_thumbnail_{}.jpg", sanitized_filename, width);
     thumbnail_dir.join(output_filename)
 }
