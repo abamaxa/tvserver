@@ -12,11 +12,13 @@ pub mod entrypoints;
 pub mod services;*/
 
 use std::{net::SocketAddr, sync::Arc};
+use axum::{middleware, Router};
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
+use crate::adaptors::restrict_access;
 use crate::services::{setup_logging, TVSERVER_LOG};
 use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
 use crate::entrypoints::TVServer;
@@ -37,14 +39,23 @@ pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
 async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Result<()> {
     let context = tvserver.get_context().clone();
 
-    let app = register(Arc::new(context))
-        .fallback_service(ServeDir::new(get_client_path("newapp")))
+    // Protected routes: API endpoints, player, and fallback (app)
+    let protected_routes = register(Arc::new(context))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
+        .fallback_service(ServeDir::new(get_client_path("newapp")))
+        .layer(middleware::from_fn(restrict_access));
+
+    // Unprotected routes: streaming and thumbnails (need external access for casting)
+    let unprotected_routes = Router::new()
         .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
         .nest_service(
             "/api/thumbnails",
             ServeDir::new(get_thumbnail_dir(&get_movie_dir())),
-        )
+        );
+
+    let app = Router::new()
+        .merge(unprotected_routes)
+        .merge(protected_routes)
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()

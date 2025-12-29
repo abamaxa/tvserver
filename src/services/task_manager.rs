@@ -62,6 +62,12 @@ impl TaskManager {
             }
         }
 
+        results.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+
         results
     }
 
