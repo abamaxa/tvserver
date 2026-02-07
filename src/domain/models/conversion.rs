@@ -31,6 +31,22 @@ const REMOVE_PACKED_B_FRAMES: Conversion = Conversion {
     extension: None,
 };
 
+const TO_MP3: Conversion = Conversion{
+	name:        "Encode Audio with MP3 codec",
+	description: "Encodes the audio stream with the MP3 codec, all video streams are copied unchanged",
+	exec:        "ffmpeg",
+	args:        "-i '{source}' -map 0 -c:v copy -c:a libmp3lame -q:a 4 -y '{destination}'",
+	extension:   None, // No extension specified
+};
+
+const TO_AAC: Conversion = Conversion{
+	name:        "Encode Audio with AAC 192bit codec",
+	description: "Encodes the audio stream with the AAC@192bits codec, all video streams are copied unchanged",
+	exec:        "ffmpeg",
+	args:        "-i '{source}' -map 0 -c:v copy -c:a aac -b:a 192k -y '{destination}'",
+	extension:   None, // No extension specified
+};
+
 const TO_X265: Conversion = Conversion {
     name: "Encode Video with x265 codec",
     description:
@@ -84,10 +100,12 @@ const TO_VP9_AAC_MKV: Conversion = Conversion {
     extension: Some("mkv"),
 };
 
-pub const AVAILABLE_CONVERSIONS: [Conversion; 8] = [
+pub const AVAILABLE_CONVERSIONS: [Conversion; 10] = [
     TO_MP4,
     TO_X265,
     REMOVE_PACKED_B_FRAMES,
+    TO_MP3,
+    TO_AAC,
     INCREASE_VOLUME,
     TO_H264_AAC_MP4,
     TO_H265_AAC_MP4,
