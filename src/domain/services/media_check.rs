@@ -10,7 +10,7 @@ use crate::domain::messages::{LocalMessage, LocalMessageSender, MediaEvent};
 use crate::domain::services::calculate_checksum;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::domain::models::VideoDetails;
@@ -118,6 +118,32 @@ impl MediaCheck {
         Ok(())
     }
 
+    async fn find_orphaned_records(&self) -> anyhow::Result<()> {
+        let collections = self.repo.list_collection("").await?;
+
+        for collection in collections {
+            let videos = self.repo.list_videos(&collection).await?;
+            if videos.is_empty() {
+                continue;
+            }
+
+            // If directory doesn't exist, all records for this collection are orphans
+            let disk_files: HashSet<String> = match self.store.list_folder(&collection).await {
+                Ok((_dirs, files)) => files.into_iter().collect(),
+                Err(_) => HashSet::new(),
+            };
+
+            let orphans: Vec<VideoDetails> = videos
+                .into_iter()
+                .filter(|v| !disk_files.contains(&v.video))
+                .collect();
+
+            self.delete_orphaned_records(orphans).await;
+        }
+
+        Ok(())
+    }
+
     async fn delete_orphaned_records(&self, videos: Vec<VideoDetails>) {
         for video in videos {
             if let Err(err) = self.repo.delete_video(video.checksum).await {
@@ -125,21 +151,6 @@ impl MediaCheck {
             }
         }
     }
-
-    /*async fn list_from_repo(&self, collection: &str) -> anyhow::Result<CollectionDetails> {
-
-        let items = self.repo.list_videos(collection).await?;
-
-        let collections = self.repo.list_collection(collection).await?;
-
-        let videos = items
-            .into_iter()
-            .map(|i| MediaItem::Video(i))
-            .collect();
-
-        Ok(CollectionDetails::new(collection, collections, videos))
-    }*/
-
 }
 
 #[async_trait]
@@ -147,7 +158,7 @@ impl MediaChecker for MediaCheck {
     async fn check_video_information(&self) -> anyhow::Result<()> {
         self.process_directory(PathBuf::from(&get_movie_dir())).await?;
 
-        Ok(())
+        self.find_orphaned_records().await
     }
 }
 
