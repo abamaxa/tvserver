@@ -6,6 +6,8 @@ mod websocket;
 mod torrent_fetcher;
 mod youtube_fetcher;
 mod telegram;
+#[cfg(feature = "webserver")]
+mod restrict_access;
 #[cfg(not(feature = "webserver"))]
 mod tauri_channel;
 
@@ -17,5 +19,7 @@ pub use websocket::RemoteBrowserPlayer;
 pub use torrent_fetcher::TorrentFetcher;
 pub use youtube_fetcher::YoutubeFetcher;
 pub use telegram::TelegramBot;
+#[cfg(feature = "webserver")]
+pub use restrict_access::restrict_access;
 #[cfg(not(feature = "webserver"))]
 pub use tauri_channel::{TauriChannelPlayer, setup_frontend_listener};
