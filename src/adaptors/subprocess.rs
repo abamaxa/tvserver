@@ -217,7 +217,7 @@ impl TaskMonitor for AsyncSubProcess {
             eta: 0,
             percent_done: 0.0,
             size_details: "".to_string(),
-            error_string: format!("{} {}", error_string, last_message),
+            error_string,
             rate_details: "".to_string(),
             process_details: last_message,
             task_type: TaskType::AsyncProcess,

@@ -388,23 +388,22 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
         // Get the task state
         let result = task.get_state().await;
 
-        if !result.error_string.is_empty() {
+        if result.error_string.is_empty() {
             tracing::info!("Successfully extracted subtitle track {} to {}", track.id, output_path.display());
             extracted_files.push(output_path);
         } else {
-            let stderr = result.error_string;
             tracing::warn!(
                 "Failed to extract subtitle track {} (language: {}): {}",
                 track.id,
                 track.language,
-                stderr
+                result.error_string
             );
             // Continue with other tracks even if one fails
         }
     }
 
     if extracted_files.is_empty() && !subtitle_tracks.is_empty() {
-        return Err(format!("Failed to extract any subtitle tracks from {}", video.video).into());
+        tracing::info!("Failed to extract any subtitle tracks from {}", video.video);
     }
 
     Ok(extracted_files)
