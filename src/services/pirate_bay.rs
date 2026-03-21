@@ -130,7 +130,7 @@ impl PirateClient {
                     // Get description from <font class="detDesc">
                     if let Some(desc_elem) = cell.select(&DESC_SELECTOR).next() {
                         let desc_text = PirateClient::get_element_text(&desc_elem);
-                        record.description = desc_text.replace("&nbsp;", " ");
+                        record.description = desc_text.replace('\u{a0}', " ");
                         debug!("Found description: {}", record.description);
                     }
                 }
@@ -210,7 +210,7 @@ mod test {
         assert_eq!(first.link, "magnet:?first-link");
         assert_eq!(
             first.description,
-            "Uploaded 03-03 00:50, Size 520.6 MiB, ULed by jajaja"
+            "Uploaded 03-03 00:50, Size 520.6 MiB, ULed by  jajaja"
         );
 
         Ok(())

@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
         context.get_store(),
         context.listen_for_messages(MessageFilter::All).await?,
         context.get_local_sender(),
+        context.get_spawner(),
     );
 
     if let Err(err) = context.get_checker().check_video_information().await {

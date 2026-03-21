@@ -194,7 +194,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap().to_string(),
-            format!("Error code {}", ERROR_CODE)
+            format!("Error code {}, response: ", ERROR_CODE)
         );
 
         Ok(())
