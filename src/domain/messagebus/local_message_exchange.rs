@@ -143,13 +143,13 @@ mod tests {
     #[tokio::test]
     async fn test_listen_for_messages() {
         let exchange = LocalMessageExchange::new();
-        
+
         let result = exchange.listen_for_messages(MessageFilter::Media).await;
         assert!(result.is_ok());
-        
-        // Try to listen with the same key again, should fail
+
+        // Multiple subscribers to the same filter are allowed (broadcast design)
         let result = exchange.listen_for_messages(MessageFilter::Media).await;
-        assert!(matches!(result, Err(LocalMessageExchangeError::ListenerExists)));
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
