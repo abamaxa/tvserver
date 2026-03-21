@@ -137,7 +137,7 @@ impl Conversion {
             .copied()
     }
 
-    pub async fn execute(&self, spawner: Arc<impl ProcessSpawner>, source: &str) -> Option<Task> {
+    pub async fn execute(&self, spawner: Arc<impl ProcessSpawner + ?Sized>, source: &str) -> Option<Task> {
         if let Some(destination) = get_next_version_name(source, self.extension) {
             let args = self.make_args(source, &destination);
             Some(spawner.execute(self.name, self.exec, args).await)

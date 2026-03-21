@@ -56,7 +56,7 @@ impl Context {
         self.task_manager.clone()
     }
 
-    pub fn get_spawner(&self) -> Arc<impl ProcessSpawner> {
+    pub fn get_spawner(&self) -> Arc<dyn ProcessSpawner> {
         self.task_manager.clone()
     }
 
