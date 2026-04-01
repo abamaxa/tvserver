@@ -6,11 +6,6 @@
 
 extern crate core;
 
-/*pub mod adaptors;
-pub mod domain;
-pub mod entrypoints;
-pub mod services;*/
-
 use std::{net::SocketAddr, sync::Arc};
 use axum::{middleware, Router};
 use tower_http::{
@@ -67,8 +62,7 @@ async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Resu
     tracing::info!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
+        .await?;
 
     Ok(())
 }

@@ -34,7 +34,7 @@ impl Monitor {
             let mut counter: i64 = 0;
             let mut had_tasks = false;
             loop {
-                // Check video information every 5 minutes (counter * sleep_secs)
+                // Check video information every ~5 minutes when idle (30s when tasks active)
                 if counter % 10 == 0 {
                     monitor.task_manager.cleanup(&monitor.store).await;
 

@@ -218,6 +218,7 @@ mod tests {
 
     #[test]
     fn test_invalid_basic_auth_wrong_credentials() {
+        ensure_test_credentials();
         // base64("wrong:wrong") = "d3Jvbmc6d3Jvbmc="
         let request = make_request_with_auth("Basic d3Jvbmc6d3Jvbmc=");
         assert!(!check_basic_auth(&request));

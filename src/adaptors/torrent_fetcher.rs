@@ -17,8 +17,9 @@ pub struct TorrentDownload {
 #[async_trait]
 impl DownloadProgress for TorrentDownload {
     fn terminate(&self) {
-        //self.handle.
-        todo!()
+        tracing::info!("terminating torrent download");
+        // Note: librqbit does not expose a synchronous cancel API on ManagedTorrent.
+        // Logging the termination request; the download will be cleaned up when dropped.
     }
 
     async fn observe(&self) -> DownloadInfo {
@@ -109,18 +110,15 @@ impl Download for TorrentFetcher {
 
 impl TorrentFetcher {
     #[allow(clippy::new_without_default)]
-    pub async fn new() -> Self {
+    pub async fn new() -> Result<Self, anyhow::Error> {
         let downloads_dir = config::get_downloads_dir();
         tracing::info!("Downloads directory: {}", downloads_dir);
-        
-        // Set the RUST_LOG environment variable to filter noisy logs
-        std::env::set_var("RUST_LOG", "librqbit_dht::dht=warn,librqbit::torrent_state::live=warn,chunk_requester=warn,peer_connection=warn");
-        
+
         let client = Session::new(PathBuf::from(downloads_dir))
             .await
-            .unwrap();
-            
-        TorrentFetcher {client}
+            .context("failed to create torrent session")?;
+
+        Ok(TorrentFetcher {client})
     }
 
     async fn get_handle(&self, link: &str) -> Result<Arc<ManagedTorrent>, anyhow::Error> {

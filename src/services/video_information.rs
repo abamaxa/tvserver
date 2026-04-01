@@ -58,7 +58,13 @@ impl MetaDataManager {
                         LocalMessage::Media(event) => self.handle_media_event(event).await,
                         _ => continue,
                 },
-                Err(e) => tracing::error!("event loop got an error: {}", e)
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("event loop channel closed, shutting down");
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!("event loop got an error: {}", e);
+                }
             }
         }
     }

@@ -30,6 +30,7 @@ pub fn get_next_version_name(filename: &str, ext: Option<&str>) -> Option<String
     };
 
     let mut new_path = PathBuf::from(path.parent()?);
+    new_path.push(format!("{}.{}", stem, extension));
 
     while new_path.exists() {
         stem = _get_next_version(&stem);
@@ -259,12 +260,26 @@ mod test {
 
     #[test]
     fn test_get_next_version_name() {
+        // v1.mp4 and v2.mp4 both exist in fixtures, so the next version is v3
         let input_path = PathBuf::from("tests/fixtures/media_dir/collection2/test_collection2-v1.mkv");
         let expected_path = PathBuf::from("tests/fixtures/media_dir/collection2")
             .join("test_collection2-v3.mp4");
 
         assert_eq!(
             get_next_version_name(input_path.to_str().unwrap(), Some("mp4")),
+            Some(expected_path.to_str().unwrap().to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_next_version_name_nonexistent() {
+        // A file that doesn't exist should not be version-bumped
+        let input_path = PathBuf::from("tests/fixtures/media_dir/collection2/brand_new_file.mp4");
+        let expected_path = PathBuf::from("tests/fixtures/media_dir/collection2")
+            .join("brand_new_file.mp4");
+
+        assert_eq!(
+            get_next_version_name(input_path.to_str().unwrap(), None),
             Some(expected_path.to_str().unwrap().to_string())
         );
     }

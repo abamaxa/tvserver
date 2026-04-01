@@ -1,4 +1,14 @@
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&#x27;")
+}
+
 pub fn generate_video_html(video_url: &str, name: &str) -> String {
+    let escaped_name = html_escape(name);
+    let escaped_url = html_escape(video_url);
     format!(r#"
 <!DOCTYPE html>
 <html lang="en">
@@ -54,5 +64,32 @@ pub fn generate_video_html(video_url: &str, name: &str) -> String {
     </script>
 </body>
 </html>
-"#, name, video_url)
+"#, escaped_name, escaped_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_html_escape() {
+        assert_eq!(html_escape("hello"), "hello");
+        assert_eq!(html_escape("<script>alert('xss')</script>"), "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;");
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+        assert_eq!(html_escape(r#"a"b"#), "a&quot;b");
+    }
+
+    #[test]
+    fn test_generate_video_html_escapes_xss() {
+        let html = generate_video_html("/video.mp4", "<script>alert(1)</script>");
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn test_generate_video_html_escapes_url() {
+        let html = generate_video_html(r#"" onload="alert(1)"#, "test");
+        assert!(!html.contains(r#"" onload="alert(1)"#));
+        assert!(html.contains("&quot; onload=&quot;alert(1)"));
+    }
 }

@@ -115,5 +115,5 @@ pub fn  get_telegram_chat_id() -> String {
 }
 
 pub fn get_auth_credentials() -> String {
-    env::var(AUTH_CREDENTIALS).expect("AUTH_CREDENTIALS environment variable is not set (format: username:password)")
+    env::var(AUTH_CREDENTIALS).unwrap_or_default()
 }

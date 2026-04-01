@@ -109,10 +109,12 @@ impl SqlRepository {
 #[async_trait]
 impl Databaser for SqlRepository {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
-        // Check if record already exists to determine event type later
+        // Use a transaction so the existence check and upsert are atomic
+        let mut tx = self.pool.begin().await?;
+
         let existing = sqlx::query("SELECT checksum FROM video_details WHERE checksum = ?")
             .bind(details.checksum)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
         let is_update = existing.is_some();
 
@@ -238,7 +240,7 @@ impl Databaser for SqlRepository {
             .bind(&details.metadata.probe_data)
             .bind(&details.search_phrase)
             .bind(state)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await;
 
         match result {
@@ -248,6 +250,8 @@ impl Databaser for SqlRepository {
                 return Err(e);
             }
         };
+
+        tx.commit().await?;
 
         if let Some(sender) = &self.sender {
             let message = if is_update {

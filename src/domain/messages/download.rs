@@ -38,7 +38,9 @@ impl DownloadInfo {
             
             let media_event = MediaEvent::new_media(Path::new(file), series.clone());
             tracing::info!("Sending media event: {:?}", media_event);
-            sender.send(LocalMessage::Media(media_event)).await.unwrap();
+            if let Err(e) = sender.send(LocalMessage::Media(media_event)).await {
+                tracing::error!("failed to send media event for {}: {}", file, e);
+            }
         }
     }
 }

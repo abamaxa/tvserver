@@ -6,7 +6,8 @@
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let port = match args.get(1) {
-        Some(port) => Some(port.parse::<u16>().unwrap()),
+        Some(port) => Some(port.parse::<u16>()
+            .map_err(|e| anyhow::anyhow!("invalid port '{}': {}", port, e))?),
         None => None,
     };
     

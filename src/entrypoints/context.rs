@@ -1,4 +1,3 @@
-use sqlx::Error;
 use std::sync::Arc;
 
 use crate::adaptors::{FileSystemStore, HTTPClient, SqlRepository, TelegramBot, TokioProcessSpawner, TorrentFetcher, YoutubeFetcher};
@@ -97,7 +96,7 @@ impl Context {
     }
 }
 
-pub async fn create_context() -> Result<Context, Error> {
+pub async fn create_context() -> anyhow::Result<Context> {
     let local_message_exchange = LocalMessageExchange::new();
     
     let spawner = Arc::new(TokioProcessSpawner::new());
@@ -106,7 +105,7 @@ pub async fn create_context() -> Result<Context, Error> {
 
     let task_manager = Arc::new(TaskManager::new(spawner.clone()));
 
-    let torrent_fetcher = Arc::new(TorrentFetcher::new().await);
+    let torrent_fetcher = Arc::new(TorrentFetcher::new().await?);
 
     let youtube_fetcher = Arc::new(YoutubeFetcher::new(spawner.clone()));
 
@@ -138,7 +137,8 @@ pub async fn create_context() -> Result<Context, Error> {
 
     let messenger = MessageExchange::new(
         local_message_exchange.new_sender(), 
-        local_message_exchange.listen_for_messages( MessageFilter::All).await.unwrap()
+        local_message_exchange.listen_for_messages( MessageFilter::All).await
+            .map_err(|e| anyhow::anyhow!("failed to listen for messages: {}", e))?
     );
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
