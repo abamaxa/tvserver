@@ -32,7 +32,9 @@ impl Monitor {
             };
 
             let mut counter: i64 = 0;
+            let mut had_tasks = false;
             loop {
+                // Check video information every ~5 minutes when idle (30s when tasks active)
                 if counter % 10 == 0 {
                     monitor.task_manager.cleanup(&monitor.store).await;
 
@@ -41,22 +43,24 @@ impl Monitor {
                     }
                 }
 
-                monitor.send_task_state().await;
+                let current_state = monitor.task_manager.get_current_state().await;
+                let has_tasks = !current_state.is_empty();
 
-                sleep(Duration::from_secs(3)).await;
+                // Broadcast when tasks exist, or once when transitioning to empty
+                // so clients clear their task UI
+                if has_tasks || had_tasks {
+                    if let Err(e) = monitor.sender.send(LocalMessage::Task(current_state)).await {
+                        tracing::error!("could not send task state: {}", e.to_string());
+                    }
+                }
+                had_tasks = has_tasks;
+
+                // Back off when idle: 5s with no tasks, 3s with active tasks
+                let sleep_secs = if has_tasks { 3 } else { 5 };
+                sleep(Duration::from_secs(sleep_secs)).await;
                 counter += 1;
             }
         })
-    }
-
-    async fn send_task_state(&self) {
-        let current_state = self.task_manager.get_current_state().await;
-        if current_state.len() > 0 {
-            tracing::info!("Sending task state: {:?}", current_state);
-        }
-        if let Err(e) = self.sender.send(LocalMessage::Task(current_state)).await {
-            tracing::error!("could not send task state: {}", e.to_string());
-        }
     }
 }
 

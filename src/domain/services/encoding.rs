@@ -278,13 +278,11 @@ pub async fn re_encode_video(
         )
         .await;
 
-    // Wait for the task to complete
-    for _ in 0..7200 {
-        if task.has_finished() {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    }
+    // Wait for the task to complete (2 hour timeout)
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(7200),
+        task.wait_finished(),
+    ).await.ok();
 
     // Get the task state
     let result = task.get_state().await;
@@ -328,6 +326,14 @@ pub async fn re_encode_video(
     Ok(())
 }
 
+/// Bitmap-based subtitle codecs that cannot be converted to text formats like WebVTT
+const BITMAP_SUBTITLE_CODECS: &[&str] = &[
+    "hdmv_pgs_subtitle",
+    "dvd_subtitle",
+    "dvb_subtitle",
+    "xsub",
+];
+
 /// Extracts subtitles from a video file to VTT format
 pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpawner>) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let subtitle_tracks = match &video.metadata.subtitle_tracks {
@@ -342,19 +348,37 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
     let parent_dir = current_path.parent().unwrap_or_else(|| Path::new(""));
 
     let mut extracted_files = Vec::new();
+    // Track the subtitle stream index separately since we skip bitmap tracks
+    let mut subtitle_stream_index = 0;
 
-    for (index, track) in subtitle_tracks.iter().enumerate() {
+    for track in subtitle_tracks.iter() {
+        // Skip bitmap-based subtitle codecs that can't be converted to text
+        if let Some(codec) = &track.codec {
+            if BITMAP_SUBTITLE_CODECS.contains(&codec.as_str()) {
+                tracing::info!(
+                    "Skipping bitmap subtitle track {} (codec: {}, language: {})",
+                    track.id,
+                    codec,
+                    track.language
+                );
+                subtitle_stream_index += 1;
+                continue;
+            }
+        }
+
         let lang_code = if track.language != "und" && !track.language.is_empty() {
             track.language.to_uppercase()
         } else {
-            format!("track{}", index)
+            format!("track{}", subtitle_stream_index)
         };
 
         let output_path = parent_dir.join(format!("{}-{}.vtt", file_stem.to_string_lossy(), lang_code));
 
+        let codec_info = track.codec.as_deref().unwrap_or("unknown");
         tracing::info!(
-            "Extracting subtitle track {} (language: {}) from {} to {}",
+            "Extracting subtitle track {} (codec: {}, language: {}) from {} to {}",
             track.id,
+            codec_info,
             track.language,
             current_path.display(),
             output_path.display()
@@ -363,7 +387,7 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
         let current_path_str = current_path.to_string_lossy();
         let output_path_str = output_path.to_string_lossy();
 
-        let task_cmd = format!("0:s:{}", index);
+        let task_cmd = format!("0:s:{}", subtitle_stream_index);
         let args = vec![
             "-i",
             &current_path_str,
@@ -377,13 +401,11 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
 
         let task_name = format!("Extract Subtitles {}", video.video);
         let task = spawner.execute(&task_name,"ffmpeg", args).await;
-        // Wait for the task to complete
-        for _ in 0..7200 {
-            if task.has_finished() {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        }
+        // Wait for the task to complete (2 hour timeout)
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(7200),
+            task.wait_finished(),
+        ).await.ok();
 
         // Get the task state
         let result = task.get_state().await;
@@ -393,13 +415,17 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
             extracted_files.push(output_path);
         } else {
             tracing::warn!(
-                "Failed to extract subtitle track {} (language: {}): {}",
+                "Failed to extract subtitle track {} (codec: {}, language: {}): {} | ffmpeg output: {}",
                 track.id,
+                codec_info,
                 track.language,
-                result.error_string
+                result.error_string,
+                result.process_details
             );
             // Continue with other tracks even if one fails
         }
+
+        subtitle_stream_index += 1;
     }
 
     if extracted_files.is_empty() && !subtitle_tracks.is_empty() {

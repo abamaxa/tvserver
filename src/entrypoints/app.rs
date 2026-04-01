@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub async fn run_tauri() {
   setup_logging(TAURI_LOG);
   // Create and manage the shared state
-  let tvserver = TVServer::new().await.unwrap();
+  let tvserver = TVServer::new().await.expect("failed to initialize TVServer");
   let context = tvserver.get_context().clone();
   let shared_state = Arc::new(context);
   let sender = shared_state.get_messenger().get_sender();

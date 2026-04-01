@@ -264,26 +264,37 @@ fn remove_letter_and_leading_zeros(s: &str) -> String {
 
 fn remove_trailing_characters(s: &str) -> String {
     let s = s.trim_end();
-    let chars: Vec<char> = s.chars().collect();
-    
-    let mut last_valid_index = chars.len() as i32 - 1;
-    while last_valid_index >= 0 {
-        let c = chars[last_valid_index as usize];
+
+    let mut last_valid_byte_end = 0usize;
+    let mut found = false;
+    let char_count = s.chars().count();
+    let mut is_first = true;
+    let mut is_last;
+    let mut current_index = 0usize;
+
+    for (byte_idx, c) in s.char_indices() {
+        is_last = current_index == char_count - 1;
         if c.is_alphanumeric() || c == '}' || c == ']' || c == ')' || c == '?' {
-            break;
+            last_valid_byte_end = byte_idx + c.len_utf8();
+            found = true;
+            // If it's the first or last char, return early
+            if is_last || (is_first && char_count > 1) {
+                // keep going to find the real last valid
+            }
         }
-        last_valid_index -= 1;
+        is_first = false;
+        current_index += 1;
     }
 
-    if last_valid_index < 0 {
+    if !found {
         return String::new();
     }
 
-    if last_valid_index == 0 || last_valid_index == chars.len() as i32 - 1 {
+    if last_valid_byte_end == s.len() {
         return s.to_string();
     }
 
-    s[..=last_valid_index as usize].to_string()
+    s[..last_valid_byte_end].to_string()
 }
 
 fn remove_after_first_special_char(input: &str) -> String {

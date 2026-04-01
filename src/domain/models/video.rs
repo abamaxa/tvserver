@@ -4,7 +4,6 @@ use std::{collections::HashMap, path::{Path, PathBuf}};
 use crate::domain::algorithm::{title_case, parse_file_path, get_video_url, get_thumbnails_url};
 use serde::ser::SerializeStruct;
 use serde_json;
-use thiserror::Error;
 
 use crate::domain::messages::MediaItem;
 
@@ -87,6 +86,7 @@ pub struct SubtitleTrack {
     pub id: i64,
     pub language: String,
     pub title: Option<String>,
+    pub codec: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -127,12 +127,6 @@ struct FFProbeStream {
 #[derive(Deserialize, Debug)]
 struct FFProbeData {
     streams: Vec<FFProbeStream>,
-}
-
-#[derive(Error, Debug)]
-#[error("{message:}")]
-pub struct VideoParseError {
-    message: String,
 }
 
 #[derive(Default, Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -244,7 +238,7 @@ impl VideoDetails {
 
     pub fn should_retry_metadata(&self) -> bool {
         if self.metadata.duration == 0. || self.metadata.height == 0 {
-            return !Self::is_older_than_x_hours(self.updated_on, 6);
+            return !Self::is_older_than_x_hours(self.updated_on, 24);
         }
         false
     }
@@ -446,6 +440,7 @@ impl VideoMetadata {
                                 .and_then(|t| t.get("language").cloned())
                                 .unwrap_or_else(|| "und".to_string()),
                             title: tags.and_then(|t| t.get("title").cloned()),
+                            codec: s.codec_name.clone(),
                         }
                     })
                     .collect();

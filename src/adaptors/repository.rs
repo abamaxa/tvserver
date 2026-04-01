@@ -45,7 +45,9 @@ impl SqlRepository {
     async fn do_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
         let migrations_dir = get_database_migration_dir();
 
-        let absolue_dir = path::Path::new(&std::env::current_dir().unwrap()).join(&migrations_dir);
+        let cwd = std::env::current_dir()
+            .map_err(|e| MigrateError::Source(e.into()))?;
+        let absolue_dir = path::Path::new(&cwd).join(&migrations_dir);
 
         let m = Migrator::new(absolue_dir).await?;
 
@@ -107,6 +109,15 @@ impl SqlRepository {
 #[async_trait]
 impl Databaser for SqlRepository {
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
+        // Use a transaction so the existence check and upsert are atomic
+        let mut tx = self.pool.begin().await?;
+
+        let existing = sqlx::query("SELECT checksum FROM video_details WHERE checksum = ?")
+            .bind(details.checksum)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let is_update = existing.is_some();
+
         // Convert Vec<String> to JSON string
         let thumbnail = serde_json::to_string(&details.thumbnail).unwrap_or_default();
         let state: i32 = details.state as i32;
@@ -229,28 +240,32 @@ impl Databaser for SqlRepository {
             .bind(&details.metadata.probe_data)
             .bind(&details.search_phrase)
             .bind(state)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await;
 
-        if let Err(e) = result {
-            tracing::error!("Error saving video: {}", e);
-            return Err(e);
-        }
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Error saving video: {}", e);
+                return Err(e);
+            }
+        };
 
-        let last_id = result.unwrap().last_insert_rowid();
+        tx.commit().await?;
 
         if let Some(sender) = &self.sender {
-            let message = match last_id {
-                0 => LocalMessage::Video(VideoEvent::new_video_changed_event(details.clone())),
-                _ => LocalMessage::Video(VideoEvent::new_video_added_event(details.clone())),
+            let message = if is_update {
+                LocalMessage::Video(VideoEvent::new_video_changed_event(details.clone()))
+            } else {
+                LocalMessage::Video(VideoEvent::new_video_added_event(details.clone()))
             };
-            
+
             if let Err(e) = sender.send(message).await {
-                tracing::error!("Error sending video event {} {}", last_id, e);
+                tracing::error!("Error sending video event {}", e);
             }
         }
 
-        Ok(last_id)
+        Ok(details.checksum)
     }
 
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error> {
@@ -475,7 +490,6 @@ impl Databaser for SqlRepository {
                 started = MIN(started, ?),
                 stopped = ?,
                 updated_on = CURRENT_TIMESTAMP
-            WHERE checksum = ?
         "#;
 
         sqlx::query(query)
@@ -484,7 +498,6 @@ impl Databaser for SqlRepository {
             .bind(current_time)
             .bind(current_time)
             .bind(current_time)
-            .bind(checksum)
             .execute(&self.pool)
             .await?;
 
@@ -520,6 +533,30 @@ impl Databaser for SqlRepository {
             history.push(video_details);
         }
         Ok(history)
+    }
+
+    async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                vd.*,
+                h.updated_on as last_viewed,
+                h.stopped as play_from
+            FROM
+                video_details vd
+                LEFT JOIN history h ON vd.checksum = h.checksum
+            ORDER BY
+                collection, video
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            results.push(Self::from_record_with_last_seen(&row));
+        }
+        Ok(results)
     }
 }
 

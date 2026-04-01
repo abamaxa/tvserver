@@ -85,7 +85,7 @@ impl LocalMessageExchange {
             return Ok(receiver.subscribe());
         }
 
-        Err(LocalMessageExchangeError::ListenerExists)
+        Err(LocalMessageExchangeError::ListenerDoesNotExist)
     }
 
     async fn broadcast(
@@ -116,9 +116,12 @@ impl LocalMessageExchange {
         }
 
         // Then send to the All channel
-        let broadcaster = broadcasters.get(&MessageFilter::All).unwrap();
-        if let Err(e) = broadcaster.sender.send(message) {
-            tracing::warn!("Failed to send message to All channel: {}", e);
+        if let Some(broadcaster) = broadcasters.get(&MessageFilter::All) {
+            if let Err(e) = broadcaster.sender.send(message) {
+                tracing::warn!("Failed to send message to All channel: {}", e);
+            }
+        } else {
+            tracing::error!("MessageFilter::All broadcaster is missing");
         }
     }
 

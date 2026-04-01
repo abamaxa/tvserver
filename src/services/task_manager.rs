@@ -164,6 +164,7 @@ mod test {
         let name = key.to_string();
 
         mock_task.expect_has_finished().return_const(finished);
+        mock_task.expect_wait_finished().returning(|| ());
         mock_task.expect_terminate().return_const(());
         mock_task.expect_cleanup().returning(|_, _| Ok(()));
         mock_task

@@ -114,6 +114,7 @@ pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repos
 
     details.collection = collection;
     details.video = video;
+    details.dir_path = None;
     details.search_phrase = suggested_series;
 
     if let Err(err) = repo.save_video(&details).await {
@@ -234,7 +235,7 @@ pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
     Ok(hasher.finish() as i64)
 }
 
-async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
+pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
     //let spawner = Arc::new(TokioProcessSpawner::new());
 
     // Build the ffprobe command
@@ -265,8 +266,8 @@ async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Bo
     let mut video_stream = None;
     let mut audio_track_count = 0;
 
-    if let Some(streams) = json.get("streams") {
-        for stream in streams.as_array().unwrap() {
+    if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
+        for stream in streams {
             match stream.get("codec_type").and_then(Value::as_str) {
                 Some("video") if video_stream.is_none() => {
                     video_stream = Some(stream);

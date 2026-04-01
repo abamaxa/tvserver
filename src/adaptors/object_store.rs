@@ -20,13 +20,39 @@ impl FileSystemStore {
         }
     }
 
-    fn get_real_path(&self, path: &str) -> PathBuf {
+    fn get_real_path(&self, path: &str) -> Result<PathBuf, anyhow::Error> {
         let first_char = path.chars().nth(0);
-        if first_char == Some('/') || path.starts_with(&self.root) {
+        let resolved = if first_char == Some('/') || path.starts_with(&self.root) {
             PathBuf::from(path)
         } else {
             Path::new(&self.root).join(path)
+        };
+
+        // Normalize path components to prevent traversal (e.g. "../../etc/passwd")
+        let mut normalized = PathBuf::new();
+        for component in resolved.components() {
+            match component {
+                std::path::Component::ParentDir => { normalized.pop(); }
+                _ => normalized.push(component),
+            }
         }
+
+        let root_normalized = {
+            let mut r = PathBuf::new();
+            for component in Path::new(&self.root).components() {
+                match component {
+                    std::path::Component::ParentDir => { r.pop(); }
+                    _ => r.push(component),
+                }
+            }
+            r
+        };
+
+        if !normalized.starts_with(&root_normalized) {
+            return Err(anyhow!("path escapes root directory: {}", path));
+        }
+
+        Ok(normalized)
     }
 }
 
@@ -101,7 +127,7 @@ impl FileStore for FileSystemStore {
     }
 
     async fn list_folder(&self, _path: &str) -> Result<(Vec<String>, Vec<String>)> {
-        let path = self.get_real_path(_path);
+        let path = self.get_real_path(_path)?;
         let mut directories: Vec<String> = Vec::new();
         let mut files: Vec<String> = Vec::new();
 
@@ -130,7 +156,7 @@ impl FileStore for FileSystemStore {
     }
 
     async fn ensure_path_exists(&self, _path: &str) -> Result<()> {
-        let path = self.get_real_path(_path);
+        let path = self.get_real_path(_path)?;
         if !path.exists() {
             fs::create_dir_all(path).await?;
         } else if !path.is_dir() {
@@ -145,24 +171,29 @@ impl FileStore for FileSystemStore {
     async fn rename(&self, _old_path: &str, _new_path: &str) -> Result<()> {
         let mut old_path = PathBuf::from(_old_path);
         if !old_path.exists() {
-            old_path = self.get_real_path(_old_path);
+            old_path = self.get_real_path(_old_path)?;
         }
-        let new_path = self.get_real_path(_new_path);
+        let new_path = self.get_real_path(_new_path)?;
 
-        if let Err(_) = fs::rename(&old_path, &new_path).await {
-            fs::copy(&old_path, &new_path).await?;
-            fs::remove_file(&old_path).await?;
+        match fs::rename(&old_path, &new_path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Other
+                    || e.raw_os_error() == Some(18) /* EXDEV */ => {
+                fs::copy(&old_path, &new_path).await?;
+                fs::remove_file(&old_path).await?;
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(e)),
         }
-        Ok(())
     }
 
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
-        let obj = FileStoreObject::new(&self.get_real_path(path));
+        let obj = FileStoreObject::new(&self.get_real_path(path)?);
         Ok(Arc::new(obj))
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let file_path = self.get_real_path(path);
+        let file_path = self.get_real_path(path)?;
         if !file_path.exists() {
             return Ok(());
         }
@@ -277,6 +308,29 @@ mod tests {
             .await?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        let store = FileSystemStore::new(TEST_DIR);
+        assert!(store.get_real_path("../../etc/passwd").is_err());
+        assert!(store.get_real_path("subdir/../../../etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_valid_paths_accepted() {
+        let store = FileSystemStore::new(TEST_DIR);
+        assert!(store.get_real_path("collection1/file.mp4").is_ok());
+        assert!(store.get_real_path("").is_ok());
+        // Relative parent within root should be fine
+        assert!(store.get_real_path("collection1/../collection2").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_delete_path_traversal() {
+        let store: &dyn FileStore = &FileSystemStore::new(TEST_DIR);
+        let result = store.delete("../../etc/passwd").await;
+        assert!(result.is_err());
     }
 
     // TODO,rename ensure_path_exists -> ensure_directory_exists and test when there is a file

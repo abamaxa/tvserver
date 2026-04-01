@@ -29,7 +29,8 @@ impl TVServer {
         let metadata_manager = MetaDataManager::consume(
             context.get_repository(),
             context.get_store(),
-            context.listen_for_messages(MessageFilter::All).await.unwrap(),
+            context.listen_for_messages(MessageFilter::All).await
+                .map_err(|e| anyhow::anyhow!("failed to listen for messages: {}", e))?,
             context.get_local_sender(),
             context.get_spawner(),
         );
@@ -40,7 +41,8 @@ impl TVServer {
         );
 
         let history_service = hs.observe(
-            context.listen_for_messages(MessageFilter::PlayerState).await.unwrap()
+            context.listen_for_messages(MessageFilter::PlayerState).await
+                .map_err(|e| anyhow::anyhow!("failed to listen for player state: {}", e))?
         );
         
         Ok(Self { context, monitor_handle, metadata_manager, history_service })

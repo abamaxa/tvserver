@@ -145,6 +145,12 @@ pub trait TaskMonitor: Sync + Send {
     fn has_finished(&self) -> bool;
     async fn cleanup(&self, store: &Arc<dyn MediaStorer>, force_delete: bool)
         -> anyhow::Result<()>;
+    /// Wait until the task finishes. Default implementation polls every 2 seconds.
+    async fn wait_finished(&self) {
+        while !self.has_finished() {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        }
+    }
 }
 
 pub type Task = Arc<dyn TaskMonitor>;
@@ -168,6 +174,7 @@ pub trait Databaser: Sync + Send {
     async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error>;
     async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
     async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
+    async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error>;
 }
 
 pub type Repository = Arc<dyn Databaser>;

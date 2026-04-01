@@ -32,17 +32,22 @@ impl SharingService {
 impl MediaSharer for SharingService {
     async fn share(&self, series_or_id: &str) -> anyhow::Result<()> {
         let videos = get_videos_for_series_or_id(self.repo.clone(), series_or_id).await?;
-        
-        // Clone the dependencies to be moved into the thread
+
         let messenger_clone = self.messenger.clone();
         let repo_clone = self.repo.clone();
         let spawner_clone = self.spawner.clone();
-        
-        // Spawn a regular thread to process videos in the background
+
+        // MediaSharing::share() returns Box<dyn Error> which is not Send,
+        // so we use thread::spawn with a dedicated runtime.
         thread::spawn(move || {
-            // Create a new runtime for async operations inside this thread
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("failed to create runtime for sharing: {}", e);
+                    return;
+                }
+            };
+
             rt.block_on(async {
                 for video in videos {
                     let media_sharer = MediaSharing::new(
@@ -51,12 +56,11 @@ impl MediaSharer for SharingService {
                         repo_clone.clone(),
                         spawner_clone.clone(),
                     );
-                    
-                    // Share the video and handle any errors
+
                     if let Err(err) = media_sharer.share().await {
                         tracing::error!(
-                            "Failed to share video: {} error: {}", 
-                            video.get_full_path().display(), 
+                            "Failed to share video: {} error: {}",
+                            video.get_full_path().display(),
                             err
                         );
                     }

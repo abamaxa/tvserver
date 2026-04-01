@@ -29,6 +29,7 @@ pub struct AsyncSubProcess {
     output: Arc<RwLock<Vec<String>>>,
     created: SystemTime,
     status: Arc<Mutex<Option<ExitStatus>>>,
+    done: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -56,6 +57,7 @@ impl AsyncSubProcess {
         let string_args: Vec<String> = args.iter().map(|s| String::from(*s)).collect();
 
         let command = String::from(cmd);
+        let done = Arc::new(tokio::sync::Notify::new());
 
         let mut process = Self {
             name: name.to_string(),
@@ -66,16 +68,17 @@ impl AsyncSubProcess {
             handle: None,
             output: Arc::new(RwLock::new(Vec::new())),
             status: Arc::new(Mutex::new(None)),
+            done: done.clone(),
         };
 
-        process.handle = Some(process.start(stdout_tx));
+        process.handle = Some(process.start(stdout_tx, done));
 
         process.store_stdio(stdout_rx);
 
         Arc::new(process)
     }
 
-    pub fn start(&self, stdout_tx: Sender<String>) -> JoinHandle<()> {
+    pub fn start(&self, stdout_tx: Sender<String>, done: Arc<tokio::sync::Notify>) -> JoinHandle<()> {
         let cmd = self.command.clone();
         let args = self.args.clone();
         let name = self.name.clone();
@@ -99,6 +102,7 @@ impl AsyncSubProcess {
                     tracing::error!("failed {} - {} {} {:?}", e, name, cmd, args)
                 }
             };
+            done.notify_waiters();
         })
     }
 
@@ -252,6 +256,13 @@ impl TaskMonitor for AsyncSubProcess {
             Some(handle) => handle.is_finished(),
             _ => true,
         }
+    }
+
+    async fn wait_finished(&self) {
+        if self.has_finished() {
+            return;
+        }
+        self.done.notified().await;
     }
 
     async fn cleanup(&self, _store: &Storer, force_delete: bool) -> anyhow::Result<()> {

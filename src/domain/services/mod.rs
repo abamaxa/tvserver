@@ -6,7 +6,7 @@ mod encoding;
 mod media_sharing;
 pub mod copy_server;
 
-pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum};
+pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum, get_video_metadata};
 pub use media_check::MediaCheck;
 pub use download_monitor::DownloadMonitor;
 pub use history::HistoryService;

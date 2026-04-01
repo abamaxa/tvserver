@@ -18,7 +18,9 @@ pub struct YoutubeTask {
 #[async_trait]
 impl DownloadProgress for YoutubeTask {
     fn terminate(&self) {
-        todo!()
+        tracing::info!("terminating youtube download: {}", self.request.name);
+        // Note: the spawner's Task doesn't expose a synchronous abort.
+        // Logging the termination request; the monitor task will be cleaned up when dropped.
     }
 
     async fn observe(&self) -> DownloadInfo {
@@ -52,6 +54,7 @@ impl YoutubeTask {
                     "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
                     "-o",
                     &output_path,
+                    "--",
                     &self.request.link,
                 ],
             )

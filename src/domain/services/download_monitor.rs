@@ -83,7 +83,7 @@ impl DownloadMonitor {
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             
             done.notify_one();
@@ -245,18 +245,12 @@ impl TaskMonitor for DownloadMonitor {
     
     fn get_seconds_since_finished(&self) -> i64 {
         let state = self.state.lock().unwrap();
-        if state.finished.is_none() {
-            return 0;
-        }
-        
-        match state.finished.unwrap().duration_since(SystemTime::UNIX_EPOCH) {
-            Ok(duration) => {
-                let now = SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default();
-                (now.as_secs() - duration.as_secs()) as i64
-            }
-            Err(_) => 0,
+        match state.finished {
+            Some(finished) => finished
+                .elapsed()
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            None => 0,
         }
     }
     
