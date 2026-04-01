@@ -55,8 +55,8 @@ impl Monitor {
                 }
                 had_tasks = has_tasks;
 
-                // Back off when idle: 30s with no tasks, 3s with active tasks
-                let sleep_secs = if has_tasks { 3 } else { 30 };
+                // Back off when idle: 5s with no tasks, 3s with active tasks
+                let sleep_secs = if has_tasks { 3 } else { 5 };
                 sleep(Duration::from_secs(sleep_secs)).await;
                 counter += 1;
             }
