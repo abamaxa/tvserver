@@ -17,6 +17,7 @@ const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 const SHARING_SERVER: &str = "SHARING_SERVER";
 const TELEGRAM_TOKEN: &str = "TELEGRAM_TOKEN";
 const TELEGRAM_CHAT_ID: &str = "TELEGRAM_CHAT_ID";
+const AUTH_CREDENTIALS: &str = "AUTH_CREDENTIALS";
 //  Defaults
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
@@ -111,4 +112,8 @@ pub fn  get_telegram_token() -> String {
 
 pub fn  get_telegram_chat_id() -> String {
 	env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
+}
+
+pub fn get_auth_credentials() -> String {
+    env::var(AUTH_CREDENTIALS).expect("AUTH_CREDENTIALS environment variable is not set (format: username:password)")
 }
