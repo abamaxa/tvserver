@@ -85,9 +85,13 @@ impl MessageExchange {
     }
 
     pub async fn check_clients(client_map: ClientMap) {
-        client_map.read().await.ping_all().await;
-
         sleep(Duration::from_secs(15)).await;
+
+        if client_map.read().await.is_empty() {
+            return;
+        }
+
+        client_map.read().await.ping_all().await;
 
         client_map
             .write()

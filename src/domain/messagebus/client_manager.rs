@@ -54,6 +54,10 @@ impl MessengerMap {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     // Update the timestamp on a given client
     pub fn update_timestamp(&mut self, key: &String) {
         let new_time = SystemTime::now();
