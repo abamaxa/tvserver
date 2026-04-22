@@ -9,6 +9,7 @@ use crate::domain::messages::{
 use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
 use crate::domain::traits::{MediaSharer, Searcher};
 use crate::domain::{SearchEngineType, TaskType};
+use axum::body::Body;
 use axum::routing::any;
 use axum::{
     debug_handler,
@@ -50,6 +51,7 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/search/pirate", get(pirate_search))
         .route("/api/search/youtube", get(youtube_search))
         .route("/api/conversion", get(list_conversions))
+        .route("/api/stream-audio/{audio_index}/{*path}", get(stream_audio))
         .with_state(shared_state)
 }
 
@@ -244,6 +246,84 @@ async fn convert_video(
 #[debug_handler]
 async fn list_conversions() -> (StatusCode, Json<SearchResults<Conversion>>) {
     (OK, Json(SearchResults::success(AVAILABLE_CONVERSIONS.to_vec())))
+}
+
+pub async fn stream_audio(
+    Path((audio_index, file_path)): Path<(u32, String)>,
+) -> impl IntoResponse {
+    let movie_dir = crate::domain::config::get_movie_dir();
+    let full_path = std::path::PathBuf::from(&movie_dir).join(&file_path);
+
+    if !full_path.exists() {
+        return axum::response::Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("file not found"))
+            .unwrap();
+    }
+
+    let canonical_movie = match std::fs::canonicalize(&movie_dir) {
+        Ok(p) => p,
+        Err(_) => {
+            return axum::response::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("server error"))
+                .unwrap();
+        }
+    };
+
+    let canonical_file = match std::fs::canonicalize(&full_path) {
+        Ok(p) => p,
+        Err(_) => {
+            return axum::response::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("file not found"))
+                .unwrap();
+        }
+    };
+
+    if !canonical_file.starts_with(&canonical_movie) {
+        return axum::response::Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("forbidden"))
+            .unwrap();
+    }
+
+    let mut child = match tokio::process::Command::new("ffmpeg")
+        .arg("-i")
+        .arg(canonical_file.as_os_str())
+        .args(["-map", "0:v:0"])
+        .args(["-map", &format!("0:a:{}", audio_index)])
+        .args(["-c", "copy"])
+        .args(["-f", "matroska"])
+        .arg("pipe:1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return axum::response::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("failed to start ffmpeg"))
+                .unwrap();
+        }
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let stream = tokio_util::io::ReaderStream::new(stdout);
+
+    // Spawn a background task to wait on the child process to prevent zombies
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "video/x-matroska")
+        .header("Cache-Control", "no-cache")
+        .body(Body::from_stream(stream))
+        .unwrap()
 }
 
 fn std_error(code: StatusCode, message: String) -> StdResponse {
