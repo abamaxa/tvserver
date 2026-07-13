@@ -6,6 +6,18 @@ Extend the backend so completed downloads can be processed as books as well as v
 
 Existing video download sources, video processing, `/api/media`, and video response contracts remain unchanged.
 
+## Spec Branch
+
+This specification and its implementation plan live on `spec/ebook-support`. Treat that branch as the base branch for all implementation work. Implementation branches must be created from `spec/ebook-support`, not directly from `main`, so each implementation branch inherits the approved spec and plan.
+
+Recommended branch workflow:
+
+```bash
+git switch spec/ebook-support
+git pull --ff-only
+git switch -c codex/ebook-support-<task-name>
+```
+
 ## Goals
 
 - Support `.pdf` and `.epub` files downloaded through the existing download sources.
