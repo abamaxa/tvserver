@@ -16,9 +16,9 @@ use app_lib::{
 pub async fn create_server(context: Context, port: u16) -> JoinHandle<Result<()>> {
     let task = tokio::spawn(async move {
         let app = register(Arc::new(context))
-            .nest_service("/", ServeDir::new(get_client_path("app")))
             .nest_service("/player", ServeDir::new(get_client_path("player")))
             .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
+            .fallback_service(ServeDir::new(get_client_path("app")))
             .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()));
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
