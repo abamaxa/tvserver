@@ -22,7 +22,7 @@ const AUTH_CREDENTIALS: &str = "AUTH_CREDENTIALS";
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
 const DEFAULT_CLIENT_DIR: &str = "client";
-const DEFAULT_PB_URL: &str = "https://thehiddenbay.com";
+const DEFAULT_PB_URL: &str = "https://apibay.org";
 const DEFAULT_DELAY_REAPING_TASKS_SECS: i64 = 60;
 const DEFAULT_DOWNLOAD_DIR: &str = ".downloads";
 
@@ -69,7 +69,10 @@ pub fn get_database_migration_dir() -> String {
 
 pub fn get_downloads_dir() -> String {
     env::var(DOWNLOAD_DIR).unwrap_or_else(|_| {
-        PathBuf::from(get_movie_dir()).join(DEFAULT_DOWNLOAD_DIR).to_string_lossy().to_string()
+        PathBuf::from(get_movie_dir())
+            .join(DEFAULT_DOWNLOAD_DIR)
+            .to_string_lossy()
+            .to_string()
     })
 }
 
@@ -106,12 +109,12 @@ pub fn get_sharing_server() -> String {
     env::var(SHARING_SERVER).unwrap_or_default()
 }
 
-pub fn  get_telegram_token() -> String {
-	env::var(TELEGRAM_TOKEN).unwrap_or_default()
+pub fn get_telegram_token() -> String {
+    env::var(TELEGRAM_TOKEN).unwrap_or_default()
 }
 
-pub fn  get_telegram_chat_id() -> String {
-	env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
+pub fn get_telegram_chat_id() -> String {
+    env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
 }
 
 pub fn get_auth_credentials() -> String {
