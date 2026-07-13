@@ -1,9 +1,0 @@
-# Android-specific Rust flags
-# This file is used by the build script to set flags for Android builds
-
-# Add flags to disable OpenSSL and use rustls instead
-rustflags = [
-    "--cfg", "feature=\"rustls-tls\"", 
-    "--cfg", "no_openssl",
-    "--cfg", "ossl_no_verify"
-] 
