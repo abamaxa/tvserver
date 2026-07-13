@@ -9,10 +9,12 @@ const DATABASE_MIGRATION_DIR: &str = "DATABASE_MIGRATION_DIR";
 const ENABLE_VLC: &str = "ENABLE_VLC";
 pub const GOOGLE_KEY: &str = "GOOGLE_KEY";
 pub const MOVIE_DIR: &str = "MOVIE_DIR";
+pub const BOOK_DIR: &str = "BOOK_DIR";
 const DOWNLOAD_DIR: &str = "DOWNLOAD_DIR";
 const PIRATE_BAY_PROXY_URL: &str = "PIRATE_BAY_PROXY_URL";
 const DELAY_REAPING_TASKS_SECS: &str = "DELAY_REAPING_TASKS_SECS";
 const THUMBNAIL_DIR: &str = "THUMBNAIL_DIR";
+const BOOK_THUMBNAIL_DIR: &str = "BOOK_THUMBNAIL_DIR";
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 const SHARING_SERVER: &str = "SHARING_SERVER";
 const TELEGRAM_TOKEN: &str = "TELEGRAM_TOKEN";
@@ -28,6 +30,10 @@ const DEFAULT_DOWNLOAD_DIR: &str = ".downloads";
 
 pub fn get_movie_dir() -> String {
     env::var(MOVIE_DIR).expect("MOVIE_DIR environment variable is not set")
+}
+
+pub fn get_book_dir() -> String {
+    env::var(BOOK_DIR).expect("BOOK_DIR environment variable is not set")
 }
 
 pub fn enable_vlc_player() -> bool {
@@ -98,6 +104,13 @@ pub fn get_thumbnail_dir(movie_dir: &str) -> PathBuf {
     }
 }
 
+pub fn get_book_thumbnail_dir(book_dir: &str) -> PathBuf {
+    match env::var(BOOK_THUMBNAIL_DIR) {
+        Ok(dir) => PathBuf::from(dir),
+        _ => PathBuf::from(book_dir).join(".thumbnails"),
+    }
+}
+
 pub fn get_openai_api_key() -> String {
     env::var(OPENAI_API_KEY).unwrap_or_default()
 }
@@ -116,4 +129,64 @@ pub fn  get_telegram_chat_id() -> String {
 
 pub fn get_auth_credentials() -> String {
     env::var(AUTH_CREDENTIALS).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_book_dir, get_book_thumbnail_dir, BOOK_DIR, BOOK_THUMBNAIL_DIR};
+    use std::env;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        originals: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvVarGuard {
+        fn new(names: &[&'static str]) -> Self {
+            Self {
+                originals: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.originals.iter() {
+                match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn book_dir_is_required_and_thumbnail_dir_defaults_under_book_dir() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvVarGuard::new(&[BOOK_DIR, BOOK_THUMBNAIL_DIR]);
+
+        env::remove_var(BOOK_DIR);
+        env::remove_var(BOOK_THUMBNAIL_DIR);
+        assert!(catch_unwind(AssertUnwindSafe(get_book_dir)).is_err());
+
+        env::set_var(BOOK_DIR, "/library/books");
+        assert_eq!(get_book_dir(), "/library/books");
+        assert_eq!(
+            get_book_thumbnail_dir("/library/books"),
+            PathBuf::from("/library/books/.thumbnails")
+        );
+
+        env::set_var(BOOK_THUMBNAIL_DIR, "/library/book-covers");
+        assert_eq!(
+            get_book_thumbnail_dir("/library/books"),
+            PathBuf::from("/library/book-covers")
+        );
+    }
 }

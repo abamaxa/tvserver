@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 // Assuming these are defined in your codebase:
+use super::media_kind::is_video_extension;
 use crate::domain::traits::Repository;
 use crate::domain::models::VideoDetails;
 
@@ -51,33 +52,18 @@ pub fn skip_file(name: &str) -> bool {
         return true;
     }
 
-    // List of accepted file extensions.
-    let accept_extensions = [
-        "", ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm",
-        ".m4v", ".mpg", ".mpeg", ".3gp", ".3g2", ".ts", ".vob", ".m2ts",
-        ".mts", ".f4v", ".f4p", ".f4a", ".f4b", ".ogv", ".ogg", ".drc",
-        ".gif", ".gifv", ".mng", ".avi", ".mov", ".qt", ".wmv", ".yuv",
-        ".rm", ".rmvb", ".asf", ".amv", ".mp4", ".m4p", ".m4v", ".mpg",
-        ".mp2", ".mpeg", ".mpe", ".mpv", ".mpg", ".mpeg", ".m2v", ".m4v",
-        ".svi", ".3gp", ".3g2", ".mxf", ".roq", ".nsv", ".flv", ".f4v",
-        ".f4p", ".f4a", ".f4b", 
-        // subtitles
-        //".srt", ".sub", ".idx", ".ass", ".ssa", ".sup", ".vtt", ".ttml", ".dfxp", ".ttx", ".xml", ".sbv", ".usf",
-        //".usm", ".usx", ".usx2", ".usx3", ".usx4", ".usx5", ".usx6", ".usx7", ".usx8", ".usx9", ".usx10"
-    ];
-
     // Convert the file name to lowercase and extract the extension.
     let name_lowercase = name.to_lowercase();
     let file_ext = {
         let path = Path::new(&name_lowercase);
         match path.extension().and_then(|s| s.to_str()) {
-            Some(ext) => format!(".{}", ext),
+            Some(ext) => ext.to_string(),
             None => String::new(),
         }
     };
 
     // If the file extension is one of the accepted ones, don't skip the file.
-    if accept_extensions.iter().any(|&ext| ext == file_ext) {
+    if file_ext.is_empty() || is_video_extension(&file_ext) {
         return false;
     }
 
@@ -120,4 +106,3 @@ mod tests {
         }
     }
 }
-
