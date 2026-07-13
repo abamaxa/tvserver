@@ -6,7 +6,6 @@ use sqlx::migrate::{
     MigrateError, Migrator
 };
 use sqlx::sqlite::{SqlitePool, SqliteRow};
-use std::path;
 use serde_json;
 
 use crate::domain::algorithm::get_thumbnails_url;
@@ -45,11 +44,7 @@ impl SqlRepository {
     async fn do_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
         let migrations_dir = get_database_migration_dir();
 
-        let cwd = std::env::current_dir()
-            .map_err(|e| MigrateError::Source(e.into()))?;
-        let absolue_dir = path::Path::new(&cwd).join(&migrations_dir);
-
-        let m = Migrator::new(absolue_dir).await?;
+        let m = Migrator::new(migrations_dir.as_path()).await?;
 
         m.run(pool).await
     }

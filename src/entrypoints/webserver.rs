@@ -7,7 +7,7 @@
 extern crate core;
 
 use std::{net::SocketAddr, sync::Arc};
-use axum::{middleware, Router};
+use axum::{middleware, routing::get, Router};
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -42,6 +42,7 @@ async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Resu
 
     // Unprotected routes: streaming and thumbnails (need external access for casting)
     let unprotected_routes = Router::new()
+        .route("/api/stream-audio/{audio_index}/{*path}", get(crate::entrypoints::api::stream_audio))
         .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
         .nest_service(
             "/api/thumbnails",

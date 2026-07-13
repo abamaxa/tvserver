@@ -165,8 +165,7 @@ pub async fn delete_video(
     state: tauri::State<'_, SharedState>,
     video_id: String
 ) -> Result<Response, String> {
-    let id = video_id.parse::<i64>().map_err(|e| format!("Invalid video ID: {}", e))?;
-    match state.get_store().delete(id).await {
+    match state.get_store().delete(video_id).await {
         Ok(()) => Ok(Response::success("success".to_string())),
         Err(e) => Err(e.to_string()),
     }

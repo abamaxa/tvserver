@@ -45,7 +45,7 @@ async fn test_pirate_download() -> Result<()> {
     let response: Response = serde_json::from_str(&body)?;
 
     assert!(response.errors.is_empty());
-    assert_eq!(response.message, "response: ok");
+    assert_eq!(response.message, "download queued");
 
     map.insert("engine", "doesn't exist");
 
