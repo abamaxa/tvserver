@@ -5,18 +5,23 @@ use quick_xml::{
 };
 use serde_json::json;
 use std::{
-    fs::{self, File},
-    io::{BufWriter, Cursor, Read},
+    fs::{self, File, OpenOptions},
+    io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use zip::ZipArchive;
 
+const MAX_EPUB_ARCHIVE_ENTRIES: u16 = 4_096;
+const MAX_CENTRAL_DIRECTORY_BYTES: u32 = 8 * 1024 * 1024;
+const MAX_EOCD_TAIL_BYTES: u64 = 22 + u16::MAX as u64;
 const MAX_CONTAINER_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_COVER_DIMENSION: u32 = 8_192;
 const MAX_COVER_PIXELS: u64 = 8_000_000;
 const MAX_COVER_DECODE_ALLOC_BYTES: u64 = 48 * 1024 * 1024;
+static NEXT_THUMBNAIL_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BookMetadataExtraction {
@@ -47,8 +52,9 @@ pub fn extract_epub_metadata(
     thumbnail_dir: &Path,
     thumbnail_key: &str,
 ) -> Result<BookMetadataExtraction, BookMetadataExtractionError> {
-    let file = File::open(epub_path)
+    let mut file = File::open(epub_path)
         .map_err(|error| BookMetadataExtractionError::Open(error.to_string()))?;
+    preflight_zip(&mut file)?;
     let mut archive = ZipArchive::new(file)
         .map_err(|error| BookMetadataExtractionError::Archive(error.to_string()))?;
 
@@ -56,27 +62,26 @@ pub fn extract_epub_metadata(
         read_bounded_entry(&mut archive, "META-INF/container.xml", MAX_CONTAINER_BYTES)?;
     let package_path = parse_container(&container)?;
     let package = read_bounded_entry(&mut archive, &package_path, MAX_PACKAGE_BYTES)?;
-    let parsed = parse_package(&package)?;
+    let (parsed, extraction_error) = match parse_package(&package)? {
+        PackageParseOutcome::Complete(parsed) => (parsed, None),
+        PackageParseOutcome::Malformed { parsed, error } => (parsed, Some(error)),
+    };
     let isbn = parsed.isbn();
 
-    let (thumbnail, warnings) = match extract_cover(
-        &mut archive,
-        &package_path,
-        &parsed,
-        thumbnail_dir,
-        thumbnail_key,
-    ) {
-        Ok(thumbnail) => (thumbnail, Vec::new()),
-        Err(cover_warning) => {
-            tracing::warn!(epub = %epub_path.display(), "{cover_warning}");
-            let mut warnings = vec![cover_warning];
-            if let Err(error) = ensure_default_book_thumbnail(thumbnail_dir) {
-                let warning = format!("could not prepare default book thumbnail: {error}");
-                tracing::warn!(epub = %epub_path.display(), "{warning}");
-                warnings.push(warning);
+    let (thumbnail, warnings) = match extraction_error.as_ref() {
+        Some(error) => default_thumbnail_fallback(epub_path, thumbnail_dir, error.clone()),
+        None => match extract_cover(
+            &mut archive,
+            &package_path,
+            &parsed,
+            thumbnail_dir,
+            thumbnail_key,
+        ) {
+            Ok(thumbnail) => (thumbnail, Vec::new()),
+            Err(cover_warning) => {
+                default_thumbnail_fallback(epub_path, thumbnail_dir, cover_warning)
             }
-            (DEFAULT_BOOK_THUMBNAIL.to_string(), warnings)
-        }
+        },
     };
 
     Ok(BookMetadataExtraction {
@@ -95,10 +100,116 @@ pub fn extract_epub_metadata(
                     "coverWarnings": warnings,
                 }
             })),
-            extraction_error: None,
+            extraction_error,
         },
         warnings,
     })
+}
+
+fn default_thumbnail_fallback(
+    epub_path: &Path,
+    thumbnail_dir: &Path,
+    warning: String,
+) -> (String, Vec<String>) {
+    tracing::warn!(epub = %epub_path.display(), "{warning}");
+    let mut warnings = vec![warning];
+    if let Err(error) = ensure_default_book_thumbnail(thumbnail_dir) {
+        let warning = format!("could not prepare default book thumbnail: {error}");
+        tracing::warn!(epub = %epub_path.display(), "{warning}");
+        warnings.push(warning);
+    }
+    (DEFAULT_BOOK_THUMBNAIL.to_string(), warnings)
+}
+
+fn preflight_zip(file: &mut File) -> Result<(), BookMetadataExtractionError> {
+    let file_len = file
+        .seek(SeekFrom::End(0))
+        .map_err(|error| BookMetadataExtractionError::Archive(error.to_string()))?;
+    if file_len < 22 {
+        return Err(BookMetadataExtractionError::Archive(
+            "invalid ZIP: missing end-of-central-directory record".to_string(),
+        ));
+    }
+
+    let tail_len = file_len.min(MAX_EOCD_TAIL_BYTES);
+    file.seek(SeekFrom::End(-(tail_len as i64)))
+        .map_err(|error| BookMetadataExtractionError::Archive(error.to_string()))?;
+    let mut tail = vec![0; tail_len as usize];
+    file.read_exact(&mut tail)
+        .map_err(|error| BookMetadataExtractionError::Archive(error.to_string()))?;
+
+    let eocd_index = (0..=tail.len() - 22).rev().find(|index| {
+        tail[*index..].starts_with(&0x0605_4b50_u32.to_le_bytes())
+            && read_u16(&tail, *index + 20)
+                .is_some_and(|comment_len| *index + 22 + usize::from(comment_len) == tail.len())
+    });
+    let Some(eocd_index) = eocd_index else {
+        return Err(BookMetadataExtractionError::Archive(
+            "invalid ZIP: missing end-of-central-directory record".to_string(),
+        ));
+    };
+
+    let disk_number = read_u16(&tail, eocd_index + 4).unwrap();
+    let central_directory_disk = read_u16(&tail, eocd_index + 6).unwrap();
+    let entries_on_disk = read_u16(&tail, eocd_index + 8).unwrap();
+    let total_entries = read_u16(&tail, eocd_index + 10).unwrap();
+    let central_directory_size = read_u32(&tail, eocd_index + 12).unwrap();
+    let central_directory_offset = read_u32(&tail, eocd_index + 16).unwrap();
+
+    if entries_on_disk == u16::MAX
+        || total_entries == u16::MAX
+        || central_directory_size == u32::MAX
+        || central_directory_offset == u32::MAX
+    {
+        return Err(BookMetadataExtractionError::Archive(
+            "ZIP64 archives are not supported by the bounded EPUB reader".to_string(),
+        ));
+    }
+    if disk_number != 0 || central_directory_disk != 0 || entries_on_disk != total_entries {
+        return Err(BookMetadataExtractionError::Archive(
+            "multi-disk ZIP archives are not supported".to_string(),
+        ));
+    }
+    if total_entries > MAX_EPUB_ARCHIVE_ENTRIES {
+        return Err(BookMetadataExtractionError::Archive(format!(
+            "archive entry count {total_entries} exceeds limit {MAX_EPUB_ARCHIVE_ENTRIES}"
+        )));
+    }
+    if central_directory_size > MAX_CENTRAL_DIRECTORY_BYTES {
+        return Err(BookMetadataExtractionError::Archive(format!(
+            "central directory size {central_directory_size} exceeds limit {MAX_CENTRAL_DIRECTORY_BYTES}"
+        )));
+    }
+
+    let absolute_eocd_offset = file_len - tail_len + eocd_index as u64;
+    let central_directory_end = u64::from(central_directory_offset)
+        .checked_add(u64::from(central_directory_size))
+        .ok_or_else(|| {
+            BookMetadataExtractionError::Archive(
+                "invalid ZIP: central directory range overflow".to_string(),
+            )
+        })?;
+    if central_directory_end > absolute_eocd_offset {
+        return Err(BookMetadataExtractionError::Archive(
+            "invalid ZIP: central directory extends beyond its end record".to_string(),
+        ));
+    }
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| BookMetadataExtractionError::Archive(error.to_string()))?;
+    Ok(())
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        bytes.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        bytes.get(offset..offset + 4)?.try_into().ok()?,
+    ))
 }
 
 fn read_bounded_entry(
@@ -135,27 +246,38 @@ fn parse_container(bytes: &[u8]) -> Result<String, BookMetadataExtractionError> 
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
     let mut package_path = None;
-    let mut depth = 0usize;
+    let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut saw_container_root = false;
     loop {
         match reader.read_event() {
             Ok(Event::Start(element)) => {
-                depth += 1;
-                if package_path.is_none() && local_name(element.name().as_ref()) == b"rootfile" {
+                let name = local_name(element.name().as_ref()).to_vec();
+                validate_container_element(&stack, &name, &mut saw_container_root)?;
+                if name == b"rootfile" && package_path.is_none() {
+                    package_path = parse_rootfile_path(&reader, &element)?;
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(element)) => {
+                let name = local_name(element.name().as_ref()).to_vec();
+                validate_container_element(&stack, &name, &mut saw_container_root)?;
+                if name == b"rootfile" && package_path.is_none() {
                     package_path = parse_rootfile_path(&reader, &element)?;
                 }
             }
-            Ok(Event::Empty(element)) if local_name(element.name().as_ref()) == b"rootfile" => {
-                if package_path.is_none() {
-                    package_path = parse_rootfile_path(&reader, &element)?;
-                }
-            }
-            Ok(Event::End(_)) => {
-                if depth == 0 {
+            Ok(Event::End(element)) => {
+                let element_name = element.name();
+                let closing = local_name(element_name.as_ref());
+                let Some(opening) = stack.pop() else {
                     return Err(BookMetadataExtractionError::InvalidPackage(
                         "invalid META-INF/container.xml: unexpected closing element".to_string(),
                     ));
+                };
+                if opening != closing {
+                    return Err(BookMetadataExtractionError::InvalidPackage(
+                        "invalid META-INF/container.xml: mismatched closing element".to_string(),
+                    ));
                 }
-                depth -= 1;
             }
             Ok(Event::Eof) => break,
             Err(error) => {
@@ -166,9 +288,14 @@ fn parse_container(bytes: &[u8]) -> Result<String, BookMetadataExtractionError> 
             _ => {}
         }
     }
-    if depth != 0 {
+    if !stack.is_empty() {
         return Err(BookMetadataExtractionError::InvalidPackage(
             "invalid META-INF/container.xml: unclosed element".to_string(),
+        ));
+    }
+    if !saw_container_root {
+        return Err(BookMetadataExtractionError::InvalidPackage(
+            "container element must be the document root".to_string(),
         ));
     }
     package_path.ok_or_else(|| {
@@ -176,6 +303,35 @@ fn parse_container(bytes: &[u8]) -> Result<String, BookMetadataExtractionError> 
             "META-INF/container.xml has no rootfile full-path".to_string(),
         )
     })
+}
+
+fn validate_container_element(
+    stack: &[Vec<u8>],
+    name: &[u8],
+    saw_container_root: &mut bool,
+) -> Result<(), BookMetadataExtractionError> {
+    if stack.is_empty() {
+        if *saw_container_root || name != b"container" {
+            return Err(BookMetadataExtractionError::InvalidPackage(
+                "container element must be the document root".to_string(),
+            ));
+        }
+        *saw_container_root = true;
+        return Ok(());
+    }
+    if name == b"rootfiles" && !(stack.len() == 1 && stack[0] == b"container") {
+        return Err(BookMetadataExtractionError::InvalidPackage(
+            "rootfiles must be directly inside container".to_string(),
+        ));
+    }
+    if name == b"rootfile"
+        && !(stack.len() == 2 && stack[0] == b"container" && stack[1] == b"rootfiles")
+    {
+        return Err(BookMetadataExtractionError::InvalidPackage(
+            "rootfile must be inside container/rootfiles".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_rootfile_path(
@@ -197,6 +353,7 @@ fn parse_rootfile_path(
 
 #[derive(Default)]
 struct ParsedPackage {
+    package_root_recognized: bool,
     title: Option<String>,
     authors: Vec<String>,
     description: Option<String>,
@@ -250,10 +407,32 @@ struct ManifestItem {
     properties: Vec<String>,
 }
 
-fn parse_package(bytes: &[u8]) -> Result<ParsedPackage, BookMetadataExtractionError> {
+enum PackageParseOutcome {
+    Complete(ParsedPackage),
+    Malformed {
+        parsed: ParsedPackage,
+        error: String,
+    },
+}
+
+fn parse_package(bytes: &[u8]) -> Result<PackageParseOutcome, BookMetadataExtractionError> {
+    let mut parsed = ParsedPackage::default();
+    match parse_package_into(bytes, &mut parsed) {
+        Ok(()) => Ok(PackageParseOutcome::Complete(parsed)),
+        Err(error) if parsed.package_root_recognized => Ok(PackageParseOutcome::Malformed {
+            parsed,
+            error: error.to_string(),
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_package_into(
+    bytes: &[u8],
+    parsed: &mut ParsedPackage,
+) -> Result<(), BookMetadataExtractionError> {
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(true);
-    let mut parsed = ParsedPackage::default();
     let mut saw_package = false;
     let mut in_metadata = false;
     let mut in_manifest = false;
@@ -271,6 +450,7 @@ fn parse_package(bytes: &[u8]) -> Result<ParsedPackage, BookMetadataExtractionEr
                         ));
                     }
                     saw_package = true;
+                    parsed.package_root_recognized = true;
                 }
                 depth += 1;
                 if name == b"metadata" {
@@ -278,7 +458,7 @@ fn parse_package(bytes: &[u8]) -> Result<ParsedPackage, BookMetadataExtractionEr
                 } else if name == b"manifest" {
                     in_manifest = true;
                 } else if in_manifest && name == b"item" {
-                    parse_manifest_item(&reader, &element, &mut parsed)?;
+                    parse_manifest_item(&reader, &element, parsed)?;
                 } else if in_metadata {
                     match name {
                         b"title" => {
@@ -357,12 +537,13 @@ fn parse_package(bytes: &[u8]) -> Result<ParsedPackage, BookMetadataExtractionEr
                 let name = local_name(element_name.as_ref());
                 if depth == 0 && !saw_package && name == b"package" {
                     saw_package = true;
+                    parsed.package_root_recognized = true;
                 } else if depth == 0 {
                     return Err(BookMetadataExtractionError::InvalidPackage(
                         "package element must be the document root".to_string(),
                     ));
                 } else if in_manifest && name == b"item" {
-                    parse_manifest_item(&reader, &element, &mut parsed)?;
+                    parse_manifest_item(&reader, &element, parsed)?;
                 } else if in_metadata && name == b"meta" {
                     if attribute(&reader, &element, b"name")?.as_deref() == Some("cover") {
                         parsed.epub2_cover_id = attribute(&reader, &element, b"content")?;
@@ -402,7 +583,7 @@ fn parse_package(bytes: &[u8]) -> Result<ParsedPackage, BookMetadataExtractionEr
             "package document has no package element".to_string(),
         ));
     }
-    Ok(parsed)
+    Ok(())
 }
 
 fn parse_manifest_item(
@@ -474,16 +655,13 @@ fn extract_cover(
         .map_err(|error| format!("could not read EPUB cover {cover_path:?}: {error}"))?;
     let decoded = decode_cover(&bytes)
         .map_err(|error| format!("could not decode EPUB cover {cover_path:?}: {error}"))?;
-    let thumbnail_name = thumbnail_filename(thumbnail_key)
-        .ok_or_else(|| "EPUB cover thumbnail key is empty or unsafe".to_string())?;
+    let thumbnail_name = thumbnail_filename(thumbnail_key)?;
 
     fs::create_dir_all(thumbnail_dir)
         .map_err(|error| format!("could not create EPUB thumbnail directory: {error}"))?;
     let thumbnail_path = thumbnail_dir.join(&thumbnail_name);
-    write_jpeg(&thumbnail_path, &decoded).map_err(|error| {
-        let _ = fs::remove_file(&thumbnail_path);
-        format!("could not write EPUB cover thumbnail: {error}")
-    })?;
+    write_jpeg_atomically(&thumbnail_path, &decoded)
+        .map_err(|error| format!("could not write EPUB cover thumbnail: {error}"))?;
     Ok(thumbnail_name)
 }
 
@@ -539,20 +717,77 @@ fn resolve_opf_relative_path(package_path: &str, href: &str) -> Option<String> {
     normalize_archive_path(&joined)
 }
 
-fn thumbnail_filename(key: &str) -> Option<String> {
+fn thumbnail_filename(key: &str) -> Result<String, String> {
     let key = key.trim();
-    (!key.is_empty()
-        && key
+    if key.is_empty()
+        || !key
             .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')))
-    .then(|| format!("{key}.jpg"))
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("EPUB cover thumbnail key is empty or unsafe".to_string());
+    }
+    let filename = format!("{key}.jpg");
+    if filename.eq_ignore_ascii_case(DEFAULT_BOOK_THUMBNAIL) {
+        return Err(format!(
+            "EPUB cover thumbnail key is reserved for {DEFAULT_BOOK_THUMBNAIL}"
+        ));
+    }
+    Ok(filename)
 }
 
-fn write_jpeg(path: &PathBuf, image: &image::DynamicImage) -> Result<(), image::ImageError> {
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 85);
-    encoder.encode_image(&image.to_rgb8())
+fn write_jpeg_atomically(path: &Path, image: &image::DynamicImage) -> Result<(), String> {
+    let (temp_path, file) = create_thumbnail_temp_file(path)?;
+    let result = (|| {
+        let mut writer = BufWriter::new(file);
+        {
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 85);
+            encoder
+                .encode_image(&image.to_rgb8())
+                .map_err(|error| format!("could not encode temporary thumbnail: {error}"))?;
+        }
+        writer
+            .flush()
+            .map_err(|error| format!("could not flush temporary thumbnail: {error}"))?;
+        let file = writer.into_inner().map_err(|error| {
+            format!("could not close temporary thumbnail: {}", error.into_error())
+        })?;
+        file.sync_all()
+            .map_err(|error| format!("could not sync temporary thumbnail: {error}"))?;
+        drop(file);
+        fs::rename(&temp_path, path)
+            .map_err(|error| format!("could not rename temporary thumbnail: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn create_thumbnail_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "thumbnail path has no parent directory".to_string())?;
+    let filename = path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .ok_or_else(|| "thumbnail filename is not valid UTF-8".to_string())?;
+    for _ in 0..16 {
+        let sequence = NEXT_THUMBNAIL_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), sequence));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("could not create temporary thumbnail: {error}"));
+            }
+        }
+    }
+    Err("could not allocate a unique temporary thumbnail filename".to_string())
 }
 
 fn read_element_text(
@@ -702,7 +937,12 @@ mod tests {
     ) {
         let file = File::create(path).unwrap();
         let mut zip = ZipWriter::new(file);
-        let options = SimpleFileOptions::default();
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("META-INF/container.xml", options).unwrap();
         zip.write_all(
             format!(r#"<?xml version="1.0"?>
@@ -718,6 +958,23 @@ mod tests {
             zip.write_all(contents).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn generated_valid_epub_starts_with_stored_mimetype_entry() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("book.epub");
+        write_epub(&epub_path, "<package><metadata/><manifest/></package>", &[]);
+
+        let file = File::open(&epub_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut first = archive.by_index(0).unwrap();
+        let mut contents = String::new();
+        first.read_to_string(&mut contents).unwrap();
+
+        assert_eq!(first.name(), "mimetype");
+        assert_eq!(first.compression(), zip::CompressionMethod::Stored);
+        assert_eq!(contents, "application/epub+zip");
     }
 
     #[test]
@@ -975,15 +1232,52 @@ mod tests {
     }
 
     #[test]
-    fn malformed_package_xml_is_a_hard_extraction_error() {
+    fn atomic_thumbnail_write_preserves_final_and_cleans_temp_on_rename_failure() {
+        let temp = TestDir::new();
+        let final_path = temp.path().join("existing.jpg");
+        fs::create_dir(&final_path).unwrap();
+        fs::write(final_path.join("marker"), b"preserve me").unwrap();
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([1, 2, 3]),
+        ));
+
+        let error = write_jpeg_atomically(&final_path, &image).unwrap_err();
+
+        assert!(error.contains("rename"));
+        assert_eq!(fs::read(final_path.join("marker")).unwrap(), b"preserve me");
+        let entries: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [std::ffi::OsString::from("existing.jpg")]);
+    }
+
+    #[test]
+    fn malformed_package_metadata_is_a_successful_fallback_with_diagnostics() {
         let temp = TestDir::new();
         let epub_path = temp.path().join("book.epub");
-        write_epub(&epub_path, "<package><metadata>", &[]);
+        write_epub(
+            &epub_path,
+            "<package><metadata><title>Partial Title</title></metadata><manifest>",
+            &[],
+        );
 
-        let error =
-            extract_epub_metadata(&epub_path, &temp.path().join("covers"), "broken").unwrap_err();
+        let result =
+            extract_epub_metadata(&epub_path, &temp.path().join("covers"), "broken").unwrap();
 
-        assert!(error.to_string().contains("invalid package document XML"));
+        assert_eq!(result.title.as_deref(), Some("Partial Title"));
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .metadata
+            .extraction_error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid package document XML")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("invalid package document XML")));
     }
 
     #[test]
@@ -1001,6 +1295,53 @@ mod tests {
             extract_epub_metadata(&epub_path, &temp.path().join("covers"), "broken").unwrap_err();
 
         assert!(error.to_string().contains("unsafe package document path"));
+    }
+
+    fn write_epub_with_custom_container(path: &Path, container: &str) {
+        let file = File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        zip.start_file("META-INF/container.xml", options).unwrap();
+        zip.write_all(container.as_bytes()).unwrap();
+        zip.start_file("OPS/package.opf", options).unwrap();
+        zip.write_all(b"<package><metadata/><manifest/></package>")
+            .unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn container_document_with_wrong_root_is_a_hard_error() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("wrong-root.epub");
+        write_epub_with_custom_container(
+            &epub_path,
+            r#"<wrapper><rootfiles><rootfile full-path="OPS/package.opf"/></rootfiles></wrapper>"#,
+        );
+
+        let error = extract_epub_metadata(&epub_path, &temp.path().join("covers"), "wrong-root")
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("container element must be the document root"));
+    }
+
+    #[test]
+    fn rootfile_outside_rootfiles_is_a_hard_error() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("misplaced-rootfile.epub");
+        write_epub_with_custom_container(
+            &epub_path,
+            r#"<container><rootfile full-path="OPS/package.opf"/></container>"#,
+        );
+
+        let error =
+            extract_epub_metadata(&epub_path, &temp.path().join("covers"), "misplaced-rootfile")
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("rootfile must be inside container/rootfiles"));
     }
 
     #[test]
@@ -1029,6 +1370,36 @@ mod tests {
     }
 
     #[test]
+    fn default_thumbnail_name_is_reserved_and_fallback_bytes_are_preserved() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("book.epub");
+        let cover = png_bytes();
+        write_epub(
+            &epub_path,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/>
+                 <manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", cover.as_slice())],
+        );
+        let covers = temp.path().join("covers");
+        ensure_default_book_thumbnail(&covers).unwrap();
+        let expected_default = fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap();
+
+        let result = extract_epub_metadata(&epub_path, &covers, "default-book").unwrap();
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("reserved")));
+        assert_eq!(
+            fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
+            expected_default
+        );
+    }
+
+    #[test]
     fn package_document_with_non_package_root_is_a_hard_error() {
         let temp = TestDir::new();
         let epub_path = temp.path().join("book.epub");
@@ -1044,5 +1415,28 @@ mod tests {
         assert!(error
             .to_string()
             .contains("package element must be the document root"));
+    }
+
+    #[test]
+    fn archive_entry_budget_is_rejected_from_eocd_before_zip_parsing() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("many-entries.epub");
+        let mut file = File::create(&epub_path).unwrap();
+        file.write_all(&0x0605_4b50_u32.to_le_bytes()).unwrap();
+        file.write_all(&0_u16.to_le_bytes()).unwrap();
+        file.write_all(&0_u16.to_le_bytes()).unwrap();
+        file.write_all(&4_097_u16.to_le_bytes()).unwrap();
+        file.write_all(&4_097_u16.to_le_bytes()).unwrap();
+        file.write_all(&0_u32.to_le_bytes()).unwrap();
+        file.write_all(&0_u32.to_le_bytes()).unwrap();
+        file.write_all(&0_u16.to_le_bytes()).unwrap();
+        drop(file);
+
+        let error = extract_epub_metadata(&epub_path, &temp.path().join("covers"), "many-entries")
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("archive entry count 4097 exceeds limit 4096"));
     }
 }
