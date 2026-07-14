@@ -23,8 +23,9 @@ pub struct BookStore {
 
 impl BookStore {
     pub fn new(store: FileStorer, thumbnail_store: FileStorer, repo: Repository) -> Self {
-        let book_root = PathBuf::from(get_book_dir());
-        let thumbnail_root = get_book_thumbnail_dir(book_root.to_str().unwrap_or_default());
+        let configured_book_root = get_book_dir();
+        let thumbnail_root = get_book_thumbnail_dir(&configured_book_root);
+        let book_root = PathBuf::from(configured_book_root);
         Self::new_with_roots(store, thumbnail_store, repo, book_root, thumbnail_root)
     }
 
@@ -69,41 +70,64 @@ impl BookStore {
         full_path: &Path,
         suggested_collection: Option<String>,
     ) -> Result<PathBuf> {
-        let collection = suggested_collection
-            .map(|collection| title_case(&collection))
-            .unwrap_or_else(|| self.collection_from_source(full_path));
+        let collection = match suggested_collection {
+            Some(collection) => title_case(&collection),
+            None => self.collection_from_source(full_path)?,
+        };
         let collection = safe_relative_collection(&collection)?;
         let destination_directory = self.book_root.join(collection);
-        self.store.create_folder(&destination_directory).await?;
+        let source_path = full_path.to_str().ok_or_else(|| {
+            anyhow::anyhow!("book source path is not valid UTF-8: {}", full_path.display())
+        })?;
         let destination = destination_directory.join(full_path.file_name().ok_or_else(|| {
             anyhow::anyhow!("book path has no file name: {}", full_path.display())
         })?);
+        let destination_path = destination.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "book destination path is not valid UTF-8: {}",
+                destination.display()
+            )
+        })?;
+        ensure_path_within_root(
+            &destination_directory,
+            &self.book_root,
+            "book destination directory",
+        )
+        .await?;
+        self.store.create_folder(&destination_directory).await?;
 
-        if full_path == destination {
-            return Ok(destination);
+        let comparable_source = absolute_path(full_path, "book source")?;
+        let comparable_destination = absolute_path(&destination, "book destination")?;
+        if comparable_source == comparable_destination {
+            return Ok(full_path.to_path_buf());
         }
 
-        self.store
-            .rename(
-                full_path.to_str().unwrap_or_default(),
-                destination.to_str().unwrap_or_default(),
-            )
-            .await?;
+        self.store.rename(source_path, destination_path).await?;
         Ok(destination)
     }
 
-    fn collection_from_source(&self, full_path: &Path) -> String {
+    fn collection_from_source(&self, full_path: &Path) -> Result<String> {
         let Some(parent) = full_path.parent() else {
-            return String::new();
+            return Ok(String::new());
         };
+        let comparable_parent = absolute_path(parent, "book source parent")?;
+        let comparable_root = absolute_path(&self.book_root, "configured book root")?;
 
-        match parent.strip_prefix(&self.book_root) {
-            Ok(relative) => relative.to_str().unwrap_or_default().to_string(),
-            Err(_) => parent
+        match comparable_parent.strip_prefix(comparable_root) {
+            Ok(relative) => relative
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
+            Err(_) => comparable_parent
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string(),
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "book source parent is not valid UTF-8: {}",
+                        comparable_parent.display()
+                    )
+                }),
         }
     }
 
@@ -113,20 +137,34 @@ impl BookStore {
         let file_name = safe_file_name(&book.file_name, "book file")?;
 
         let book_path = self.book_root.join(collection).join(file_name);
-        self.store
-            .delete(book_path.to_str().unwrap_or_default())
-            .await?;
+        let book_path_string = book_path.to_str().ok_or_else(|| {
+            anyhow::anyhow!("book file path is not valid UTF-8: {}", book_path.display())
+        })?;
+        ensure_path_within_root(&book_path, &self.book_root, "book file").await?;
+        self.store.delete(book_path_string).await?;
 
         if !is_default_book_thumbnail(&book.thumbnail) {
             let unvalidated_path = self.thumbnail_root.join(&book.thumbnail);
             match safe_file_name(&book.thumbnail, "book thumbnail") {
                 Ok(thumbnail) => {
                     let thumbnail_path = self.thumbnail_root.join(thumbnail);
-                    if let Err(error) = self
-                        .thumbnail_store
-                        .delete(thumbnail_path.to_str().unwrap_or_default())
-                        .await
-                    {
+                    let cleanup_result = async {
+                        ensure_path_within_root(
+                            &thumbnail_path,
+                            &self.thumbnail_root,
+                            "book thumbnail",
+                        )
+                        .await?;
+                        let thumbnail_path_string = thumbnail_path.to_str().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "book thumbnail path is not valid UTF-8: {}",
+                                thumbnail_path.display()
+                            )
+                        })?;
+                        self.thumbnail_store.delete(thumbnail_path_string).await
+                    }
+                    .await;
+                    if let Err(error) = cleanup_result {
                         tracing::warn!(
                             "Failed to delete book thumbnail {}: {}",
                             thumbnail_path.display(),
@@ -146,6 +184,66 @@ impl BookStore {
 
         self.repo.delete_book(checksum).await?;
         Ok(())
+    }
+}
+
+fn absolute_path(path: &Path, description: &str) -> Result<PathBuf> {
+    std::path::absolute(path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to make {description} absolute ({}): {error}",
+            path.display()
+        )
+    })
+}
+
+async fn ensure_path_within_root(path: &Path, root: &Path, description: &str) -> Result<()> {
+    let resolved_root = resolve_existing_path_prefix(root).await?;
+    let resolved_path = resolve_existing_path_prefix(path).await?;
+    if resolved_path.starts_with(&resolved_root) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{description} escapes configured root: {}",
+            path.display()
+        ))
+    }
+}
+
+async fn resolve_existing_path_prefix(path: &Path) -> Result<PathBuf> {
+    let absolute = absolute_path(path, "path boundary")?;
+    let mut current = absolute.clone();
+    let mut missing = Vec::new();
+
+    loop {
+        match tokio::fs::canonicalize(&current).await {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = current.file_name().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to resolve an existing path prefix for {}",
+                        absolute.display()
+                    )
+                })?;
+                missing.push(component.to_os_string());
+                current = current.parent().map(Path::to_path_buf).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to resolve an existing path prefix for {}",
+                        absolute.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to resolve path boundary for {}: {error}",
+                    path.display()
+                ));
+            }
+        }
     }
 }
 
@@ -363,6 +461,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn absolute_source_at_relative_book_root_does_not_duplicate_collection() {
+        let id = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let relative_base = PathBuf::from("target").join(format!(
+            "tvserver-book-store-relative-root-{}-{id}",
+            std::process::id()
+        ));
+        let absolute_base = std::env::current_dir().unwrap().join(&relative_base);
+        let layout = TestLayout {
+            base: absolute_base.clone(),
+            source_root: absolute_base.join("downloads"),
+            book_root: relative_base.join("books"),
+            thumbnail_root: relative_base.join("book-thumbnails"),
+            movie_root: absolute_base.join("movies"),
+        };
+        tokio::fs::create_dir_all(absolute_base.join("books"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(absolute_base.join("book-thumbnails"))
+            .await
+            .unwrap();
+        let source = absolute_base.join("books/Root.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let destination = store.add_file(&source, None).await.unwrap();
+
+        assert_eq!(destination, source);
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), b"book");
+        assert!(!absolute_base.join("books/books/Root.epub").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_file_rejects_non_utf8_source_before_filesystem_writes() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let layout = TestLayout::new("non-utf8-source");
+        let source = layout
+            .source_root
+            .join(OsString::from_vec(b"Dune-\xff.epub".to_vec()));
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let error = store
+            .add_file(&source, Some("Fiction".to_string()))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not valid UTF-8"));
+        assert!(!layout.book_root.join("Fiction").exists());
+    }
+
+    #[tokio::test]
     async fn add_file_rejects_collection_path_traversal_without_creating_directories() {
         let layout = TestLayout::new("add-traversal");
         let source = layout.source_root.join("Secrets.epub");
@@ -377,6 +527,26 @@ mod tests {
         assert!(result.is_err());
         assert!(source.exists());
         assert!(!escaped_directory.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_file_rejects_collection_symlink_that_escapes_book_root() {
+        use std::os::unix::fs::symlink;
+
+        let layout = TestLayout::new("add-symlink-escape");
+        let outside = layout.base.join("outside-add");
+        tokio::fs::create_dir(&outside).await.unwrap();
+        symlink(&outside, layout.book_root.join("Fiction")).unwrap();
+        let source = layout.source_root.join("Dune.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let result = store.add_file(&source, Some("Fiction".to_string())).await;
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!outside.join("Dune.epub").exists());
     }
 
     #[tokio::test]
@@ -455,6 +625,42 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumbnail_symlink_escape_is_warning_only_and_row_deletion_continues() {
+        use std::os::unix::fs::symlink;
+
+        let layout = TestLayout::new("thumbnail-symlink-escape");
+        let book_path = layout.book_root.join("Fiction/Dune.epub");
+        tokio::fs::create_dir_all(book_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&book_path, b"book").await.unwrap();
+        let outside_thumbnail = layout.base.join("outside-cover.jpg");
+        tokio::fs::write(&outside_thumbnail, b"keep outside cover")
+            .await
+            .unwrap();
+        let thumbnail_link = layout.thumbnail_root.join("dune-cover.jpg");
+        symlink(&outside_thumbnail, &thumbnail_link).unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let mut book = sample_book(32, "Fiction", "Dune.epub");
+        book.thumbnail = "dune-cover.jpg".to_string();
+        repository.save_book(&book).await.unwrap();
+
+        store.delete(book.checksum).await.unwrap();
+
+        assert!(!book_path.exists());
+        assert_eq!(
+            tokio::fs::read(&outside_thumbnail).await.unwrap(),
+            b"keep outside cover"
+        );
+        assert!(thumbnail_link.symlink_metadata().is_ok());
+        assert!(matches!(
+            repository.retrieve_book(book.checksum).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
     #[tokio::test]
     async fn primary_book_delete_failure_preserves_thumbnail_and_repository_row() {
         let layout = TestLayout::new("primary-delete-failure");
@@ -489,6 +695,33 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(tokio::fs::read(&victim_book).await.unwrap(), b"keep book");
+        assert!(repository.retrieve_book(book.checksum).await.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_rejects_collection_symlink_that_escapes_book_root() {
+        use std::os::unix::fs::symlink;
+
+        let layout = TestLayout::new("delete-symlink-escape");
+        let outside = layout.base.join("outside-delete");
+        tokio::fs::create_dir(&outside).await.unwrap();
+        let victim_book = outside.join("victim.epub");
+        tokio::fs::write(&victim_book, b"keep external book")
+            .await
+            .unwrap();
+        symlink(&outside, layout.book_root.join("Fiction")).unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let book = sample_book(31, "Fiction", "victim.epub");
+        repository.save_book(&book).await.unwrap();
+
+        let result = store.delete(book.checksum).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            tokio::fs::read(&victim_book).await.unwrap(),
+            b"keep external book"
+        );
         assert!(repository.retrieve_book(book.checksum).await.is_ok());
     }
 
