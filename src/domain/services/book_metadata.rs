@@ -979,12 +979,12 @@ fn thumbnail_filename(key: &str) -> Result<String, String> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        return Err("EPUB cover thumbnail key is empty or unsafe".to_string());
+        return Err("book thumbnail key is empty or unsafe".to_string());
     }
     let filename = format!("{key}.jpg");
     if filename.eq_ignore_ascii_case(DEFAULT_BOOK_THUMBNAIL) {
         return Err(format!(
-            "EPUB cover thumbnail key is reserved for {DEFAULT_BOOK_THUMBNAIL}"
+            "book thumbnail key is reserved for {DEFAULT_BOOK_THUMBNAIL}"
         ));
     }
     Ok(filename)
@@ -1342,6 +1342,26 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("test renderer unavailable")));
+    }
+
+    #[test]
+    fn pdf_unsafe_thumbnail_key_uses_format_neutral_warning() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("book.pdf");
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &temp.path().join("covers"),
+            "../unsafe",
+            &FailingPdfRenderer,
+        )
+        .unwrap();
+
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning == "book thumbnail key is empty or unsafe"));
     }
 
     #[test]
