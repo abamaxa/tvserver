@@ -1,17 +1,15 @@
 mod common;
 
-use crate::common::{
-    get_media_store, get_pirate_search, get_repository, get_task_manager,
-};
+use crate::common::{get_media_store, get_pirate_search, get_repository, get_task_manager};
 use anyhow::Result;
-use common::get_checker;
 use app_lib::domain::config::MOVIE_DIR;
+use app_lib::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
 use app_lib::domain::messages::PlayRequest;
+use app_lib::{domain::messages::Response, entrypoints};
+use common::get_checker;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use app_lib::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
-use app_lib::{domain::messages::Response, entrypoints};
 
 #[tokio::test]
 async fn test_remote_play() -> Result<()> {
@@ -20,23 +18,31 @@ async fn test_remote_play() -> Result<()> {
     let local_exchange = LocalMessageExchange::new();
     let exchange = MessageExchange::new(
         local_exchange.new_sender(),
-        local_exchange.listen_for_messages(MessageFilter::All).await?
+        local_exchange
+            .listen_for_messages(MessageFilter::All)
+            .await?,
     );
 
     let key = SocketAddr::from_str("0.0.0.0:456").unwrap();
 
-    exchange.add_player(key.to_string(), common::get_remote_player()).await;
+    exchange
+        .add_player(key.to_string(), common::get_remote_player())
+        .await;
 
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
+    let repository = get_repository().await;
+    let (book_store, book_file_storer) = common::get_book_services(repository.clone());
     let context = entrypoints::Context::new(
         get_media_store(),
         searcher,
         exchange,
         get_task_manager(),
-        get_repository().await,
+        repository,
         get_checker(),
         local_exchange,
+        book_store,
+        book_file_storer,
         None,
     );
 
@@ -44,7 +50,7 @@ async fn test_remote_play() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    let request = PlayRequest{
+    let request = PlayRequest {
         collection: "".to_string(),
         video: "test.mp4".to_string(),
         remote_address: None,

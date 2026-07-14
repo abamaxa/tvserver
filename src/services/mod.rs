@@ -1,20 +1,22 @@
+mod book_store;
 mod chatgpt;
 mod logging;
 mod media_store;
 mod monitor;
 mod pirate_bay;
 mod search;
+mod sharing;
 mod task_manager;
 mod video_information;
 mod youtube;
-mod sharing;
 
-pub use logging::{TVSERVER_LOG, DBTOOL_LOG, TAURI_LOG, setup_logging};
+pub use book_store::BookStore;
+pub use logging::{setup_logging, DBTOOL_LOG, TAURI_LOG, TVSERVER_LOG};
 pub use media_store::MediaStore;
 pub use monitor::Monitor;
 pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use search::{SearchEngine, SearchEngineMap, SearchService};
+pub use sharing::SharingService;
 pub use task_manager::TaskManager;
 pub use video_information::MetaDataManager;
 pub use youtube::{YoutubeClient, YoutubeFetcher, YoutubeResult};
-pub use sharing::SharingService;
