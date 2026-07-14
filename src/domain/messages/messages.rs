@@ -1,8 +1,8 @@
+use crate::domain::algorithm::get_video_url;
 use crate::domain::models::{VideoDetails, VideoMetadata};
 use crate::domain::TaskType;
-use crate::domain::algorithm::get_video_url;
 use mockall::lazy_static;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
 use super::VideoEvent;
@@ -11,20 +11,59 @@ lazy_static! {
     static ref DEFAULT_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 80);
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+fn default_playback_rate() -> f64 {
+    1.0
+}
+
+fn deserialize_f64_or_zero<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_playback_rate<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or_else(default_playback_rate))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePlayerState {
+    #[serde(default, deserialize_with = "deserialize_f64_or_zero")]
     pub current_time: f64,
+    #[serde(default, deserialize_with = "deserialize_f64_or_zero")]
     pub duration: f64,
     pub collection: String,
     pub video: String,
     #[serde(rename = "videoId")]
     pub video_id: String,
     pub paused: bool,
-    #[serde(rename = "playbackRate")]
+    #[serde(
+        default = "default_playback_rate",
+        rename = "playbackRate",
+        deserialize_with = "deserialize_playback_rate"
+    )]
     pub playback_rate: f64,
     #[serde(rename = "currentSubtitleTrack")]
     pub current_subtitle_track: Option<i32>,
+}
+
+impl Default for RemotePlayerState {
+    fn default() -> Self {
+        Self {
+            current_time: 0.0,
+            duration: 0.0,
+            collection: String::new(),
+            video: String::new(),
+            video_id: String::new(),
+            paused: false,
+            playback_rate: default_playback_rate(),
+            current_subtitle_track: None,
+        }
+    }
 }
 
 impl RemotePlayerState {
@@ -34,17 +73,26 @@ impl RemotePlayerState {
                 s.playback_rate = rate;
                 s
             }
-            None => RemotePlayerState { playback_rate: rate, ..Default::default() }
+            None => RemotePlayerState {
+                playback_rate: rate,
+                ..Default::default()
+            },
         }
     }
 
-    pub fn merge_subtitle_track(prev: Option<RemotePlayerState>, track_id: Option<i32>) -> RemotePlayerState {
+    pub fn merge_subtitle_track(
+        prev: Option<RemotePlayerState>,
+        track_id: Option<i32>,
+    ) -> RemotePlayerState {
         match prev {
             Some(mut s) => {
                 s.current_subtitle_track = track_id;
                 s
             }
-            None => RemotePlayerState { current_subtitle_track: track_id, ..Default::default() }
+            None => RemotePlayerState {
+                current_subtitle_track: track_id,
+                ..Default::default()
+            },
         }
     }
 }
@@ -71,9 +119,17 @@ pub enum RemoteMessage {
     Seek {
         interval: i32,
     },
-    SetAudioTrack { #[serde(rename = "trackId")] track_id: i32 },
-    SetPlaybackRate { rate: f64 },
-    SetSubtitleTrack { #[serde(rename = "trackId")] track_id: Option<i32> },
+    SetAudioTrack {
+        #[serde(rename = "trackId")]
+        track_id: i32,
+    },
+    SetPlaybackRate {
+        rate: f64,
+    },
+    SetSubtitleTrack {
+        #[serde(rename = "trackId")]
+        track_id: Option<i32>,
+    },
     Stop,
     TogglePause(String),
 
@@ -91,7 +147,6 @@ pub enum RemoteMessage {
 
     Video(Vec<VideoEvent>),
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceivedRemoteMessage {
@@ -176,7 +231,6 @@ pub struct ClientLogMessage {
     pub messages: Vec<String>,
 }
 
-
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PlayerListItem {
@@ -201,7 +255,6 @@ pub struct ConversionRequest {
     pub name: String,
 }
 
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskState {
@@ -218,7 +271,6 @@ pub struct TaskState {
     pub task_type: TaskType,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CopyFromServerRequest {
@@ -226,3 +278,35 @@ pub struct CopyFromServerRequest {
     pub videos: Vec<VideoDetails>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+
+    #[test]
+    fn deserializes_state_when_duration_is_null() -> Result<()> {
+        let message: RemoteMessage = serde_json::from_str(
+            r#"{"State":{"collection":"c","video":"v","videoId":"id","currentTime":12.5,"duration":null,"paused":false,"playbackRate":1.25,"currentSubtitleTrack":null}}"#,
+        )?;
+
+        match message {
+            RemoteMessage::State(state) => {
+                assert_eq!(state.collection, "c");
+                assert_eq!(state.video, "v");
+                assert_eq!(state.video_id, "id");
+                assert_eq!(state.current_time, 12.5);
+                assert_eq!(state.duration, 0.0);
+                assert_eq!(state.playback_rate, 1.25);
+                assert_eq!(state.current_subtitle_track, None);
+            }
+            other => panic!("expected State message, got {:?}", other),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn default_state_uses_normal_playback_rate() {
+        assert_eq!(RemotePlayerState::default().playback_rate, 1.0);
+    }
+}

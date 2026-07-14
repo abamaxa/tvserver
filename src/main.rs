@@ -1,5 +1,9 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Prevents additional console window on Windows in release for the Tauri GUI app.
+// Only apply when NOT building the webserver (console) binary.
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "webserver")),
+    windows_subsystem = "windows"
+)]
 
 #[cfg(feature = "webserver")]
 #[tokio::main]

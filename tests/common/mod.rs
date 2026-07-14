@@ -28,4 +28,5 @@ pub use task_manager::get_task_manager;
 pub use text_fetcher::get_text_fetcher;
 pub use torrents::get_torrent_downloader;
 pub use media_checker::get_checker;
+#[allow(unused_imports)]
 pub use context::get_context;

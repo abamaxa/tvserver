@@ -67,6 +67,12 @@ impl MetaDataError {
     }
 }
 
+fn metadata_debug(path: &Path, stage: &str) {
+    if std::env::var_os("TVSERVER_METADATA_DEBUG").is_some() {
+        eprintln!("stage: {}: {}", stage, path.display());
+    }
+}
+
 pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repository, suggested_series: Option<String>, spawner: Arc<dyn ProcessSpawner>) -> Result<Option<VideoDetails>, MetaDataError> {
     eprintln!("processing: {}", path.to_str().unwrap());
     let thumbnail_dir: PathBuf = get_thumbnail_dir(&get_movie_dir());
@@ -96,19 +102,23 @@ pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repos
         }
     }
 
+    metadata_debug(&path, "metadata:start");
     let mut details = match make_video_metadatas(&path, suggested_series.clone()).await {
         Ok(details) => details,
         Err(err) => return Err(err)
     };
+    metadata_debug(&path, "metadata:done");
 
     if details.checksum == 0 {
         return Err(MetaDataError::new(MetaDataErrorCode::ZeroFileSize, &path, details));
     }
 
+    metadata_debug(&path, "add-file:start");
     let new_path = match storer.add_file(&details.get_full_path(), suggested_series.clone()).await {
         Ok(path) => path,
         Err(err) => return Err(MetaDataError::from_error(MetaDataErrorCode::AddFile, err.as_ref(), &path, details))
     };
+    metadata_debug(&new_path, "add-file:done");
 
     let (collection, video) = get_collection_and_video_from_path(&new_path);
 
@@ -117,13 +127,17 @@ pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repos
     details.dir_path = None;
     details.search_phrase = suggested_series;
 
+    metadata_debug(&new_path, "save-video:start");
     if let Err(err) = repo.save_video(&details).await {
         return Err(MetaDataError::from_error(MetaDataErrorCode::SaveVideo, &err, &path, details));
     };
+    metadata_debug(&new_path, "save-video:done");
 
+    metadata_debug(&new_path, "subtitles:start");
     if let Err(err) = extract_subtitles(&details, spawner).await {
         return Err(MetaDataError::from_error(MetaDataErrorCode::ExtractSubtitles, &err.as_ref(), &path, details));
     }
+    metadata_debug(&new_path, "subtitles:done");
 
     Ok(Some(details))
 }
@@ -135,10 +149,12 @@ async fn make_video_metadatas(path: &PathBuf, suggested_series: Option<String>) 
 
     let mut details: VideoDetails = VideoDetails::new(video, collection, path, suggested_series);
 
+    metadata_debug(path, "checksum:start");
     details.checksum = match calculate_checksum(&path).await {
         Ok(checksum) => checksum,
         Err(err) => return Err(MetaDataError::from_error(MetaDataErrorCode::CalculateChecksum, &err, &path, details)),
     };
+    metadata_debug(path, "checksum:done");
 
     match fs::metadata(&path).await {
         Ok(metadata) => {
@@ -156,19 +172,23 @@ async fn make_video_metadatas(path: &PathBuf, suggested_series: Option<String>) 
         }
     }
 
+    metadata_debug(path, "ffprobe:start");
     details.metadata = match get_video_metadata(&path).await {
         Ok(video_info) => video_info,
         Err(e) => {
             return Err(MetaDataError::from_error(MetaDataErrorCode::GetVideoMetaData, e.as_ref(), &path, details));
         }
     };
+    metadata_debug(path, "ffprobe:done");
     
     details.state = VideoState::NeedThumbnail;
 
+    metadata_debug(path, "thumbnail:start");
     let thumbnails = match extract_random_frame(path, &details.metadata).await {
         Ok(thumbnails) => thumbnails,
         Err(err) => return Err(MetaDataError::from_error(MetaDataErrorCode::ExtractFrame, &err, &path, details))
     };
+    metadata_debug(path, "thumbnail:done");
 
     details.thumbnail = thumbnails;
 
@@ -391,10 +411,11 @@ async fn extract_random_frame<P: AsRef<Path>>(
         if !output.status.success() {
             let stderr = String::from_utf8(output.stderr).unwrap_or_default();
             tracing::error!("could not generate thumbnail: {}", stderr);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "ffmpeg exited with an error",
-            ));
+            let error_message = match stderr.trim() {
+                "" => "ffmpeg exited with an error".to_string(),
+                stderr => format!("ffmpeg exited with an error: {}", stderr),
+            };
+            return Err(io::Error::new(io::ErrorKind::Other, error_message));
         }
 
         // Add the filename to paths
