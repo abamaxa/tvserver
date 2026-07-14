@@ -135,19 +135,32 @@ impl SqlRepository {
 impl Databaser for SqlRepository {
     async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let is_update = sqlx::query(
-            r#"
-            SELECT 1
-            FROM books
-            WHERE checksum = ? OR (collection = ? AND file_name = ?)
-            "#,
+        let checksum_row = sqlx::query_scalar::<_, i64>(
+            "SELECT checksum FROM books WHERE checksum = ?",
         )
         .bind(details.checksum)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let path_row = sqlx::query_scalar::<_, i64>(
+            "SELECT checksum FROM books WHERE collection = ? AND file_name = ?",
+        )
         .bind(&details.collection)
         .bind(&details.file_name)
         .fetch_optional(&mut *tx)
-        .await?
-        .is_some();
+        .await?;
+        let is_update = checksum_row.is_some() || path_row.is_some();
+
+        if checksum_row.is_some() {
+            if let Some(path_checksum) = path_row {
+                if path_checksum != details.checksum {
+                    sqlx::query("DELETE FROM books WHERE checksum = ?")
+                        .bind(path_checksum)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+
         let authors = serde_json::to_string(&details.authors).unwrap_or_default();
         let metadata = serde_json::to_string(&details.metadata).unwrap_or_default();
         let format = match details.format {
@@ -928,6 +941,74 @@ mod tests {
         assert_eq!(retrieved.collection, replacement.collection);
         assert_eq!(retrieved.file_name, replacement.file_name);
         assert_eq!(retrieved.title, replacement.title);
+    }
+
+    #[tokio::test]
+    async fn save_book_reconciles_different_checksum_and_path_rows() {
+        let (sender, mut receiver) = mpsc::channel(3);
+        let db = SqlRepository::new(MEMORY_DB_URL, Some(sender))
+            .await
+            .unwrap();
+        let checksum_book = sample_book(
+            351,
+            "Original",
+            "Durable Identity.epub",
+            "Original Checksum Book",
+        );
+        let stale_path_book = sample_book(
+            352,
+            "Incoming",
+            "Destination.epub",
+            "Stale Path Book",
+        );
+        db.save_book(&checksum_book).await.unwrap();
+        db.save_book(&stale_path_book).await.unwrap();
+        receiver.try_recv().unwrap();
+        receiver.try_recv().unwrap();
+        sqlx::query(
+            r#"
+            UPDATE books
+            SET created_on = '2020-01-01 00:00:00',
+                updated_on = '2020-01-02 00:00:00'
+            WHERE checksum = ?
+            "#,
+        )
+        .bind(checksum_book.checksum)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let checksum_row_before = db.retrieve_book(checksum_book.checksum).await.unwrap();
+        let mut incoming = sample_book(
+            checksum_book.checksum,
+            &stale_path_book.collection,
+            &stale_path_book.file_name,
+            "Reconciled Book",
+        );
+        incoming.authors = vec!["Incoming Author".to_string()];
+        incoming.description = Some("Incoming metadata wins".to_string());
+
+        assert_eq!(db.save_book(&incoming).await.unwrap(), incoming.checksum);
+
+        let books = db.list_all_books().await.unwrap();
+        assert_eq!(books.len(), 1);
+        let reconciled = &books[0];
+        assert_eq!(reconciled.checksum, incoming.checksum);
+        assert_eq!(reconciled.collection, incoming.collection);
+        assert_eq!(reconciled.file_name, incoming.file_name);
+        assert_eq!(reconciled.title, incoming.title);
+        assert_eq!(reconciled.authors, incoming.authors);
+        assert_eq!(reconciled.description, incoming.description);
+        assert_eq!(reconciled.created_on, checksum_row_before.created_on);
+        assert!(reconciled.updated_on > checksum_row_before.updated_on);
+
+        let changed = receiver.try_recv().unwrap();
+        let LocalMessage::Book(changed) = changed else {
+            panic!("expected a book event");
+        };
+        assert_eq!(changed.event_type, BookEventType::BookEventChanged);
+        assert_eq!(changed.checksum, incoming.checksum.to_string());
+        assert_eq!(changed.book.unwrap().title, incoming.title);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
