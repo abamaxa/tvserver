@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::messages::{MediaItem, RemoteMessage, TaskState};
-use super::models::{CollectionItem, DownloadableItem, SearchResults, VideoDetails};
+use super::models::{BookDetails, CollectionItem, DownloadableItem, SearchResults, VideoDetails};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -165,6 +165,15 @@ pub type Spawner = Arc<dyn ProcessSpawner>;
 
 #[async_trait]
 pub trait Databaser: Sync + Send {
+    async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error>;
+    async fn list_book_collections(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<String>, sqlx::Error>;
+    async fn list_books(&self, collection: &str) -> Result<Vec<BookDetails>, sqlx::Error>;
+    async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error>;
+    async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error>;
+    async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error>;
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
     async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;
