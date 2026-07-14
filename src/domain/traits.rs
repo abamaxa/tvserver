@@ -124,6 +124,7 @@ pub trait FileStore: Sync + Send {
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()>;
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
     async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()>;

@@ -70,15 +70,16 @@ impl BookStore {
         full_path: &Path,
         suggested_collection: Option<String>,
     ) -> Result<PathBuf> {
+        let source_path = full_path.to_str().ok_or_else(|| {
+            anyhow::anyhow!("book source path is not valid UTF-8: {}", full_path.display())
+        })?;
+        ensure_regular_file(full_path, "book source").await?;
         let collection = match suggested_collection {
             Some(collection) => title_case(&collection),
             None => self.collection_from_source(full_path)?,
         };
         let collection = safe_relative_collection(&collection)?;
         let destination_directory = self.book_root.join(collection);
-        let source_path = full_path.to_str().ok_or_else(|| {
-            anyhow::anyhow!("book source path is not valid UTF-8: {}", full_path.display())
-        })?;
         let destination = destination_directory.join(full_path.file_name().ok_or_else(|| {
             anyhow::anyhow!("book path has no file name: {}", full_path.display())
         })?);
@@ -137,39 +138,39 @@ impl BookStore {
         let file_name = safe_file_name(&book.file_name, "book file")?;
 
         let book_path = self.book_root.join(collection).join(file_name);
-        let book_path_string = book_path.to_str().ok_or_else(|| {
-            anyhow::anyhow!("book file path is not valid UTF-8: {}", book_path.display())
-        })?;
         ensure_path_within_root(&book_path, &self.book_root, "book file").await?;
-        self.store.delete(book_path_string).await?;
+        ensure_regular_file(&book_path, "book file").await?;
+        let staged_book_path = staging_path(&book_path, "book-delete")?;
+        rename_file(&self.store, &book_path, &staged_book_path).await?;
 
+        let mut staged_thumbnail = None;
         if !is_default_book_thumbnail(&book.thumbnail) {
             let unvalidated_path = self.thumbnail_root.join(&book.thumbnail);
             match safe_file_name(&book.thumbnail, "book thumbnail") {
                 Ok(thumbnail) => {
                     let thumbnail_path = self.thumbnail_root.join(thumbnail);
-                    let cleanup_result = async {
+                    let staging_result = async {
                         ensure_path_within_root(
                             &thumbnail_path,
                             &self.thumbnail_root,
                             "book thumbnail",
                         )
                         .await?;
-                        let thumbnail_path_string = thumbnail_path.to_str().ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "book thumbnail path is not valid UTF-8: {}",
-                                thumbnail_path.display()
-                            )
-                        })?;
-                        self.thumbnail_store.delete(thumbnail_path_string).await
+                        ensure_regular_file(&thumbnail_path, "book thumbnail").await?;
+                        let staged_path = staging_path(&thumbnail_path, "book-thumbnail-delete")?;
+                        rename_file(&self.thumbnail_store, &thumbnail_path, &staged_path).await?;
+                        Result::<PathBuf>::Ok(staged_path)
                     }
                     .await;
-                    if let Err(error) = cleanup_result {
-                        tracing::warn!(
-                            "Failed to delete book thumbnail {}: {}",
-                            thumbnail_path.display(),
-                            error
-                        );
+                    match staging_result {
+                        Ok(staged_path) => staged_thumbnail = Some((thumbnail_path, staged_path)),
+                        Err(error) => {
+                            tracing::warn!(
+                                "Failed to stage book thumbnail {} for deletion: {}",
+                                thumbnail_path.display(),
+                                error
+                            );
+                        }
                     }
                 }
                 Err(error) => {
@@ -182,9 +183,101 @@ impl BookStore {
             }
         }
 
-        self.repo.delete_book(checksum).await?;
+        if let Err(delete_error) = self.repo.delete_book(checksum).await {
+            let thumbnail_restore_error =
+                if let Some((thumbnail_path, staged_path)) = staged_thumbnail.as_ref() {
+                    restore_file(&self.thumbnail_store, staged_path, thumbnail_path)
+                        .await
+                        .err()
+                } else {
+                    None
+                };
+            let book_restore_error = restore_file(&self.store, &staged_book_path, &book_path)
+                .await
+                .err();
+
+            return match (book_restore_error, thumbnail_restore_error) {
+                (None, None) => Err(delete_error.into()),
+                (book_restore_error, thumbnail_restore_error) => Err(anyhow::anyhow!(
+                    "database deletion failed: {delete_error}; book restore error: {}; thumbnail restore error: {}",
+                    book_restore_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    thumbnail_restore_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "none".to_string())
+                )),
+            };
+        }
+
+        delete_file(&self.store, &staged_book_path).await?;
+        if let Some((_, staged_path)) = staged_thumbnail {
+            if let Err(error) = delete_file(&self.thumbnail_store, &staged_path).await {
+                tracing::warn!(
+                    "Failed to delete staged book thumbnail {}: {}",
+                    staged_path.display(),
+                    error
+                );
+            }
+        }
         Ok(())
     }
+}
+
+fn staging_path(path: &Path, label: &str) -> Result<PathBuf> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow::anyhow!("file path has no parent for staging: {}", path.display())
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("file name is not valid UTF-8 for staging: {}", path.display())
+        })?;
+    Ok(parent.join(format!(".{file_name}.{label}-{:032x}", rand::random::<u128>())))
+}
+
+async fn rename_file(store: &FileStorer, source: &Path, destination: &Path) -> Result<()> {
+    let source = source
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("source path is not valid UTF-8: {}", source.display()))?;
+    let destination = destination.to_str().ok_or_else(|| {
+        anyhow::anyhow!("destination path is not valid UTF-8: {}", destination.display())
+    })?;
+    store.rename(source, destination).await
+}
+
+async fn delete_file(store: &FileStorer, path: &Path) -> Result<()> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("file path is not valid UTF-8: {}", path.display()))?;
+    store.delete(path).await
+}
+
+async fn restore_file(store: &FileStorer, staged_path: &Path, original_path: &Path) -> Result<()> {
+    let staged_path = staged_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("staged path is not valid UTF-8: {}", staged_path.display())
+    })?;
+    let original_path = original_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "original path is not valid UTF-8: {}",
+            original_path.display()
+        )
+    })?;
+    store.restore(staged_path, original_path).await
+}
+
+async fn ensure_regular_file(path: &Path, description: &str) -> Result<()> {
+    let metadata = tokio::fs::symlink_metadata(path).await.map_err(|error| {
+        anyhow::anyhow!("failed to inspect {description} ({}): {error}", path.display())
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(anyhow::anyhow!(
+            "{description} must be a regular file and not a symlink: {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn absolute_path(path: &Path, description: &str) -> Result<PathBuf> {
@@ -549,6 +642,26 @@ mod tests {
         assert!(!outside.join("Dune.epub").exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_file_rejects_symlink_source() {
+        use std::os::unix::fs::symlink;
+
+        let layout = TestLayout::new("add-symlink-source");
+        let target = layout.source_root.join("target.epub");
+        tokio::fs::write(&target, b"book").await.unwrap();
+        let source = layout.source_root.join("Dune.epub");
+        symlink(&target, &source).unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let result = store.add_file(&source, Some("Fiction".to_string())).await;
+
+        assert!(result.is_err());
+        assert!(source.symlink_metadata().is_ok());
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"book");
+        assert!(!layout.book_root.join("Fiction/Dune.epub").exists());
+    }
+
     #[tokio::test]
     async fn delete_removes_book_generated_thumbnail_and_repository_row() {
         let layout = TestLayout::new("delete-generated-thumbnail");
@@ -683,6 +796,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_delete_failure_restores_book_and_thumbnail() {
+        let layout = TestLayout::new("repository-delete-failure");
+        let book_path = layout.book_root.join("Fiction/Dune.epub");
+        tokio::fs::create_dir_all(book_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&book_path, b"book").await.unwrap();
+        let thumbnail_path = layout.thumbnail_root.join("dune-cover.jpg");
+        tokio::fs::write(&thumbnail_path, b"cover").await.unwrap();
+
+        let database_url = format!("sqlite://{}", layout.base.join("books.sqlite").display());
+        let repository: Repository = Arc::new(
+            SqlRepository::new(&database_url, None)
+                .await
+                .expect("repository should initialize"),
+        );
+        let book_files: FileStorer = Arc::new(FileSystemStore::new(
+            layout
+                .book_root
+                .to_str()
+                .expect("book root should be UTF-8"),
+        ));
+        let thumbnail_files: FileStorer = Arc::new(FileSystemStore::new(
+            layout
+                .thumbnail_root
+                .to_str()
+                .expect("thumbnail root should be UTF-8"),
+        ));
+        let store = BookStore::new_with_roots(
+            book_files,
+            thumbnail_files,
+            repository.clone(),
+            &layout.book_root,
+            &layout.thumbnail_root,
+        );
+        let mut book = sample_book(16, "Fiction", "Dune.epub");
+        book.thumbnail = "dune-cover.jpg".to_string();
+        repository.save_book(&book).await.unwrap();
+
+        let pool = sqlx::SqlitePool::connect(&database_url).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_book_delete BEFORE DELETE ON books \
+             BEGIN SELECT RAISE(FAIL, 'forced delete failure'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let result = store.delete(book.checksum).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&book_path).await.unwrap(), b"book");
+        assert_eq!(tokio::fs::read(&thumbnail_path).await.unwrap(), b"cover");
+        assert!(repository.retrieve_book(book.checksum).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn delete_rejects_malformed_book_identity_without_deleting_in_root_alias() {
         let layout = TestLayout::new("delete-book-alias");
         let victim_book = layout.book_root.join("victim.epub");
@@ -722,6 +892,27 @@ mod tests {
             tokio::fs::read(&victim_book).await.unwrap(),
             b"keep external book"
         );
+        assert!(repository.retrieve_book(book.checksum).await.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_rejects_dangling_book_symlink_and_preserves_row() {
+        use std::os::unix::fs::symlink;
+
+        let layout = TestLayout::new("delete-dangling-book-symlink");
+        let collection = layout.book_root.join("Fiction");
+        tokio::fs::create_dir(&collection).await.unwrap();
+        let book_link = collection.join("Dune.epub");
+        symlink(layout.base.join("missing.epub"), &book_link).unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let book = sample_book(33, "Fiction", "Dune.epub");
+        repository.save_book(&book).await.unwrap();
+
+        let result = store.delete(book.checksum).await;
+
+        assert!(result.is_err());
+        assert!(book_link.symlink_metadata().is_ok());
         assert!(repository.retrieve_book(book.checksum).await.is_ok());
     }
 
