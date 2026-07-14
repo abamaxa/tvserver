@@ -291,10 +291,11 @@ impl Databaser for SqlRepository {
                 r#"
                 SELECT DISTINCT collection
                 FROM books
-                WHERE collection LIKE ?
+                WHERE substr(collection, 1, length(?) + 1) = (? || '/')
                 "#,
             )
-            .bind(format!("{}%", parent_collection))
+            .bind(parent_collection)
+            .bind(parent_collection)
             .fetch_all(&self.pool)
             .await?
         };
@@ -899,6 +900,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_and_retrieve_book_round_trips_pdf_format() {
+        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+        let mut book = sample_book(151, "Documents", "Specification.pdf", "Specification");
+        book.format = BookFormat::Pdf;
+
+        db.save_book(&book).await.unwrap();
+        let retrieved = db.retrieve_book(book.checksum).await.unwrap();
+
+        assert_eq!(retrieved.format, BookFormat::Pdf);
+        assert_eq!(retrieved.file_name, book.file_name);
+        assert_eq!(retrieved.title, book.title);
+    }
+
+    #[tokio::test]
     async fn save_book_updates_on_collection_and_file_conflict() {
         let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
         let original = sample_book(201, "Fantasy", "Earthsea.epub", "A Wizard of Earthsea");
@@ -1103,6 +1118,35 @@ mod tests {
                 .await
                 .unwrap(),
             vec!["Epic"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_book_collections_excludes_sibling_prefixes_and_like_wildcards() {
+        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+        for (checksum, collection) in [
+            (651, "Fiction/Fantasy"),
+            (652, "Fictional/Essays"),
+            (653, "Shelf%/ExactPercent"),
+            (654, "ShelfX/WrongPercent"),
+            (655, "Under_/ExactUnderscore"),
+            (656, "UnderX/WrongUnderscore"),
+        ] {
+            let book = sample_book(checksum, collection, &format!("{checksum}.epub"), "Title");
+            db.save_book(&book).await.unwrap();
+        }
+
+        assert_eq!(
+            db.list_book_collections("Fiction").await.unwrap(),
+            vec!["Fantasy"]
+        );
+        assert_eq!(
+            db.list_book_collections("Shelf%").await.unwrap(),
+            vec!["ExactPercent"]
+        );
+        assert_eq!(
+            db.list_book_collections("Under_").await.unwrap(),
+            vec!["ExactUnderscore"]
         );
     }
 
