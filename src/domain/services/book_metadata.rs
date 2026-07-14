@@ -6,7 +6,7 @@ use quick_xml::{
 use serde_json::json;
 use std::{
     fs::{self, File},
-    io::{BufWriter, Read},
+    io::{BufWriter, Cursor, Read},
     path::{Path, PathBuf},
 };
 use zip::ZipArchive;
@@ -14,6 +14,9 @@ use zip::ZipArchive;
 const MAX_CONTAINER_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_COVER_DIMENSION: u32 = 8_192;
+const MAX_COVER_PIXELS: u64 = 8_000_000;
+const MAX_COVER_DECODE_ALLOC_BYTES: u64 = 48 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BookMetadataExtraction {
@@ -469,7 +472,7 @@ fn extract_cover(
         .ok_or_else(|| format!("EPUB cover has unsafe archive path {:?}", cover.href))?;
     let bytes = read_bounded_entry(archive, &cover_path, MAX_COVER_BYTES)
         .map_err(|error| format!("could not read EPUB cover {cover_path:?}: {error}"))?;
-    let decoded = image::load_from_memory(&bytes)
+    let decoded = decode_cover(&bytes)
         .map_err(|error| format!("could not decode EPUB cover {cover_path:?}: {error}"))?;
     let thumbnail_name = thumbnail_filename(thumbnail_key)
         .ok_or_else(|| "EPUB cover thumbnail key is empty or unsafe".to_string())?;
@@ -482,6 +485,26 @@ fn extract_cover(
         format!("could not write EPUB cover thumbnail: {error}")
     })?;
     Ok(thumbnail_name)
+}
+
+fn decode_cover(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_COVER_DIMENSION);
+    limits.max_image_height = Some(MAX_COVER_DIMENSION);
+    limits.max_alloc = Some(MAX_COVER_DECODE_ALLOC_BYTES);
+
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|error| error.to_string())?;
+    let pixels = u64::from(decoded.width()).saturating_mul(u64::from(decoded.height()));
+    if pixels > MAX_COVER_PIXELS {
+        return Err(format!(
+            "image pixel count {pixels} exceeds limit {MAX_COVER_PIXELS}"
+        ));
+    }
+    Ok(decoded)
 }
 
 fn is_image_manifest_item(item: &ManifestItem) -> bool {
@@ -733,13 +756,17 @@ mod tests {
         assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
     }
 
-    fn png_bytes() -> Vec<u8> {
-        let image = image::RgbImage::from_pixel(3, 2, image::Rgb([12, 34, 56]));
+    fn png_bytes_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([12, 34, 56]));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(image)
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         bytes.into_inner()
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        png_bytes_with_dimensions(3, 2)
     }
 
     #[test]
@@ -835,6 +862,33 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("decode")));
+    }
+
+    #[test]
+    fn oversized_cover_dimensions_fall_back_without_partial_thumbnail() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("book.epub");
+        let oversized_cover = png_bytes_with_dimensions(8_193, 1);
+        write_epub(
+            &epub_path,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata><dc:title>Bounded Cover</dc:title></metadata>
+                 <manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", oversized_cover.as_slice())],
+        );
+
+        let covers = temp.path().join("covers");
+        let result = extract_epub_metadata(&epub_path, &covers, "oversized").unwrap();
+
+        assert_eq!(result.title.as_deref(), Some("Bounded Cover"));
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.to_ascii_lowercase().contains("limit")));
+        assert!(covers.join(DEFAULT_BOOK_THUMBNAIL).is_file());
+        assert!(!covers.join("oversized.jpg").exists());
     }
 
     #[test]
