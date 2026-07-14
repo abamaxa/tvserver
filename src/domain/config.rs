@@ -130,3 +130,63 @@ pub fn  get_telegram_chat_id() -> String {
 pub fn get_auth_credentials() -> String {
     env::var(AUTH_CREDENTIALS).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{get_book_dir, get_book_thumbnail_dir, BOOK_DIR, BOOK_THUMBNAIL_DIR};
+    use std::env;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        originals: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvVarGuard {
+        fn new(names: &[&'static str]) -> Self {
+            Self {
+                originals: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.originals.iter() {
+                match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn book_dir_is_required_and_thumbnail_dir_defaults_under_book_dir() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvVarGuard::new(&[BOOK_DIR, BOOK_THUMBNAIL_DIR]);
+
+        env::remove_var(BOOK_DIR);
+        env::remove_var(BOOK_THUMBNAIL_DIR);
+        assert!(catch_unwind(AssertUnwindSafe(get_book_dir)).is_err());
+
+        env::set_var(BOOK_DIR, "/library/books");
+        assert_eq!(get_book_dir(), "/library/books");
+        assert_eq!(
+            get_book_thumbnail_dir("/library/books"),
+            PathBuf::from("/library/books/.thumbnails")
+        );
+
+        env::set_var(BOOK_THUMBNAIL_DIR, "/library/book-covers");
+        assert_eq!(
+            get_book_thumbnail_dir("/library/books"),
+            PathBuf::from("/library/book-covers")
+        );
+    }
+}

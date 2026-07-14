@@ -1,8 +1,8 @@
-use crate::domain::config::get_movie_dir;
 #[cfg(not(feature = "webserver"))]
 use crate::domain::config::{get_book_dir, get_book_thumbnail_dir};
 #[cfg(not(feature = "webserver"))]
 use crate::domain::config::get_thumbnail_dir;
+use crate::domain::config::{get_book_dir, get_movie_dir};
 use mockall::lazy_static;
 use regex::Regex;
 use std::{collections::HashSet, path::{Component, Path, PathBuf}};
@@ -11,7 +11,7 @@ use titlecase::titlecase;
 pub fn replace_extension(path: &str, new_extension: &str) -> String {
     let path_obj = Path::new(path);
     let stem = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    
+
     match path_obj.parent() {
         Some(parent) => parent.join(format!("{}{}", stem, new_extension))
             .to_str()
@@ -98,7 +98,15 @@ pub fn generate_display_name(name: &Option<String>) -> String {
 }
 
 pub fn get_collection_from_path(path: &Path) -> String {
-    let short_path = match path.strip_prefix(&get_movie_dir()) {
+    get_collection_from_rooted_path(path, &get_movie_dir())
+}
+
+pub fn get_book_collection_from_path(path: &Path) -> String {
+    get_collection_from_rooted_path(path, &get_book_dir())
+}
+
+pub fn get_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> String {
+    let short_path = match path.strip_prefix(root.as_ref()) {
         Ok(p) => PathBuf::from(p),
         _ => PathBuf::from(path),
     };
@@ -114,7 +122,18 @@ pub fn get_collection_from_path(path: &Path) -> String {
 }
 
 pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
-    let short_path = match path.strip_prefix(&get_movie_dir()) {
+    get_collection_and_file_from_rooted_path(path, &get_movie_dir())
+}
+
+pub fn get_collection_and_book_from_path(path: &Path) -> (String, String) {
+    get_collection_and_file_from_rooted_path(path, &get_book_dir())
+}
+
+pub fn get_collection_and_file_from_rooted_path(
+    path: &Path,
+    root: impl AsRef<Path>,
+) -> (String, String) {
+    let short_path = match path.strip_prefix(root.as_ref()) {
         Ok(p) => PathBuf::from(p),
         _ => PathBuf::from(path),
     };
@@ -138,7 +157,7 @@ pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
 pub fn title_case(input: &str) -> String {
     // Define the exception words
     let exceptions: HashSet<&str> = ["of", "in", "the"].iter().cloned().collect();
-    
+
     // Split the input by whitespace into words.
     let words: Vec<&str> = input.split_whitespace().collect();
     let mut result = Vec::with_capacity(words.len());
@@ -328,6 +347,29 @@ mod test {
         assert_eq!(
             get_next_version_name(input_path.to_str().unwrap(), None),
             Some(expected_path.to_str().unwrap().to_string())
+        );
+    }
+
+    #[test]
+    fn collection_helpers_strip_their_configured_roots() {
+        let video_path = Path::new("/library/TV/Season 1/episode.mkv");
+        assert_eq!(
+            get_collection_from_rooted_path(video_path, "/library"),
+            "TV/Season 1"
+        );
+        assert_eq!(
+            get_collection_and_file_from_rooted_path(video_path, "/library"),
+            ("TV/Season 1".to_string(), "episode.mkv".to_string())
+        );
+
+        let book_path = Path::new("/library/books/Fiction/Classics/novel.epub");
+        assert_eq!(
+            get_collection_from_rooted_path(book_path, "/library/books"),
+            "Fiction/Classics"
+        );
+        assert_eq!(
+            get_collection_and_file_from_rooted_path(book_path, "/library/books"),
+            ("Fiction/Classics".to_string(), "novel.epub".to_string())
         );
     }
 }

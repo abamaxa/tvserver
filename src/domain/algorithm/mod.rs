@@ -1,13 +1,18 @@
 mod naming;
-mod video_utils;    
+mod media_kind;
+mod video_utils;
 mod series;
 mod html;
 
 pub use naming::{
     generate_display_name, 
     get_collection_and_video_from_path, 
+    get_collection_and_book_from_path,
+    get_collection_and_file_from_rooted_path,
     get_next_version_name, 
     get_collection_from_path,
+    get_book_collection_from_path,
+    get_collection_from_rooted_path,
     title_case,
     replace_extension,
     get_video_url,
@@ -16,6 +21,11 @@ pub use naming::{
     get_book_thumbnail_url,
     get_book_download_path,
     get_book_thumbnail_file_name
+};
+
+pub use media_kind::{
+    classify_media_kind,
+    MediaKind,
 };
 
 pub use video_utils::{
