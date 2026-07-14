@@ -1,4 +1,5 @@
 use crate::domain::models::{ensure_default_book_thumbnail, BookMetadata, DEFAULT_BOOK_THUMBNAIL};
+use lopdf::{decode_text_string, Dictionary, Document};
 use quick_xml::{
     events::{BytesStart, Event},
     Reader,
@@ -39,6 +40,7 @@ pub struct BookMetadataExtraction {
     pub published_date: Option<String>,
     pub language: Option<String>,
     pub isbn: Option<String>,
+    pub page_count: Option<i64>,
     pub thumbnail: String,
     pub metadata: BookMetadata,
     pub warnings: Vec<String>,
@@ -52,6 +54,156 @@ pub enum BookMetadataExtractionError {
     Archive(String),
     #[error("invalid EPUB package: {0}")]
     InvalidPackage(String),
+    #[error("could not read PDF: {0}")]
+    Pdf(String),
+}
+
+pub trait PdfThumbnailRenderer {
+    fn render_thumbnail(&self, pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultPdfThumbnailRenderer;
+
+#[cfg(not(feature = "pdf-thumbnails"))]
+impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
+    fn render_thumbnail(&self, _pdf_path: &Path, _thumbnail_path: &Path) -> Result<(), String> {
+        Err("PDF thumbnail rendering is disabled".to_string())
+    }
+}
+
+#[cfg(feature = "pdf-thumbnails")]
+impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
+    fn render_thumbnail(&self, pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String> {
+        use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
+
+        let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+            .or_else(|_| Pdfium::bind_to_system_library())
+            .map_err(|error| format!("could not load Pdfium: {error}"))?;
+        let pdfium = Pdfium::new(bindings);
+        let document = pdfium
+            .load_pdf_from_file(pdf_path, None)
+            .map_err(|error| format!("could not load PDF with Pdfium: {error}"))?;
+        let page = document
+            .pages()
+            .first()
+            .map_err(|error| format!("could not open first PDF page: {error}"))?;
+        let image = page
+            .render_with_config(
+                &PdfRenderConfig::new()
+                    .set_target_width(512)
+                    .set_maximum_height(768),
+            )
+            .map_err(|error| format!("could not render first PDF page: {error}"))?
+            .as_image()
+            .map_err(|error| format!("could not convert PDF page to an image: {error}"))?
+            .into_rgb8();
+        image
+            .save_with_format(thumbnail_path, image::ImageFormat::Jpeg)
+            .map_err(|error| format!("could not write PDF thumbnail: {error}"))
+    }
+}
+
+pub fn extract_pdf_metadata(
+    pdf_path: &Path,
+    thumbnail_dir: &Path,
+    thumbnail_key: &str,
+) -> Result<BookMetadataExtraction, BookMetadataExtractionError> {
+    extract_pdf_metadata_with_renderer(
+        pdf_path,
+        thumbnail_dir,
+        thumbnail_key,
+        &DefaultPdfThumbnailRenderer,
+    )
+}
+
+pub fn extract_pdf_metadata_with_renderer<R: PdfThumbnailRenderer + ?Sized>(
+    pdf_path: &Path,
+    thumbnail_dir: &Path,
+    thumbnail_key: &str,
+    renderer: &R,
+) -> Result<BookMetadataExtraction, BookMetadataExtractionError> {
+    let document = Document::load(pdf_path)
+        .map_err(|error| BookMetadataExtractionError::Pdf(error.to_string()))?;
+    let info = pdf_info_dictionary(&document);
+    let title = info
+        .and_then(|info| pdf_info_text(info, b"Title"))
+        .or_else(|| Some(filename_derived_title(pdf_path)));
+    let authors = info
+        .and_then(|info| pdf_info_text(info, b"Author"))
+        .into_iter()
+        .collect();
+    let description = info.and_then(|info| pdf_info_text(info, b"Subject"));
+    let keywords = info.and_then(|info| pdf_info_text(info, b"Keywords"));
+    let creation_date = info.and_then(|info| pdf_info_text(info, b"CreationDate"));
+    let page_count = i64::try_from(document.get_pages().len()).ok();
+
+    let (thumbnail, warnings) =
+        match render_pdf_thumbnail(renderer, pdf_path, thumbnail_dir, thumbnail_key) {
+            Ok(thumbnail) => (thumbnail, Vec::new()),
+            Err(warning) => default_thumbnail_fallback(pdf_path, thumbnail_dir, warning),
+        };
+
+    Ok(BookMetadataExtraction {
+        title,
+        authors,
+        description,
+        page_count,
+        thumbnail,
+        metadata: BookMetadata {
+            raw: Some(json!({
+                "pdf": {
+                    "keywords": keywords,
+                    "creationDate": creation_date,
+                    "thumbnailWarnings": warnings,
+                }
+            })),
+            extraction_error: None,
+        },
+        warnings,
+        ..Default::default()
+    })
+}
+
+fn pdf_info_dictionary(document: &Document) -> Option<&Dictionary> {
+    document
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|info| document.dereference(info).ok())
+        .and_then(|(_, info)| info.as_dict().ok())
+}
+
+fn pdf_info_text(info: &Dictionary, key: &[u8]) -> Option<String> {
+    info.get(key)
+        .ok()
+        .and_then(|value| decode_text_string(value).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn filename_derived_title(pdf_path: &Path) -> String {
+    pdf_path
+        .file_stem()
+        .unwrap_or_else(|| pdf_path.as_os_str())
+        .to_string_lossy()
+        .replace(['.', '_'], " ")
+}
+
+fn render_pdf_thumbnail<R: PdfThumbnailRenderer + ?Sized>(
+    renderer: &R,
+    pdf_path: &Path,
+    thumbnail_dir: &Path,
+    thumbnail_key: &str,
+) -> Result<String, String> {
+    let thumbnail = thumbnail_filename(thumbnail_key)?;
+    fs::create_dir_all(thumbnail_dir)
+        .map_err(|error| format!("could not create PDF thumbnail directory: {error}"))?;
+    let thumbnail_path = thumbnail_dir.join(&thumbnail);
+    renderer
+        .render_thumbnail(pdf_path, &thumbnail_path)
+        .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
+    Ok(thumbnail)
 }
 
 pub fn extract_epub_metadata(
@@ -99,6 +251,7 @@ pub fn extract_epub_metadata(
         published_date: parsed.published_date,
         language: parsed.language,
         isbn,
+        page_count: None,
         thumbnail,
         metadata: BookMetadata {
             raw: Some(json!({
@@ -114,15 +267,15 @@ pub fn extract_epub_metadata(
 }
 
 fn default_thumbnail_fallback(
-    epub_path: &Path,
+    book_path: &Path,
     thumbnail_dir: &Path,
     warning: String,
 ) -> (String, Vec<String>) {
-    tracing::warn!(epub = %epub_path.display(), "{warning}");
+    tracing::warn!(book = %book_path.display(), "{warning}");
     let mut warnings = vec![warning];
     if let Err(error) = ensure_default_book_thumbnail(thumbnail_dir) {
         let warning = format!("could not prepare default book thumbnail: {error}");
-        tracing::warn!(epub = %epub_path.display(), "{warning}");
+        tracing::warn!(book = %book_path.display(), "{warning}");
         warnings.push(warning);
     }
     (DEFAULT_BOOK_THUMBNAIL.to_string(), warnings)
@@ -1000,6 +1153,7 @@ fn isbn_value(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use lopdf::{dictionary, text_string, Document, Object};
     use std::{
         fs::{self, File},
         io::Write,
@@ -1065,6 +1219,130 @@ mod tests {
             zip.write_all(contents).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    struct FailingPdfRenderer;
+
+    impl PdfThumbnailRenderer for FailingPdfRenderer {
+        fn render_thumbnail(&self, _pdf_path: &Path, _thumbnail_path: &Path) -> Result<(), String> {
+            Err("test renderer unavailable".to_string())
+        }
+    }
+
+    fn write_pdf(path: &Path, info: Option<lopdf::Dictionary>, page_count: usize) {
+        let mut document = Document::with_version("1.7");
+        let pages_id = document.new_object_id();
+        let page_ids = (0..page_count)
+            .map(|_| {
+                document.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                })
+            })
+            .collect::<Vec<_>>();
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+                "Count" => page_count as i64,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        if let Some(info) = info {
+            let info_id = document.add_object(info);
+            document.trailer.set("Info", info_id);
+        }
+        document.save(path).unwrap();
+    }
+
+    #[test]
+    fn extracts_pdf_info_metadata_and_page_count_without_pdfium() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("metadata.pdf");
+        write_pdf(
+            &pdf_path,
+            Some(dictionary! {
+                "Title" => text_string("The PDF Title"),
+                "Author" => text_string("Ada Author"),
+                "Subject" => text_string("A useful PDF"),
+                "Keywords" => text_string("rust, books"),
+                "CreationDate" => text_string("D:20260714091500+02'00'"),
+            }),
+            2,
+        );
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &temp.path().join("covers"),
+            "pdf-42",
+            &FailingPdfRenderer,
+        )
+        .expect("valid PDF metadata should extract without Pdfium");
+
+        assert_eq!(result.title.as_deref(), Some("The PDF Title"));
+        assert_eq!(result.authors, ["Ada Author"]);
+        assert_eq!(result.description.as_deref(), Some("A useful PDF"));
+        assert_eq!(result.page_count, Some(2));
+        assert_eq!(
+            result.metadata.raw.as_ref().unwrap()["pdf"]["keywords"],
+            "rust, books"
+        );
+        assert_eq!(
+            result.metadata.raw.as_ref().unwrap()["pdf"]["creationDate"],
+            "D:20260714091500+02'00'"
+        );
+    }
+
+    #[test]
+    fn pdf_without_info_uses_filename_title_and_empty_authors() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("the.hidden_library.pdf");
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &temp.path().join("covers"),
+            "pdf-fallback",
+            &FailingPdfRenderer,
+        )
+        .unwrap();
+
+        assert_eq!(result.title.as_deref(), Some("the hidden library"));
+        assert!(result.authors.is_empty());
+        assert_eq!(result.description, None);
+        assert_eq!(result.page_count, Some(1));
+    }
+
+    #[test]
+    fn pdf_renderer_failure_materializes_and_assigns_default_thumbnail() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("book.pdf");
+        let covers = temp.path().join("covers");
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &covers,
+            "renderer-failure",
+            &FailingPdfRenderer,
+        )
+        .unwrap();
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(
+            fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
+            crate::domain::models::default_book_thumbnail_bytes()
+        );
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("test renderer unavailable")));
     }
 
     #[test]
