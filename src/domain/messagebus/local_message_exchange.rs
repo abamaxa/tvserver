@@ -19,6 +19,7 @@ pub enum MessageFilter {
     All,
     Media,
     Task,
+    Book,
     Video,
     PlayerState,
 }
@@ -52,6 +53,7 @@ impl LocalMessageExchange {
                 (MessageFilter::All, LocalMessageSenderReceiver::new()),
                 (MessageFilter::Media, LocalMessageSenderReceiver::new()),
                 (MessageFilter::Task, LocalMessageSenderReceiver::new()),
+                (MessageFilter::Book, LocalMessageSenderReceiver::new()),
                 (MessageFilter::Video, LocalMessageSenderReceiver::new()),
                 (MessageFilter::PlayerState, LocalMessageSenderReceiver::new()),
             ]
@@ -96,6 +98,7 @@ impl LocalMessageExchange {
         let filter = match &message {
             LocalMessage::Media(_) => Some(MessageFilter::Media),
             LocalMessage::Task(_) => Some(MessageFilter::Task),
+            LocalMessage::Book(_) => Some(MessageFilter::Book),
             LocalMessage::Video(_) => Some(MessageFilter::Video),
             LocalMessage::PlayerState(_) => Some(MessageFilter::PlayerState),
             _ => {
@@ -130,7 +133,8 @@ impl LocalMessageExchange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::messages::{LocalMessage, MediaEvent};
+    use crate::domain::messages::{BookEvent, LocalMessage, MediaEvent};
+    use crate::domain::models::BookDetails;
     use std::path::PathBuf;
     use tokio::time::timeout;
     use tokio::time::Duration;
@@ -222,5 +226,31 @@ mod tests {
         
         // Task receiver should not get any messages
         assert!(timeout(Duration::from_millis(100), task_receiver.recv()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn book_messages_reach_book_and_all_but_not_video_subscribers() {
+        let exchange = LocalMessageExchange::new();
+        let sender = exchange.new_sender();
+        let mut book_receiver = exchange.listen_for_messages(MessageFilter::Book).await.unwrap();
+        let mut all_receiver = exchange.listen_for_messages(MessageFilter::All).await.unwrap();
+        let mut video_receiver = exchange.listen_for_messages(MessageFilter::Video).await.unwrap();
+        let event = BookEvent::new_book_added_event(BookDetails {
+            checksum: 123,
+            title: "Dune".to_string(),
+            ..BookDetails::default()
+        });
+
+        sender.send(LocalMessage::Book(event)).await.unwrap();
+
+        assert!(matches!(
+            timeout(Duration::from_millis(100), book_receiver.recv()).await,
+            Ok(Ok(LocalMessage::Book(_)))
+        ));
+        assert!(matches!(
+            timeout(Duration::from_millis(100), all_receiver.recv()).await,
+            Ok(Ok(LocalMessage::Book(_)))
+        ));
+        assert!(timeout(Duration::from_millis(100), video_receiver.recv()).await.is_err());
     }
 }

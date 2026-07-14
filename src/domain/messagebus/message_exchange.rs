@@ -245,6 +245,11 @@ impl MessageExchange {
                 // Broadcast to all clients
                 MessageExchange::broadcast_to_all(client_map, remote_message).await;
             },
+            LocalMessage::Book(book_event) => {
+                let remote_message = RemoteMessage::Book(vec![book_event]);
+
+                MessageExchange::broadcast_to_all(client_map, remote_message).await;
+            },
             LocalMessage::Video(video_event) => {
                 let remote_message = RemoteMessage::Video(vec![video_event.clone()]);
                 
@@ -282,6 +287,77 @@ impl MessageExchange {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::domain::messages::{BookEvent, VideoEvent};
+    use crate::domain::models::BookDetails;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingPlayer {
+        messages: Mutex<Vec<RemoteMessage>>,
+    }
+
+    #[async_trait]
+    impl RemotePlayer for RecordingPlayer {
+        async fn send(&self, message: RemoteMessage) -> Result<StatusCode, SendError> {
+            self.messages.lock().unwrap().push(message);
+            Ok(StatusCode::OK)
+        }
+    }
+
+    #[tokio::test]
+    async fn book_events_are_broadcast_as_structured_remote_messages() {
+        let client_map = Arc::new(RwLock::new(MessengerMap::new()));
+        let player = Arc::new(RecordingPlayer::default());
+        let remote_player: Arc<dyn RemotePlayer> = player.clone();
+        client_map.write().await.add_control("browser".to_string(), remote_player);
+        let event = BookEvent::new_book_changed_event(BookDetails {
+            checksum: 123,
+            title: "Dune".to_string(),
+            ..BookDetails::default()
+        });
+
+        MessageExchange::on_local_message(&client_map, LocalMessage::Book(event)).await;
+
+        let messages = player.messages.lock().unwrap();
+        assert!(matches!(
+            messages.as_slice(),
+            [RemoteMessage::Book(events)]
+                if events.len() == 1 && events[0].checksum == "123"
+        ));
+    }
+
+    #[test]
+    fn book_remote_message_uses_structured_book_envelope() {
+        let message = RemoteMessage::Book(vec![BookEvent::new_book_deleted_event(123)]);
+
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({
+                "Book": [{
+                    "type": "BookEventDeleted",
+                    "checksum": "123"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn existing_video_remote_message_envelope_is_unchanged() {
+        let message = RemoteMessage::Video(vec![VideoEvent::new_video_deleted_event(42)]);
+
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({
+                "Video": [{
+                    "type": "VideoEventDeleted",
+                    "checksum": "42"
+                }]
+            })
+        );
+    }
+
     /*use super::*;
     use crate::domain::messages::RemoteMessage;
     use crate::domain::traits::RemotePlayer;
