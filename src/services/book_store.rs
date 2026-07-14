@@ -111,7 +111,6 @@ impl BookStore {
         let book = self.repo.retrieve_book(checksum).await?;
         let collection = safe_relative_collection(&book.collection)?;
         let file_name = safe_file_name(&book.file_name, "book file")?;
-        let thumbnail = safe_file_name(&book.thumbnail, "book thumbnail")?;
 
         let book_path = self.book_root.join(collection).join(file_name);
         self.store
@@ -119,17 +118,29 @@ impl BookStore {
             .await?;
 
         if !is_default_book_thumbnail(&book.thumbnail) {
-            let thumbnail_path = self.thumbnail_root.join(thumbnail);
-            if let Err(error) = self
-                .thumbnail_store
-                .delete(thumbnail_path.to_str().unwrap_or_default())
-                .await
-            {
-                tracing::warn!(
-                    "Failed to delete book thumbnail {}: {}",
-                    thumbnail_path.display(),
-                    error
-                );
+            let unvalidated_path = self.thumbnail_root.join(&book.thumbnail);
+            match safe_file_name(&book.thumbnail, "book thumbnail") {
+                Ok(thumbnail) => {
+                    let thumbnail_path = self.thumbnail_root.join(thumbnail);
+                    if let Err(error) = self
+                        .thumbnail_store
+                        .delete(thumbnail_path.to_str().unwrap_or_default())
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to delete book thumbnail {}: {}",
+                            thumbnail_path.display(),
+                            error
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to delete book thumbnail {}: {}",
+                        unvalidated_path.display(),
+                        error
+                    );
+                }
             }
         }
 
@@ -139,9 +150,19 @@ impl BookStore {
 }
 
 fn safe_file_name(file_name: &str, description: &str) -> Result<PathBuf> {
-    let mut components = Path::new(file_name).components();
+    let original = Path::new(file_name);
+    let mut components = original.components();
     match (components.next(), components.next()) {
-        (Some(Component::Normal(name)), None) => Ok(PathBuf::from(name)),
+        (Some(Component::Normal(name)), None) => {
+            let canonical = PathBuf::from(name);
+            if original.as_os_str() == canonical.as_os_str() {
+                Ok(canonical)
+            } else {
+                Err(anyhow::anyhow!(
+                    "{description} must already be canonical: {file_name}"
+                ))
+            }
+        }
         _ => Err(anyhow::anyhow!(
             "{description} must be a single file name without traversal: {file_name}"
         )),
@@ -149,8 +170,9 @@ fn safe_file_name(file_name: &str, description: &str) -> Result<PathBuf> {
 }
 
 fn safe_relative_collection(collection: &str) -> Result<PathBuf> {
+    let original = Path::new(collection);
     let mut relative = PathBuf::new();
-    for component in Path::new(collection).components() {
+    for component in original.components() {
         match component {
             Component::Normal(part) => relative.push(part),
             _ => {
@@ -160,7 +182,13 @@ fn safe_relative_collection(collection: &str) -> Result<PathBuf> {
             }
         }
     }
-    Ok(relative)
+    if original.as_os_str() == relative.as_os_str() {
+        Ok(relative)
+    } else {
+        Err(anyhow::anyhow!(
+            "book collection must already be canonical: {collection}"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -465,7 +493,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_rejects_malformed_thumbnail_without_deleting_in_root_alias() {
+    async fn delete_rejects_noncanonical_primary_identities_without_deleting_aliases() {
+        for (label, checksum, collection, file_name, victim_relative) in [
+            (
+                "collection-dot",
+                21,
+                "Fiction/./Classics",
+                "victim.epub",
+                "Fiction/Classics/victim.epub",
+            ),
+            (
+                "collection-repeat",
+                22,
+                "Fiction//Classics",
+                "victim.epub",
+                "Fiction/Classics/victim.epub",
+            ),
+            (
+                "collection-trailing",
+                23,
+                "Fiction/Classics/",
+                "victim.epub",
+                "Fiction/Classics/victim.epub",
+            ),
+            ("file-trailing", 24, "", "victim.epub/", "victim.epub"),
+        ] {
+            let layout = TestLayout::new(label);
+            let victim_book = layout.book_root.join(victim_relative);
+            tokio::fs::create_dir_all(victim_book.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&victim_book, b"keep canonical book")
+                .await
+                .unwrap();
+            let (store, repository) =
+                store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+            let book = sample_book(checksum, collection, file_name);
+            repository.save_book(&book).await.unwrap();
+
+            let result = store.delete(book.checksum).await;
+
+            assert!(result.is_err(), "{label} should be rejected");
+            assert_eq!(
+                tokio::fs::read(&victim_book).await.unwrap(),
+                b"keep canonical book",
+                "{label} deleted its canonical alias"
+            );
+            assert!(
+                repository.retrieve_book(book.checksum).await.is_ok(),
+                "{label} removed the malformed row"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_thumbnail_cleanup_does_not_prevent_book_and_row_deletion() {
         let layout = TestLayout::new("delete-thumbnail-alias");
         let book_path = layout.book_root.join("Bad.epub");
         tokio::fs::write(&book_path, b"keep malformed book")
@@ -482,12 +564,12 @@ mod tests {
 
         let result = store.delete(book.checksum).await;
 
-        assert!(result.is_err());
+        assert!(result.is_ok());
         assert_eq!(tokio::fs::read(&victim_thumbnail).await.unwrap(), b"keep cover");
-        assert_eq!(
-            tokio::fs::read(&book_path).await.unwrap(),
-            b"keep malformed book"
-        );
-        assert!(repository.retrieve_book(book.checksum).await.is_ok());
+        assert!(!book_path.exists());
+        assert!(matches!(
+            repository.retrieve_book(book.checksum).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 }
