@@ -97,21 +97,29 @@ impl BookStore {
             return String::new();
         };
 
-        parent
-            .strip_prefix(&self.book_root)
-            .ok()
-            .filter(|relative| !relative.as_os_str().is_empty())
-            .or_else(|| parent.file_name().map(Path::new))
-            .and_then(Path::to_str)
-            .unwrap_or_default()
-            .to_string()
+        match parent.strip_prefix(&self.book_root) {
+            Ok(relative) => relative.to_str().unwrap_or_default().to_string(),
+            Err(_) => parent
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+        }
     }
 
     pub async fn delete(&self, checksum: i64) -> Result<()> {
         let book = self.repo.retrieve_book(checksum).await?;
+        let collection = safe_relative_collection(&book.collection)?;
+        let file_name = safe_file_name(&book.file_name, "book file")?;
+        let thumbnail = safe_file_name(&book.thumbnail, "book thumbnail")?;
+
+        let book_path = self.book_root.join(collection).join(file_name);
+        self.store
+            .delete(book_path.to_str().unwrap_or_default())
+            .await?;
 
         if !is_default_book_thumbnail(&book.thumbnail) {
-            let thumbnail_path = self.thumbnail_root.join(&book.thumbnail);
+            let thumbnail_path = self.thumbnail_root.join(thumbnail);
             if let Err(error) = self
                 .thumbnail_store
                 .delete(thumbnail_path.to_str().unwrap_or_default())
@@ -125,12 +133,18 @@ impl BookStore {
             }
         }
 
-        let book_path = self.book_root.join(book.get_download_path());
-        self.store
-            .delete(book_path.to_str().unwrap_or_default())
-            .await?;
         self.repo.delete_book(checksum).await?;
         Ok(())
+    }
+}
+
+fn safe_file_name(file_name: &str, description: &str) -> Result<PathBuf> {
+    let mut components = Path::new(file_name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => Ok(PathBuf::from(name)),
+        _ => Err(anyhow::anyhow!(
+            "{description} must be a single file name without traversal: {file_name}"
+        )),
     }
 }
 
@@ -307,6 +321,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_file_without_derivable_collection_stays_at_book_root() {
+        let layout = TestLayout::new("root-fallback");
+        let source = layout.book_root.join("Root.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let destination = store.add_file(&source, None).await.unwrap();
+
+        assert_eq!(destination, source);
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), b"book");
+        assert!(!layout.book_root.join("books/Root.epub").exists());
+    }
+
+    #[tokio::test]
     async fn add_file_rejects_collection_path_traversal_without_creating_directories() {
         let layout = TestLayout::new("add-traversal");
         let source = layout.source_root.join("Secrets.epub");
@@ -400,26 +428,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_does_not_follow_persisted_paths_outside_roots() {
-        let layout = TestLayout::new("delete-traversal");
-        let outside_book = layout.base.join("outside.epub");
-        let outside_thumbnail = layout.base.join("outside.jpg");
-        tokio::fs::write(&outside_book, b"keep book").await.unwrap();
-        tokio::fs::write(&outside_thumbnail, b"keep cover")
+    async fn primary_book_delete_failure_preserves_thumbnail_and_repository_row() {
+        let layout = TestLayout::new("primary-delete-failure");
+        let undeletable_book = layout.book_root.join("Fiction/Dune.epub");
+        tokio::fs::create_dir_all(&undeletable_book).await.unwrap();
+        let thumbnail_path = layout.thumbnail_root.join("dune-cover.jpg");
+        tokio::fs::write(&thumbnail_path, b"keep cover")
             .await
             .unwrap();
         let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
-        let mut book = sample_book(13, "../", "../outside.epub");
-        book.thumbnail = "../outside.jpg".to_string();
+        let mut book = sample_book(15, "Fiction", "Dune.epub");
+        book.thumbnail = "dune-cover.jpg".to_string();
         repository.save_book(&book).await.unwrap();
 
-        store.delete(book.checksum).await.unwrap();
+        let result = store.delete(book.checksum).await;
 
-        assert_eq!(tokio::fs::read(&outside_book).await.unwrap(), b"keep book");
-        assert_eq!(tokio::fs::read(&outside_thumbnail).await.unwrap(), b"keep cover");
-        assert!(matches!(
-            repository.retrieve_book(book.checksum).await,
-            Err(sqlx::Error::RowNotFound)
-        ));
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&thumbnail_path).await.unwrap(), b"keep cover");
+        assert!(repository.retrieve_book(book.checksum).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_malformed_book_identity_without_deleting_in_root_alias() {
+        let layout = TestLayout::new("delete-book-alias");
+        let victim_book = layout.book_root.join("victim.epub");
+        tokio::fs::write(&victim_book, b"keep book").await.unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let book = sample_book(13, "../", "../victim.epub");
+        repository.save_book(&book).await.unwrap();
+
+        let result = store.delete(book.checksum).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&victim_book).await.unwrap(), b"keep book");
+        assert!(repository.retrieve_book(book.checksum).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_malformed_thumbnail_without_deleting_in_root_alias() {
+        let layout = TestLayout::new("delete-thumbnail-alias");
+        let book_path = layout.book_root.join("Bad.epub");
+        tokio::fs::write(&book_path, b"keep malformed book")
+            .await
+            .unwrap();
+        let victim_thumbnail = layout.thumbnail_root.join("victim.jpg");
+        tokio::fs::write(&victim_thumbnail, b"keep cover")
+            .await
+            .unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let mut book = sample_book(14, "", "Bad.epub");
+        book.thumbnail = "subdir/../victim.jpg".to_string();
+        repository.save_book(&book).await.unwrap();
+
+        let result = store.delete(book.checksum).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&victim_thumbnail).await.unwrap(), b"keep cover");
+        assert_eq!(
+            tokio::fs::read(&book_path).await.unwrap(),
+            b"keep malformed book"
+        );
+        assert!(repository.retrieve_book(book.checksum).await.is_ok());
     }
 }
