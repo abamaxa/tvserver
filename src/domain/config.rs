@@ -1,6 +1,6 @@
 use reqwest::Url;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // Environment Variables
 const CLIENT_DIR: &str = "CLIENT_DIR";
@@ -24,7 +24,7 @@ const AUTH_CREDENTIALS: &str = "AUTH_CREDENTIALS";
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
 const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
 const DEFAULT_CLIENT_DIR: &str = "client";
-const DEFAULT_PB_URL: &str = "https://thehiddenbay.com";
+const DEFAULT_PB_URL: &str = "https://apibay.org";
 const DEFAULT_DELAY_REAPING_TASKS_SECS: i64 = 60;
 const DEFAULT_DOWNLOAD_DIR: &str = ".downloads";
 
@@ -50,32 +50,34 @@ pub fn get_database_url() -> String {
     env::var(DATABASE_URL).unwrap_or_else(|_| String::from(DEFAULT_DATABASE_URL))
 }
 
-pub fn get_database_migration_dir() -> String {
-    match env::var(DATABASE_MIGRATION_DIR) {
-        Ok(dir) => dir,
-        Err(_) => {
-            let default_path = Path::new(DEFAULT_MIGRATIONS_DIR);
-            if default_path.is_dir() {
-                return String::from(DEFAULT_MIGRATIONS_DIR);
-            }
+pub fn get_database_migration_dir() -> PathBuf {
+    if let Ok(dir) = env::var(DATABASE_MIGRATION_DIR) {
+        return PathBuf::from(dir);
+    }
 
-            let secondary_path_str = format!("./src-tauri/{}", DEFAULT_MIGRATIONS_DIR);
-            let secondary_path = Path::new(&secondary_path_str);
-            if secondary_path.is_dir() {
-                secondary_path_str
-            } else {
-                panic!(
-                    "Database migrations directory not found. Set DATABASE_MIGRATION_DIR or ensure '{}' or '{}' exists.",
-                    DEFAULT_MIGRATIONS_DIR, secondary_path_str
-                );
-            }
+    let candidates = [
+        PathBuf::from("migrations"),
+        PathBuf::from("src-tauri").join("migrations"),
+    ];
+
+    for candidate in &candidates {
+        if candidate.is_dir() {
+            return candidate.clone();
         }
     }
+
+    panic!(
+        "Database migrations directory not found. Set DATABASE_MIGRATION_DIR or ensure '{}' or '{}' exists.",
+        candidates[0].display(), candidates[1].display()
+    );
 }
 
 pub fn get_downloads_dir() -> String {
     env::var(DOWNLOAD_DIR).unwrap_or_else(|_| {
-        PathBuf::from(get_movie_dir()).join(DEFAULT_DOWNLOAD_DIR).to_string_lossy().to_string()
+        PathBuf::from(get_movie_dir())
+            .join(DEFAULT_DOWNLOAD_DIR)
+            .to_string_lossy()
+            .to_string()
     })
 }
 
@@ -119,14 +121,73 @@ pub fn get_sharing_server() -> String {
     env::var(SHARING_SERVER).unwrap_or_default()
 }
 
-pub fn  get_telegram_token() -> String {
-	env::var(TELEGRAM_TOKEN).unwrap_or_default()
+pub fn get_telegram_token() -> String {
+    env::var(TELEGRAM_TOKEN).unwrap_or_default()
 }
 
-pub fn  get_telegram_chat_id() -> String {
-	env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
+pub fn get_telegram_chat_id() -> String {
+    env::var(TELEGRAM_CHAT_ID).unwrap_or_default()
 }
 
 pub fn get_auth_credentials() -> String {
     env::var(AUTH_CREDENTIALS).unwrap_or_default()
+}
+#[cfg(test)]
+mod tests {
+    use super::{get_book_dir, get_book_thumbnail_dir, BOOK_DIR, BOOK_THUMBNAIL_DIR};
+    use std::env;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        originals: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvVarGuard {
+        fn new(names: &[&'static str]) -> Self {
+            Self {
+                originals: names
+                    .iter()
+                    .map(|name| (*name, env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.originals.iter() {
+                match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn book_dir_is_required_and_thumbnail_dir_defaults_under_book_dir() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvVarGuard::new(&[BOOK_DIR, BOOK_THUMBNAIL_DIR]);
+
+        env::remove_var(BOOK_DIR);
+        env::remove_var(BOOK_THUMBNAIL_DIR);
+        assert!(catch_unwind(AssertUnwindSafe(get_book_dir)).is_err());
+
+        env::set_var(BOOK_DIR, "/library/books");
+        assert_eq!(get_book_dir(), "/library/books");
+        assert_eq!(
+            get_book_thumbnail_dir("/library/books"),
+            PathBuf::from("/library/books/.thumbnails")
+        );
+
+        env::set_var(BOOK_THUMBNAIL_DIR, "/library/book-covers");
+        assert_eq!(
+            get_book_thumbnail_dir("/library/books"),
+            PathBuf::from("/library/book-covers")
+        );
+    }
 }
