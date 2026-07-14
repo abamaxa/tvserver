@@ -171,9 +171,14 @@ pub async fn create_context() -> anyhow::Result<Context> {
     let book_dir = get_book_dir();
     let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
     let book_file_storer: FileStorer = Arc::new(FileSystemStore::new(&book_dir));
-    let book_thumbnail_file_storer: FileStorer = Arc::new(FileSystemStore::new(
-        book_thumbnail_dir.to_str().unwrap_or_default(),
-    ));
+    let book_thumbnail_dir_string = book_thumbnail_dir.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "configured book thumbnail directory is not valid UTF-8: {}",
+            book_thumbnail_dir.display()
+        )
+    })?;
+    let book_thumbnail_file_storer: FileStorer =
+        Arc::new(FileSystemStore::new(book_thumbnail_dir_string));
     let book_store = Arc::new(BookStore::new_with_roots(
         book_file_storer.clone(),
         book_thumbnail_file_storer,
