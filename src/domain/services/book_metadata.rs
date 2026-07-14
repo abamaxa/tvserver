@@ -8,7 +8,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
 };
 use zip::ZipArchive;
 
@@ -21,6 +24,10 @@ const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_COVER_DIMENSION: u32 = 8_192;
 const MAX_COVER_PIXELS: u64 = 8_000_000;
 const MAX_COVER_DECODE_ALLOC_BYTES: u64 = 48 * 1024 * 1024;
+const SVG_FONT_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/book/FiraSans-Regular.ttf"
+));
 static NEXT_THUMBNAIL_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -370,22 +377,25 @@ impl ParsedPackage {
     fn isbn(&self) -> Option<String> {
         self.identifiers
             .iter()
-            .find(|identifier| identifier.scheme.as_deref().is_some_and(is_isbn_signal))
+            .filter(|identifier| identifier.scheme.as_deref().is_some_and(is_isbn_signal))
+            .find_map(|identifier| isbn_value(&identifier.value))
             .or_else(|| {
-                self.identifiers.iter().find(|identifier| {
-                    identifier.id.as_ref().is_some_and(|id| {
-                        self.refinements.iter().any(|refinement| {
-                            refinement.identifier_id == *id && is_isbn_signal(&refinement.value)
+                self.identifiers
+                    .iter()
+                    .filter(|identifier| {
+                        identifier.id.as_ref().is_some_and(|id| {
+                            self.refinements.iter().any(|refinement| {
+                                refinement.identifier_id == *id && is_isbn_signal(&refinement.value)
+                            })
                         })
                     })
-                })
+                    .find_map(|identifier| isbn_value(&identifier.value))
             })
             .or_else(|| {
                 self.identifiers
                     .iter()
-                    .find(|identifier| isbn_value(&identifier.value).is_some())
+                    .find_map(|identifier| isbn_value(&identifier.value))
             })
-            .and_then(|identifier| isbn_value(&identifier.value))
     }
 }
 
@@ -653,7 +663,7 @@ fn extract_cover(
         .ok_or_else(|| format!("EPUB cover has unsafe archive path {:?}", cover.href))?;
     let bytes = read_bounded_entry(archive, &cover_path, MAX_COVER_BYTES)
         .map_err(|error| format!("could not read EPUB cover {cover_path:?}: {error}"))?;
-    let decoded = decode_cover(&bytes)
+    let decoded = decode_cover(&bytes, cover.media_type.as_deref())
         .map_err(|error| format!("could not decode EPUB cover {cover_path:?}: {error}"))?;
     let thumbnail_name = thumbnail_filename(thumbnail_key)?;
 
@@ -665,7 +675,15 @@ fn extract_cover(
     Ok(thumbnail_name)
 }
 
-fn decode_cover(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+fn decode_cover(bytes: &[u8], media_type: Option<&str>) -> Result<image::DynamicImage, String> {
+    if media_type.is_some_and(|media_type| media_type.eq_ignore_ascii_case("image/svg+xml")) {
+        return decode_svg_cover(bytes);
+    }
+
+    decode_raster_cover(bytes)
+}
+
+fn decode_raster_cover(bytes: &[u8]) -> Result<image::DynamicImage, String> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_COVER_DIMENSION);
     limits.max_image_height = Some(MAX_COVER_DIMENSION);
@@ -676,20 +694,105 @@ fn decode_cover(bytes: &[u8]) -> Result<image::DynamicImage, String> {
         .map_err(|error| error.to_string())?;
     reader.limits(limits);
     let decoded = reader.decode().map_err(|error| error.to_string())?;
-    let pixels = u64::from(decoded.width()).saturating_mul(u64::from(decoded.height()));
+    validate_cover_dimensions(decoded.width(), decoded.height())?;
+    Ok(decoded)
+}
+
+fn decode_svg_cover(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    let svg = std::str::from_utf8(bytes)
+        .map_err(|_| "SVG cover must be uncompressed UTF-8 XML".to_owned())?;
+    let external_reference_rejected = Arc::new(AtomicBool::new(false));
+    let embedded_reference_rejected = Arc::new(AtomicBool::new(false));
+    let mut options = resvg::usvg::Options::default();
+    options.font_family = "Fira Sans".to_owned();
+    let fontdb = options.fontdb_mut();
+    fontdb.load_font_data(SVG_FONT_BYTES.to_vec());
+    fontdb.set_serif_family("Fira Sans");
+    fontdb.set_sans_serif_family("Fira Sans");
+    fontdb.set_cursive_family("Fira Sans");
+    fontdb.set_fantasy_family("Fira Sans");
+    fontdb.set_monospace_family("Fira Sans");
+    options.image_href_resolver = resvg::usvg::ImageHrefResolver {
+        resolve_data: {
+            let embedded_reference_rejected = Arc::clone(&embedded_reference_rejected);
+            Box::new(move |_, data, _| {
+                let within_byte_budget =
+                    u64::try_from(data.len()).is_ok_and(|length| length <= MAX_COVER_BYTES);
+                if !within_byte_budget || decode_raster_cover(data.as_slice()).is_err() {
+                    embedded_reference_rejected.store(true, Ordering::Relaxed);
+                    return None;
+                }
+
+                match image::guess_format(data.as_slice()) {
+                    Ok(image::ImageFormat::Gif) => Some(resvg::usvg::ImageKind::GIF(data)),
+                    Ok(image::ImageFormat::Jpeg) => Some(resvg::usvg::ImageKind::JPEG(data)),
+                    Ok(image::ImageFormat::Png) => Some(resvg::usvg::ImageKind::PNG(data)),
+                    Ok(image::ImageFormat::WebP) => Some(resvg::usvg::ImageKind::WEBP(data)),
+                    _ => {
+                        embedded_reference_rejected.store(true, Ordering::Relaxed);
+                        None
+                    }
+                }
+            })
+        },
+        resolve_string: {
+            let external_reference_rejected = Arc::clone(&external_reference_rejected);
+            Box::new(move |_, _| {
+                external_reference_rejected.store(true, Ordering::Relaxed);
+                None
+            })
+        },
+    };
+    let tree = resvg::usvg::Tree::from_str(svg, &options)
+        .map_err(|error| format!("invalid SVG cover: {error}"))?;
+    if external_reference_rejected.load(Ordering::Relaxed) {
+        return Err("SVG cover contains an external image reference".to_owned());
+    }
+    if embedded_reference_rejected.load(Ordering::Relaxed) {
+        return Err("SVG cover contains an unsupported or oversized embedded image".to_owned());
+    }
+    let size = tree.size().to_int_size();
+    let (width, height) = (size.width(), size.height());
+
+    validate_cover_dimensions(width, height)?;
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| "SVG cover is too large to render".to_owned())?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+
+    let image = image::RgbaImage::from_raw(width, height, pixmap.take())
+        .ok_or_else(|| "SVG renderer returned an invalid pixel buffer".to_owned())?;
+    Ok(image::DynamicImage::ImageRgba8(image))
+}
+
+fn validate_cover_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if width > MAX_COVER_DIMENSION || height > MAX_COVER_DIMENSION {
+        return Err(format!(
+            "image dimensions {width}x{height} exceed limit {MAX_COVER_DIMENSION}x{MAX_COVER_DIMENSION}"
+        ));
+    }
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
     if pixels > MAX_COVER_PIXELS {
         return Err(format!(
             "image pixel count {pixels} exceeds limit {MAX_COVER_PIXELS}"
         ));
     }
-    Ok(decoded)
+    Ok(())
 }
 
 fn is_image_manifest_item(item: &ManifestItem) -> bool {
-    matches!(
-        item.media_type.as_deref(),
-        Some("image/jpeg" | "image/jpg" | "image/png")
-    )
+    const SUPPORTED_COVER_MEDIA_TYPES: &[&str] =
+        &["image/gif", "image/jpeg", "image/jpg", "image/png", "image/svg+xml", "image/webp"];
+
+    item.media_type.as_deref().is_some_and(|media_type| {
+        SUPPORTED_COVER_MEDIA_TYPES
+            .iter()
+            .any(|supported| media_type.eq_ignore_ascii_case(supported))
+    })
 }
 
 fn is_cover_name(value: &str) -> bool {
@@ -872,12 +975,15 @@ fn is_isbn_signal(value: &str) -> bool {
 
 fn isbn_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    let without_prefix = trimmed
-        .strip_prefix("urn:isbn:")
-        .or_else(|| trimmed.strip_prefix("URN:ISBN:"))
-        .or_else(|| trimmed.strip_prefix("ISBN:"))
-        .unwrap_or(trimmed)
-        .trim();
+    let lowercase = trimmed.to_ascii_lowercase();
+    let without_prefix = if lowercase.starts_with("urn:isbn:") {
+        &trimmed["urn:isbn:".len()..]
+    } else if lowercase.starts_with("isbn:") {
+        &trimmed["isbn:".len()..]
+    } else {
+        trimmed
+    }
+    .trim();
     let compact: String = without_prefix
         .chars()
         .filter(|character| !character.is_whitespace() && *character != '-')
@@ -893,6 +999,7 @@ fn isbn_value(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use std::{
         fs::{self, File},
         io::Write,
@@ -1026,6 +1133,39 @@ mod tests {
         png_bytes_with_dimensions(3, 2)
     }
 
+    fn gif_bytes() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+            .unwrap()
+    }
+
+    fn webp_bytes() -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode("UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAdQwAIWsP+BiOh/AAA=")
+            .unwrap()
+    }
+
+    fn extract_declared_cover(
+        media_type: &str,
+        file_name: &str,
+        cover: &[u8],
+        thumbnail_key: &str,
+    ) -> (TestDir, BookMetadataExtraction) {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("book.epub");
+        let package = format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/>
+                 <manifest><item id="cover" href="{file_name}" media-type="{media_type}" properties="cover-image"/></manifest>
+               </package>"#
+        );
+        let archive_path = format!("OPS/{file_name}");
+        write_epub(&epub_path, &package, &[(archive_path.as_str(), cover)]);
+        let result =
+            extract_epub_metadata(&epub_path, &temp.path().join("covers"), thumbnail_key).unwrap();
+        (temp, result)
+    }
+
     #[test]
     fn extracts_epub3_cover_using_safe_opf_relative_path() {
         let temp = TestDir::new();
@@ -1071,6 +1211,136 @@ mod tests {
 
         assert_eq!(result.thumbnail, "epub2.jpg");
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn extracts_gif_cover() {
+        let (temp, result) =
+            extract_declared_cover("image/gif", "cover.gif", &gif_bytes(), "gif-cover");
+
+        assert_eq!(result.thumbnail, "gif-cover.jpg");
+        assert!(result.warnings.is_empty());
+        let generated = image::open(temp.path().join("covers").join(&result.thumbnail)).unwrap();
+        assert_eq!((generated.width(), generated.height()), (1, 1));
+    }
+
+    #[test]
+    fn extracts_webp_cover() {
+        let (temp, result) =
+            extract_declared_cover("image/webp", "cover.webp", &webp_bytes(), "webp-cover");
+
+        assert_eq!(result.thumbnail, "webp-cover.jpg");
+        assert!(result.warnings.is_empty());
+        let generated = image::open(temp.path().join("covers").join(&result.thumbnail)).unwrap();
+        assert_eq!((generated.width(), generated.height()), (1, 1));
+    }
+
+    #[test]
+    fn accepts_case_insensitive_cover_media_type() {
+        let (temp, result) =
+            extract_declared_cover("IMAGE/PNG", "cover.png", &png_bytes(), "uppercase-cover");
+
+        assert_eq!(result.thumbnail, "uppercase-cover.jpg");
+        assert!(result.warnings.is_empty());
+        assert!(temp.path().join("covers/uppercase-cover.jpg").is_file());
+    }
+
+    #[test]
+    fn rasterizes_svg_cover() {
+        let svg =
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1" viewBox="0 0 2 1">
+            <rect width="2" height="1" fill="#336699"/>
+        </svg>"##;
+        let (temp, result) = extract_declared_cover("image/svg+xml", "cover.svg", svg, "svg-cover");
+
+        assert_eq!(result.thumbnail, "svg-cover.jpg");
+        assert!(result.warnings.is_empty());
+        let generated = image::open(temp.path().join("covers").join(&result.thumbnail)).unwrap();
+        assert_eq!((generated.width(), generated.height()), (2, 1));
+    }
+
+    #[test]
+    fn svg_cover_rejects_external_file_references() {
+        let temp = TestDir::new();
+        let outside_image = temp.path().join("outside.png");
+        fs::write(&outside_image, png_bytes_with_dimensions(1, 1)).unwrap();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">
+                <image href="{}" width="1" height="1"/>
+            </svg>"#,
+            outside_image.display()
+        );
+
+        let (_, result) =
+            extract_declared_cover("image/svg+xml", "cover.svg", svg.as_bytes(), "external-svg");
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("external")));
+    }
+
+    #[test]
+    fn svg_cover_rejects_relative_file_references() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">
+            <image href="assets/book/default-book.jpg" width="1" height="1"/>
+        </svg>"#;
+
+        let (_, result) = extract_declared_cover("image/svg+xml", "cover.svg", svg, "relative-svg");
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("external")));
+    }
+
+    #[test]
+    fn svg_cover_rejects_oversized_embedded_raster() {
+        let oversized = png_bytes_with_dimensions(MAX_COVER_DIMENSION + 1, 1);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(oversized);
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">
+                <image href="data:image/png;base64,{encoded}" width="1" height="1"/>
+            </svg>"#
+        );
+
+        let (_, result) =
+            extract_declared_cover("image/svg+xml", "cover.svg", svg.as_bytes(), "embedded-svg");
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("embedded")));
+    }
+
+    #[test]
+    fn svgz_cover_is_rejected_without_decompression() {
+        let svgz = base64::engine::general_purpose::STANDARD
+            .decode("H4sIACcvVmoAA7MpLktXqMjNySu2VcooKSmw0tcvLy/XKzfWyy9K1zcyMDDQB6pQUijPTCnJsFUyVFLISM1MzygBMe1silKTS7BK6dvZgPTZAQB+uO4kXwAAAA==")
+            .unwrap();
+
+        let (_, result) =
+            extract_declared_cover("image/svg+xml", "cover.svgz", &svgz, "svgz-cover");
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("uncompressed")));
+    }
+
+    #[test]
+    fn svg_cover_renders_text_with_bundled_font() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="30">
+            <text x="2" y="22" font-family="Arial, sans-serif" font-size="20">Book</text>
+        </svg>"#;
+
+        let rendered = decode_svg_cover(svg).unwrap().to_rgba8();
+
+        assert!(rendered.pixels().any(|pixel| pixel.0[3] != 0));
     }
 
     #[test]
@@ -1199,6 +1469,47 @@ mod tests {
             extract_epub_metadata(&epub_path, &temp.path().join("covers"), "isbn").unwrap();
 
         assert_eq!(result.isbn.as_deref(), Some("978 1 4028 9462 6"));
+    }
+
+    #[test]
+    fn invalid_signaled_identifier_does_not_hide_later_valid_isbn() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("book.epub");
+        write_epub(
+            &epub_path,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+                 <metadata>
+                   <dc:identifier scheme="ISBN">not-an-isbn</dc:identifier>
+                   <dc:identifier scheme="ISBN">978-1-4028-9462-6</dc:identifier>
+                 </metadata>
+                 <manifest/>
+               </package>"#,
+            &[],
+        );
+
+        let result =
+            extract_epub_metadata(&epub_path, &temp.path().join("covers"), "isbn").unwrap();
+
+        assert_eq!(result.isbn.as_deref(), Some("978-1-4028-9462-6"));
+    }
+
+    #[test]
+    fn lowercase_isbn_prefix_is_accepted() {
+        let temp = TestDir::new();
+        let epub_path = temp.path().join("book.epub");
+        write_epub(
+            &epub_path,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata><dc:identifier>isbn:978-1-4028-9462-6</dc:identifier></metadata>
+                 <manifest/>
+               </package>"#,
+            &[],
+        );
+
+        let result =
+            extract_epub_metadata(&epub_path, &temp.path().join("covers"), "isbn").unwrap();
+
+        assert_eq!(result.isbn.as_deref(), Some("978-1-4028-9462-6"));
     }
 
     #[test]

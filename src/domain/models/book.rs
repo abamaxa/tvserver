@@ -3,8 +3,10 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use std::{
-    fs, io,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::domain::algorithm::{
@@ -12,6 +14,7 @@ use crate::domain::algorithm::{
 };
 
 pub const DEFAULT_BOOK_THUMBNAIL: &str = "default-book.jpg";
+static NEXT_DEFAULT_THUMBNAIL_TEMP: AtomicU64 = AtomicU64::new(0);
 
 pub fn default_book_thumbnail_bytes() -> &'static [u8] {
     include_bytes!(concat!(
@@ -23,7 +26,35 @@ pub fn default_book_thumbnail_bytes() -> &'static [u8] {
 pub fn ensure_default_book_thumbnail<P: AsRef<Path>>(thumbnail_dir: P) -> io::Result<PathBuf> {
     fs::create_dir_all(&thumbnail_dir)?;
     let thumbnail_path = thumbnail_dir.as_ref().join(DEFAULT_BOOK_THUMBNAIL);
-    fs::write(&thumbnail_path, default_book_thumbnail_bytes())?;
+    if fs::symlink_metadata(&thumbnail_path).is_ok_and(|metadata| metadata.file_type().is_file())
+        && fs::read(&thumbnail_path).is_ok_and(|bytes| bytes == default_book_thumbnail_bytes())
+    {
+        return Ok(thumbnail_path);
+    }
+
+    let temp_id = NEXT_DEFAULT_THUMBNAIL_TEMP.fetch_add(1, Ordering::Relaxed);
+    let temp_path = thumbnail_dir.as_ref().join(format!(
+        ".{DEFAULT_BOOK_THUMBNAIL}.{}.{}.tmp",
+        std::process::id(),
+        temp_id
+    ));
+    let result: io::Result<()> = (|| {
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        temp.write_all(default_book_thumbnail_bytes())?;
+        temp.sync_all()?;
+        drop(temp);
+        fs::rename(&temp_path, &thumbnail_path)?;
+        #[cfg(unix)]
+        File::open(thumbnail_dir.as_ref())?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result?;
     Ok(thumbnail_path)
 }
 
@@ -523,6 +554,67 @@ mod test {
         );
 
         std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+    }
+
+    #[test]
+    fn existing_default_thumbnail_is_not_rewritten() {
+        let thumbnail_dir = std::env::temp_dir().join(format!(
+            "tvserver-book-thumbnail-idempotent-test-{}",
+            std::process::id()
+        ));
+        if thumbnail_dir.exists() {
+            std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+        }
+
+        let thumbnail_path = ensure_default_book_thumbnail(&thumbnail_dir).unwrap();
+        let mut permissions = std::fs::metadata(&thumbnail_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&thumbnail_path, permissions).unwrap();
+
+        let result = ensure_default_book_thumbnail(&thumbnail_dir);
+
+        let mut permissions = std::fs::metadata(&thumbnail_path).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&thumbnail_path, permissions).unwrap();
+        assert_eq!(result.unwrap(), thumbnail_path);
+        assert_eq!(
+            std::fs::read(&thumbnail_path).unwrap(),
+            default_book_thumbnail_bytes()
+        );
+        std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_thumbnail_provisioning_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let thumbnail_dir = std::env::temp_dir().join(format!(
+            "tvserver-book-thumbnail-symlink-test-{}",
+            std::process::id()
+        ));
+        if thumbnail_dir.exists() {
+            std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+        }
+        std::fs::create_dir_all(&thumbnail_dir).unwrap();
+        let outside = thumbnail_dir.with_extension("outside");
+        std::fs::write(&outside, b"do not replace").unwrap();
+        let thumbnail_path = thumbnail_dir.join(DEFAULT_BOOK_THUMBNAIL);
+        symlink(&outside, &thumbnail_path).unwrap();
+
+        ensure_default_book_thumbnail(&thumbnail_dir).unwrap();
+
+        assert_eq!(std::fs::read(&outside).unwrap(), b"do not replace");
+        assert!(!std::fs::symlink_metadata(&thumbnail_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(&thumbnail_path).unwrap(),
+            default_book_thumbnail_bytes()
+        );
+        std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+        std::fs::remove_file(outside).unwrap();
     }
 
     #[test]
