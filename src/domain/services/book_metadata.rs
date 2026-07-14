@@ -96,7 +96,6 @@ impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
             )
             .map_err(|error| format!("could not render first PDF page: {error}"))?
             .as_image()
-            .map_err(|error| format!("could not convert PDF page to an image: {error}"))?
             .into_rgb8();
         image
             .save_with_format(thumbnail_path, image::ImageFormat::Jpeg)
