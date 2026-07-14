@@ -1,9 +1,11 @@
 #[cfg(not(feature = "webserver"))]
+use crate::domain::config::{get_book_dir, get_book_thumbnail_dir};
+#[cfg(not(feature = "webserver"))]
 use crate::domain::config::get_thumbnail_dir;
 use crate::domain::config::{get_book_dir, get_movie_dir};
 use mockall::lazy_static;
 use regex::Regex;
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use std::{collections::HashSet, path::{Component, Path, PathBuf}};
 use titlecase::titlecase;
 
 pub fn replace_extension(path: &str, new_extension: &str) -> String {
@@ -224,6 +226,51 @@ pub fn get_thumbnails_url(thumbnails: &Vec<String>) -> Vec<String> {
         .iter()
         .map(|t| format!("{}/{}", thumbnail_dir, t))
         .collect::<Vec<String>>()
+}
+
+#[cfg(feature = "webserver")]
+pub fn get_book_url(collection: &str, file_name: &str) -> String {
+    let download_path = get_book_download_path(collection, file_name);
+    format!("/api/books/download/{}", download_path)
+}
+
+#[cfg(not(feature = "webserver"))]
+pub fn get_book_url(collection: &str, file_name: &str) -> String {
+    let download_path = get_book_download_path(collection, file_name);
+    format!("{}/{}", get_book_dir(), download_path)
+}
+
+#[cfg(feature = "webserver")]
+pub fn get_book_thumbnail_url(thumbnail: &str) -> String {
+    format!("/api/book-thumbnails/{}", get_book_thumbnail_file_name(thumbnail))
+}
+
+#[cfg(not(feature = "webserver"))]
+pub fn get_book_thumbnail_url(thumbnail: &str) -> String {
+    let thumbnail_dir = get_book_thumbnail_dir(&get_book_dir())
+        .to_str()
+        .unwrap_or_default()
+        .to_string();
+    format!("{}/{}", thumbnail_dir, get_book_thumbnail_file_name(thumbnail))
+}
+
+pub fn get_book_download_path(collection: &str, file_name: &str) -> String {
+    let mut relative_path = PathBuf::new();
+    for component in Path::new(collection).components() {
+        if let Component::Normal(part) = component {
+            relative_path.push(part);
+        }
+    }
+    relative_path.push(get_book_thumbnail_file_name(file_name));
+    relative_path.to_str().unwrap_or_default().to_string()
+}
+
+pub fn get_book_thumbnail_file_name(thumbnail: &str) -> String {
+    Path::new(thumbnail)
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[cfg(test)]

@@ -16,7 +16,11 @@ pub use naming::{
     title_case,
     replace_extension,
     get_video_url,
-    get_thumbnails_url
+    get_thumbnails_url,
+    get_book_url,
+    get_book_thumbnail_url,
+    get_book_download_path,
+    get_book_thumbnail_file_name
 };
 
 pub use media_kind::{
