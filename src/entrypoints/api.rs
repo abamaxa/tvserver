@@ -51,7 +51,6 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/search/pirate", get(pirate_search))
         .route("/api/search/youtube", get(youtube_search))
         .route("/api/conversion", get(list_conversions))
-        .route("/api/stream-audio/{audio_index}/{*path}", get(stream_audio))
         .with_state(shared_state)
 }
 
