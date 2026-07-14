@@ -1,4 +1,5 @@
 mod video_metadata;
+mod book_metadata;
 mod media_check;
 mod download_monitor;
 mod history;
@@ -7,6 +8,7 @@ mod media_sharing;
 pub mod copy_server;
 
 pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum, get_video_metadata};
+pub use book_metadata::{extract_epub_metadata, BookMetadataExtraction, BookMetadataExtractionError};
 pub use media_check::MediaCheck;
 pub use download_monitor::DownloadMonitor;
 pub use history::HistoryService;
