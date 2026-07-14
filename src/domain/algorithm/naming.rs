@@ -1,6 +1,8 @@
 #[cfg(not(feature = "webserver"))]
 use crate::domain::config::get_book_thumbnail_dir;
 #[cfg(not(feature = "webserver"))]
+use crate::domain::config::{get_book_dir, get_book_thumbnail_dir};
+#[cfg(not(feature = "webserver"))]
 use crate::domain::config::get_thumbnail_dir;
 use crate::domain::config::{get_book_dir, get_movie_dir};
 use mockall::lazy_static;

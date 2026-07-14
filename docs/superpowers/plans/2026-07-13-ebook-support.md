@@ -25,6 +25,37 @@ Acceptance criteria:
 - Implementation work is split by the tasks below unless the maintainer explicitly chooses a different breakdown.
 - Pull requests or integration branches call out which task or tasks they complete.
 
+## Dependency and Parallel Execution Notes
+
+Hard foundation sequence:
+
+1. Task 1 defines config, dependencies, and media classification.
+2. Task 2 defines the shared book domain model and URL/default-thumbnail contract.
+3. Task 3 defines book event types and routing.
+4. Task 4 adds the database schema and repository methods that depend on the model and events.
+5. Task 5 adds `BookStore` and context exposure on top of repository support.
+
+Parallel lanes after the foundation:
+
+- Tasks 6 and 7 can start after Tasks 1 and 2. They are independent EPUB and PDF extraction lanes, but they both touch `src/domain/services/book_metadata.rs`; either coordinate a shared module boundary first or keep them in one branch.
+- Task 3 can run in parallel with Tasks 6 and 7 because message routing does not depend on extractor internals.
+- Task 12 can start after Task 5 because Tauri commands depend on `BookStore`, not on download-event routing.
+- Task 13 can be drafted throughout implementation, then finalized after dependency and Pdfium decisions settle.
+
+Integration sequence:
+
+- Task 8 depends on Tasks 1, 2, 4, 5, 6, and 7 because ingestion needs classification, models, persistence, file movement, and metadata extraction.
+- Task 9 should follow Task 8 unless Task 8 first lands a stable reusable ingestion API for scanner use.
+- Task 10 depends on Task 5 for collection/read/delete behavior and should use the final response shapes from Tasks 2 and 4.
+- Task 11 depends on Task 10 route and response decisions. It can begin as soon as Task 10's route table and schemas are stable, but it must be finalized after Task 10 tests pass.
+- Task 14 is final verification and must run after all implementation and documentation tasks.
+
+Poor parallel candidates:
+
+- Tasks 1 and 2 overlap in `src/domain/algorithm/naming.rs`, `src/domain/algorithm/mod.rs`, and config/model exports.
+- Task 4 before Task 3 would leave repository event emission underspecified.
+- Tasks 5, 8, and 9 all touch runtime wiring and ingestion/scanning boundaries, so splitting them without a stable API is likely to produce conflicts.
+
 ## File Responsibility Map
 
 - `Cargo.toml`: dependency and feature declarations for EPUB/PDF/image handling.
@@ -53,6 +84,7 @@ Acceptance criteria:
 - `tests/common/server.rs`: test static serving for book routes.
 - `tests/book_api_test.rs`: REST book API integration coverage.
 - `tests/fixtures/book_dir/`: test book library fixture root.
+- `docs/api/openapi.yaml`: canonical OpenAPI contract for existing frontend-facing REST routes and new book routes.
 
 ## Task 1: Config, Dependencies, and Media Classification
 
@@ -401,7 +433,37 @@ Acceptance criteria:
 - Integration tests cover default thumbnail serving.
 - Existing media/search/download API tests continue to pass.
 
-## Task 11: Tauri Commands
+## Task 11: OpenAPI REST Contract
+
+**Deliverables**
+
+- Create an OpenAPI specification for the webserver REST API.
+- Document existing frontend-facing REST endpoints and the new book endpoints.
+- Document static HTTP routes used by clients for media streaming, video thumbnails, book downloads, and book thumbnails.
+- Define reusable schemas for response wrappers, tasks, search results, existing media collection responses, book collection responses, book details, book metadata, and errors.
+- Keep `/api/media` schemas video-only and model books only under the dedicated book routes.
+
+**Files**
+
+- Create: `docs/api/openapi.yaml`
+- Modify: `docs/superpowers/specs/2026-07-13-book-library-design.md` only if route or schema decisions materially change the approved spec.
+
+**Acceptance Criteria**
+
+- The OpenAPI document uses OpenAPI 3.1 or documents why the project-selected validator requires OpenAPI 3.0.x.
+- The contract includes `GET /api/books`, `GET /api/books/{collection}`, `GET /api/book/{checksum}`, `DELETE /api/book/{checksum}`, `GET /api/books/download/{path}`, and `GET /api/book-thumbnails/{file}`.
+- The contract includes the existing frontend-facing REST routes from `src/entrypoints/api.rs` and the static routes from `src/entrypoints/webserver.rs`.
+- Book checksum response fields are strings.
+- Wildcard path parameters describe URL-encoded nested paths.
+- The contract does not imply that `/api/media` returns books.
+
+**Verification**
+
+- Validate `docs/api/openapi.yaml` with the selected OpenAPI validator.
+- Review the route list against `src/entrypoints/api.rs` and `src/entrypoints/webserver.rs`.
+- Review book schemas against `BookDetails`, `BookMetadata`, `BookCollectionItem`, and `BookCollectionDetails`.
+
+## Task 12: Tauri Commands
 
 **Deliverables**
 
@@ -429,13 +491,14 @@ Acceptance criteria:
 - Webserver build check passes.
 - Command-level tests are added where the current test harness supports them.
 
-## Task 12: Documentation and Runtime Configuration
+## Task 13: Documentation and Runtime Configuration
 
 **Deliverables**
 
 - Document `BOOK_DIR` and `BOOK_THUMBNAIL_DIR`.
 - Document that implementation branches must be based on `spec/ebook-support`.
 - Document optional PDF thumbnail rendering behavior and Android constraints.
+- Link or mention the OpenAPI contract location for frontend consumers.
 - Update environment samples if they list required runtime variables.
 
 **Files**
@@ -449,6 +512,7 @@ Acceptance criteria:
 - Required book configuration is visible to operators.
 - Default thumbnail behavior is documented.
 - Optional Pdfium behavior is documented as optional.
+- Frontend developers can find `docs/api/openapi.yaml`.
 - Documentation does not imply desktop-only PDF tools are required.
 - Spec branch discipline remains explicit.
 
@@ -456,7 +520,7 @@ Acceptance criteria:
 
 - Documentation review confirms no stale references to video-only library behavior where book behavior is now relevant.
 
-## Task 13: Final Verification
+## Task 14: Final Verification
 
 **Deliverables**
 
@@ -464,6 +528,7 @@ Acceptance criteria:
 - Confirm affected video regression tests pass.
 - Confirm full webserver test suite passes.
 - Confirm default Tauri build check passes.
+- Confirm the OpenAPI contract validates.
 - Confirm no desktop-only external tools are required for normal tests.
 - Confirm all implementation branches remain based on `spec/ebook-support`.
 
@@ -475,6 +540,7 @@ Acceptance criteria:
 - Existing search/download tests pass.
 - Full webserver test suite passes.
 - Default Tauri build check passes.
+- OpenAPI validation passes for `docs/api/openapi.yaml`.
 - Any optional Pdfium-specific tests are clearly feature-gated.
 - Worktree is clean after final commits.
 
@@ -486,8 +552,8 @@ Acceptance criteria:
 - Metadata extraction: Tasks 6 and 7.
 - Default thumbnail fallback: Tasks 2, 6, 7, 8, and 10.
 - REST API: Task 10.
-- Tauri commands: Task 11.
-- Android dependency policy: Tasks 1, 7, and 12.
-- Existing video behavior preserved: Tasks 1, 3, 4, 8, 9, 10, and 13.
+- OpenAPI REST contract: Task 11.
+- Tauri commands: Task 12.
+- Android dependency policy: Tasks 1, 7, and 13.
+- Existing video behavior preserved: Tasks 1, 3, 4, 8, 9, 10, and 14.
 - Spec branch discipline: this plan and `docs/superpowers/specs/2026-07-13-book-library-design.md`.
-

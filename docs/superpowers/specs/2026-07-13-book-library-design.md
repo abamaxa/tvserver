@@ -2,7 +2,7 @@
 
 ## Summary
 
-Extend the backend so completed downloads can be processed as books as well as videos. The first book release supports PDF and EPUB files, stores them in a separate `BOOK_DIR`, extracts title/author and other practical metadata, assigns a thumbnail, exposes a new REST API under `/api/books`, and adds matching Tauri commands for desktop and Android clients.
+Extend the backend so completed downloads can be processed as books as well as videos. The first book release supports PDF and EPUB files, stores them in a separate `BOOK_DIR`, extracts title/author and other practical metadata, assigns a thumbnail, exposes a new REST API under `/api/books`, publishes an OpenAPI contract for frontend work, and adds matching Tauri commands for desktop and Android clients.
 
 Existing video download sources, video processing, `/api/media`, and video response contracts remain unchanged.
 
@@ -27,12 +27,14 @@ git switch -c codex/ebook-support-<task-name>
 - Use an extracted cover or first-page thumbnail when possible.
 - Assign a bundled default book cover image whenever thumbnail extraction fails or no cover exists.
 - Expose books through dedicated REST routes and matching Tauri commands.
+- Publish an OpenAPI specification for the REST API, including the new book endpoints, so frontend work can start against a stable contract.
 - Keep Android/Tauri viability by avoiding desktop-only external binaries.
 
 ## Non-Goals
 
 - No MOBI, AZW, CBZ, or CBR support in the first pass.
 - No frontend UI redesign in this backend-focused spec.
+- No generated frontend client or frontend implementation in this backend-focused spec.
 - No migration of video data into a generalized media table.
 - No changes to search providers or download source behavior.
 - No dependency on desktop-only tools such as `pdftoppm`, `mutool`, or `exiftool`.
@@ -53,6 +55,7 @@ New backend pieces:
 - `BookEvent` and `LocalMessage::Book` for client refresh events.
 - `MetaDataManager` routing by file extension.
 - REST routes under `/api/books` and `/api/book`.
+- OpenAPI contract for the REST API at `docs/api/openapi.yaml`.
 - Tauri commands that mirror the REST read/delete operations.
 
 The current `MediaEvent::MediaAvailable` remains the download-completion event. Completed files are classified by extension inside `MetaDataManager`:
@@ -211,6 +214,25 @@ Response types:
 
 Do not widen `MediaItem` or alter `/api/media` response payloads in this first pass.
 
+## OpenAPI Contract
+
+Create `docs/api/openapi.yaml` as the canonical REST contract for the webserver API. The contract should use OpenAPI 3.1 or newer unless the chosen validator requires OpenAPI 3.0.x, in which case that choice must be documented in the file header.
+
+The contract must document the existing REST routes that the frontend already calls and the new book routes from this spec. At minimum it covers:
+
+- Task routes: `GET /api/tasks`, `POST /api/tasks`, and `DELETE /api/tasks/{type}/{path}`.
+- Existing media routes: `GET /api/media`, `GET /api/media/{media}`, `DELETE /api/media/{media}`, `POST /api/media/{media}`, and `PATCH /api/media/{media}`.
+- Existing search and conversion routes: `GET /api/search/pirate`, `GET /api/search/youtube`, and `GET /api/conversion`.
+- Existing remote-control routes: `GET /api/remote`, `POST /api/remote/control`, and `POST /api/remote/play`.
+- Existing static media routes used by clients: `GET /api/stream/{path}` and `GET /api/thumbnails/{file}`.
+- New book routes: `GET /api/books`, `GET /api/books/{collection}`, `GET /api/book/{checksum}`, `DELETE /api/book/{checksum}`, `GET /api/books/download/{path}`, and `GET /api/book-thumbnails/{file}`.
+
+The websocket endpoints may be listed as documented HTTP upgrade endpoints, but they do not need full realtime message schemas in this first OpenAPI pass.
+
+The schema section must define reusable component schemas for common response wrappers, task state, search results, existing media collection responses, `BookDetails`, `BookMetadata`, `BookCollectionItem`, `BookCollectionDetails`, and error responses. Book checksum fields must be typed as strings in API responses, matching the existing video checksum style.
+
+The contract must not imply that `/api/media` returns books. Book routes are separate from existing video media routes.
+
 ## Error Handling
 
 Unsupported file extension:
@@ -299,6 +321,13 @@ API tests:
 - Book download route serves files from `BOOK_DIR`.
 - Book thumbnail route serves generated thumbnails and `default-book.jpg`.
 
+OpenAPI contract checks:
+
+- `docs/api/openapi.yaml` parses and validates with the project-selected OpenAPI validator.
+- The contract includes all new book routes and the existing frontend-facing REST routes listed in the OpenAPI Contract section.
+- Book response schemas use checksum strings and keep `/api/media` video-only.
+- Path parameters for wildcard routes clearly describe URL-encoded nested paths.
+
 Regression tests:
 
 - Existing video ingestion still routes video extensions to `generate_video_metadatas`.
@@ -313,15 +342,16 @@ Android/dependency guard:
 
 ## Implementation Order
 
-1. Add `BOOK_DIR`, `BOOK_THUMBNAIL_DIR`, and book domain models.
-2. Add migration and repository methods.
-3. Add book thumbnail/default-cover helpers.
-4. Add EPUB metadata extraction.
-5. Add PDF metadata extraction and renderer boundary.
-6. Add book ingestion service.
-7. Route `MetaDataManager` by file extension.
-8. Add book scan for `BOOK_DIR`.
-9. Add REST routes and static serving.
-10. Add Tauri commands.
-11. Add websocket/local book events.
-12. Add focused tests and run existing video regression tests.
+1. Add `BOOK_DIR`, `BOOK_THUMBNAIL_DIR`, media classification, and book domain models.
+2. Add book thumbnail/default-cover helpers.
+3. Add websocket/local book events.
+4. Add migration and repository methods.
+5. Add `BookStore` and expose book services through runtime context.
+6. Add EPUB metadata extraction.
+7. Add PDF metadata extraction and renderer boundary.
+8. Add book ingestion service and route `MetaDataManager` by file extension.
+9. Add book scan for `BOOK_DIR`.
+10. Add REST routes and static serving.
+11. Add an OpenAPI REST contract for existing and new frontend-facing endpoints.
+12. Add Tauri commands.
+13. Add documentation updates, focused tests, and existing video regression checks.
