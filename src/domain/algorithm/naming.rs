@@ -122,7 +122,12 @@ pub fn collection_id_to_path(collection: &str) -> Option<PathBuf> {
 
     let mut path = PathBuf::new();
     for segment in collection.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\') {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.contains('\\')
+            || segment.contains(':')
+        {
             return None;
         }
         path.push(segment);
@@ -340,6 +345,17 @@ mod test {
             "Fiction/",
             r"Fiction\Classics",
         ] {
+            assert_eq!(
+                collection_id_to_path(collection),
+                None,
+                "expected {collection:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_id_to_path_rejects_windows_prefix_segments_on_every_host() {
+        for collection in ["C:", "C:Books", "Fiction/C:", "Fiction/Class:ics"] {
             assert_eq!(
                 collection_id_to_path(collection),
                 None,
