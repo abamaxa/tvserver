@@ -79,3 +79,9 @@ webserver = []
 pdf-thumbnails = ["dep:pdfium-render"]
 # Default features - include Tauri dependencies when webserver is not enabled
 default = ["tauri", "tauri-plugin-log", "log", "tauri-build"]
+
+[target.'cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
