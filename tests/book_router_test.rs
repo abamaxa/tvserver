@@ -10,8 +10,9 @@ use app_lib::{
         models::{default_book_thumbnail_bytes, DEFAULT_BOOK_THUMBNAIL},
         traits::Repository,
     },
-    entrypoints::Context,
+    entrypoints::{webserver::build_http_router, Context},
 };
+use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 use crate::common::{
@@ -20,6 +21,7 @@ use crate::common::{
 };
 
 const MOVIE_ROOT: &str = "tests/fixtures/media_dir";
+static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct TempRoot(PathBuf);
 
@@ -59,6 +61,7 @@ async fn make_context(book_root: &PathBuf, thumbnail_root: &PathBuf) -> Result<C
 
 #[tokio::test]
 async fn server_startup_materializes_default_book_thumbnail_in_fallback_directory() -> Result<()> {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp_root = TempRoot::new()?;
     let book_root = temp_root.0.join("books");
     let thumbnail_root = book_root.join(".thumbnails");
@@ -85,6 +88,23 @@ async fn server_startup_materializes_default_book_thumbnail_in_fallback_director
         .await
         .expect("router construction should fail before the server starts")?;
     assert!(startup_result.is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn builder_requires_book_dir() -> Result<()> {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp_root = TempRoot::new()?;
+    let book_root = temp_root.0.join("books");
+    let thumbnail_root = book_root.join(".thumbnails");
+    env::set_var(MOVIE_DIR, MOVIE_ROOT);
+    env::remove_var(BOOK_DIR);
+    env::remove_var(BOOK_THUMBNAIL_DIR);
+
+    let result = build_http_router(make_context(&book_root, &thumbnail_root).await?);
+    assert!(result.is_err());
+    assert!(format!("{:#}", result.unwrap_err()).contains(BOOK_DIR));
 
     Ok(())
 }

@@ -51,6 +51,15 @@ async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Resu
 
 pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result<Router> {
     let movie_dir = get_movie_dir();
+    let book_dir = env::var(BOOK_DIR)
+        .with_context(|| format!("{BOOK_DIR} environment variable is required"))?;
+    let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
+    ensure_default_book_thumbnail(&book_thumbnail_dir).with_context(|| {
+        format!(
+            "failed to materialize default book thumbnail in {}",
+            book_thumbnail_dir.display()
+        )
+    })?;
 
     // Protected routes: API endpoints, player, and fallback (app)
     let mut protected_routes = register(Arc::new(context))
@@ -66,19 +75,10 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
         .nest_service("/api/stream", ServeDir::new(&movie_dir))
         .nest_service("/api/thumbnails", ServeDir::new(get_thumbnail_dir(&movie_dir)));
 
-    if let Ok(book_dir) = env::var(BOOK_DIR) {
-        let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
-        ensure_default_book_thumbnail(&book_thumbnail_dir).with_context(|| {
-            format!(
-                "failed to materialize default book thumbnail in {}",
-                book_thumbnail_dir.display()
-            )
-        })?;
-        protected_routes =
-            protected_routes.nest_service("/api/books/download", ServeDir::new(book_dir));
-        unprotected_routes = unprotected_routes
-            .nest_service("/api/book-thumbnails", ServeDir::new(book_thumbnail_dir));
-    }
+    protected_routes =
+        protected_routes.nest_service("/api/books/download", ServeDir::new(book_dir));
+    unprotected_routes = unprotected_routes
+        .nest_service("/api/book-thumbnails", ServeDir::new(book_thumbnail_dir));
 
     let protected_routes = protected_routes.layer(middleware::from_fn(restrict_access));
 
