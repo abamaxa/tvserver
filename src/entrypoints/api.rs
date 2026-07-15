@@ -181,17 +181,25 @@ fn book_store_error_status(error: &anyhow::Error) -> StatusCode {
         .unwrap_or(INTERNAL_SERVER_ERROR)
 }
 
+fn parse_book_checksum(checksum: &str) -> Result<i64, StdResponse> {
+    checksum
+        .parse::<i64>()
+        .map_err(|_| std_error(BAD_REQUEST, "invalid book checksum".to_string()))
+}
+
 #[debug_handler]
 async fn get_book(
     state: State<SharedState>,
-    checksum: Path<i64>,
+    checksum: Path<String>,
 ) -> Result<Json<BookDetails>, (StatusCode, Json<Response>)> {
-    match state.get_repository().retrieve_book(checksum.0).await {
+    let checksum = parse_book_checksum(&checksum.0)?;
+
+    match state.get_repository().retrieve_book(checksum).await {
         Ok(book) => Ok(Json(book)),
         Err(error) => {
             let status = repository_book_error_status(&error);
             if status == INTERNAL_SERVER_ERROR {
-                tracing::error!("Failed to retrieve book {}: {}", checksum.0, error);
+                tracing::error!("Failed to retrieve book {}: {}", checksum, error);
             }
             let message = if status == NOT_FOUND {
                 BOOK_NOT_FOUND_MESSAGE
@@ -204,13 +212,18 @@ async fn get_book(
 }
 
 #[debug_handler]
-async fn delete_book(state: State<SharedState>, checksum: Path<i64>) -> StdResponse {
-    match state.get_book_store().delete(checksum.0).await {
+async fn delete_book(state: State<SharedState>, checksum: Path<String>) -> StdResponse {
+    let checksum = match parse_book_checksum(&checksum.0) {
+        Ok(checksum) => checksum,
+        Err(response) => return response,
+    };
+
+    match state.get_book_store().delete(checksum).await {
         Ok(()) => (OK, Json(Response::success("success".to_string()))),
         Err(error) => {
             let status = book_store_error_status(&error);
             if status == INTERNAL_SERVER_ERROR {
-                tracing::error!("Failed to delete book {}: {}", checksum.0, error);
+                tracing::error!("Failed to delete book {}: {}", checksum, error);
             }
             let message = if status == NOT_FOUND {
                 BOOK_NOT_FOUND_MESSAGE

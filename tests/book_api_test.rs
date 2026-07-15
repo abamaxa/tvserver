@@ -21,7 +21,7 @@ use app_lib::{
     },
 };
 use chrono::Local;
-use reqwest::StatusCode;
+use reqwest::{header::CONTENT_TYPE, Method, StatusCode};
 use serde_json::Value;
 use sqlx::{Connection, SqliteConnection};
 use tokio::{fs, task::JoinHandle};
@@ -215,6 +215,32 @@ async fn gets_one_book_with_a_string_checksum() -> Result<()> {
     assert_eq!(book["checksum"], i64::MAX.to_string());
     assert_eq!(book["fileName"], "largest.pdf");
     assert_eq!(book["url"], "/api/books/download/Nonfiction/largest.pdf");
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn invalid_book_checksums_return_json_bad_request() -> Result<()> {
+    let (server, _) = start_server(57212).await?;
+    let client = reqwest::Client::new();
+
+    for method in [Method::GET, Method::DELETE] {
+        for checksum in ["not-a-number", "9223372036854775808"] {
+            let response = client
+                .request(
+                    method.clone(),
+                    format!("http://localhost:57212/api/book/{checksum}"),
+                )
+                .send()
+                .await?;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+            let result: Response = response.json().await?;
+            assert!(result.message.is_empty());
+            assert_eq!(result.errors, ["invalid book checksum"]);
+        }
+    }
 
     Ok(server.abort())
 }
