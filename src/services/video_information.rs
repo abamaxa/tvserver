@@ -1,6 +1,6 @@
 use crate::domain::algorithm::{classify_media_kind, MediaKind};
 use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender, MediaEvent};
-use crate::domain::services::{generate_book_metadata, generate_video_metadatas};
+use crate::domain::services::{generate_book_metadata_with_cancellation, generate_video_metadatas};
 use crate::domain::traits::{FileStorer, ProcessSpawner, Repository, Storer};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 // Create a static semaphore with a capacity of half the number of CPUs
 static WORKER_SEMAPHORE: Lazy<Arc<Semaphore>> = Lazy::new(|| {
@@ -34,6 +35,7 @@ trait MetadataProcessor: Send + Sync {
         repo: Repository,
         search: Option<String>,
         spawner: Arc<dyn ProcessSpawner>,
+        cancellation: CancellationToken,
     ) -> Result<(), String>;
 
     async fn process_book(
@@ -42,6 +44,7 @@ trait MetadataProcessor: Send + Sync {
         storer: FileStorer,
         repo: Repository,
         search: Option<String>,
+        cancellation: CancellationToken,
     ) -> Result<(), String>;
 }
 
@@ -56,6 +59,7 @@ impl MetadataProcessor for ProductionMetadataProcessor {
         repo: Repository,
         search: Option<String>,
         spawner: Arc<dyn ProcessSpawner>,
+        _cancellation: CancellationToken,
     ) -> Result<(), String> {
         generate_video_metadatas(path, storer, repo, search, spawner)
             .await
@@ -69,8 +73,9 @@ impl MetadataProcessor for ProductionMetadataProcessor {
         storer: FileStorer,
         repo: Repository,
         search: Option<String>,
+        cancellation: CancellationToken,
     ) -> Result<(), String> {
-        generate_book_metadata(path, storer, repo, search)
+        generate_book_metadata_with_cancellation(path, storer, repo, search, cancellation)
             .await
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -87,6 +92,7 @@ pub struct MetaDataManager {
     spawner: Arc<dyn ProcessSpawner>,
     processor: Arc<dyn MetadataProcessor>,
     workers: JoinSet<()>,
+    cancellation: CancellationToken,
 }
 
 struct ProcessingPathGuard {
@@ -115,12 +121,21 @@ impl Drop for ProcessingPathGuard {
 }
 
 pub struct MetaDataManagerHandle {
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
+    cancellation: CancellationToken,
 }
 
 impl MetaDataManagerHandle {
     pub fn abort(&self) {
-        self.task.abort();
+        self.cancellation.cancel();
+    }
+
+    pub async fn shutdown(mut self) -> Result<(), tokio::task::JoinError> {
+        self.cancellation.cancel();
+        self.task
+            .take()
+            .expect("metadata manager task is present until completion")
+            .await
     }
 }
 
@@ -128,13 +143,18 @@ impl Future for MetaDataManagerHandle {
     type Output = Result<(), tokio::task::JoinError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.task).poll(cx)
+        Pin::new(
+            self.task
+                .as_mut()
+                .expect("metadata manager task is present until completion"),
+        )
+        .poll(cx)
     }
 }
 
 impl Drop for MetaDataManagerHandle {
     fn drop(&mut self) {
-        self.task.abort();
+        self.cancellation.cancel();
     }
 }
 
@@ -147,6 +167,7 @@ impl MetaDataManager {
         sender: LocalMessageSender,
         spawner: Arc<dyn ProcessSpawner>,
         processor: Arc<dyn MetadataProcessor>,
+        cancellation: CancellationToken,
     ) -> Self {
         Self {
             repo,
@@ -158,6 +179,7 @@ impl MetaDataManager {
             spawner,
             processor,
             workers: JoinSet::new(),
+            cancellation,
         }
     }
 
@@ -189,6 +211,8 @@ impl MetaDataManager {
         spawner: Arc<dyn ProcessSpawner>,
         processor: Arc<dyn MetadataProcessor>,
     ) -> MetaDataManagerHandle {
+        let cancellation = CancellationToken::new();
+        let manager_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
             let mut manager = Self::new_with_processor(
                 repo,
@@ -198,16 +222,25 @@ impl MetaDataManager {
                 sender,
                 spawner,
                 processor,
+                manager_cancellation,
             );
             manager.event_loop().await;
             eprintln!("local event loop exiting");
         });
-        MetaDataManagerHandle { task }
+        MetaDataManagerHandle {
+            task: Some(task),
+            cancellation,
+        }
     }
 
     async fn event_loop(&mut self) {
         loop {
             tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => {
+                    tracing::info!("metadata manager cancellation requested, draining workers");
+                    break;
+                }
                 worker = self.workers.join_next(), if !self.workers.is_empty() => {
                     if let Some(Err(error)) = worker {
                         tracing::error!("metadata worker terminated unexpectedly: {error}");
@@ -224,7 +257,11 @@ impl MetaDataManager {
                 }
             }
         }
-        self.workers.shutdown().await;
+        while let Some(worker) = self.workers.join_next().await {
+            if let Err(error) = worker {
+                tracing::error!("metadata worker terminated unexpectedly during shutdown: {error}");
+            }
+        }
     }
 
     async fn handle_media_event(&mut self, event: MediaEvent) {
@@ -256,9 +293,15 @@ impl MetaDataManager {
                 let semaphore = WORKER_SEMAPHORE.clone();
                 let spawner = self.spawner.clone();
                 let processor = self.processor.clone();
+                let cancellation = self.cancellation.clone();
                 self.workers.spawn(async move {
                     let _path_guard = path_guard;
-                    let Ok(permit) = semaphore.acquire_owned().await else {
+                    let permit = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return,
+                        permit = semaphore.acquire_owned() => permit,
+                    };
+                    let Ok(permit) = permit else {
                         tracing::error!("metadata worker semaphore was closed");
                         return;
                     };
@@ -267,7 +310,14 @@ impl MetaDataManager {
                     match route {
                         MediaKind::Video => {
                             if let Err(err) = processor
-                                .process_video(full_path, storer, repo, search, spawner)
+                                .process_video(
+                                    full_path,
+                                    storer,
+                                    repo,
+                                    search,
+                                    spawner,
+                                    cancellation,
+                                )
                                 .await
                             {
                                 tracing::error!("processing MediaAvailable: {}", err);
@@ -275,7 +325,13 @@ impl MetaDataManager {
                         }
                         MediaKind::Book => {
                             if let Err(err) = processor
-                                .process_book(full_path, book_storer, repo, search)
+                                .process_book(
+                                    full_path,
+                                    book_storer,
+                                    repo,
+                                    search,
+                                    cancellation,
+                                )
                                 .await
                             {
                                 tracing::error!("processing book MediaAvailable: {}", err);
@@ -354,6 +410,40 @@ mod tests {
         second_started: Notify,
     }
 
+    struct CancellationAwareProcessor {
+        started: Notify,
+        observed: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MetadataProcessor for CancellationAwareProcessor {
+        async fn process_video(
+            &self,
+            _path: PathBuf,
+            _storer: Storer,
+            _repo: Repository,
+            _search: Option<String>,
+            _spawner: Arc<dyn ProcessSpawner>,
+            cancellation: CancellationToken,
+        ) -> Result<(), String> {
+            self.started.notify_one();
+            cancellation.cancelled().await;
+            self.observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn process_book(
+            &self,
+            _path: PathBuf,
+            _storer: FileStorer,
+            _repo: Repository,
+            _search: Option<String>,
+            _cancellation: CancellationToken,
+        ) -> Result<(), String> {
+            unreachable!("cancellation propagation test uses a video path")
+        }
+    }
+
     impl PanicOnceProcessor {
         fn new() -> Self {
             Self {
@@ -373,6 +463,7 @@ mod tests {
             _repo: Repository,
             _search: Option<String>,
             _spawner: Arc<dyn ProcessSpawner>,
+            _cancellation: CancellationToken,
         ) -> Result<(), String> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
@@ -389,6 +480,7 @@ mod tests {
             _storer: FileStorer,
             _repo: Repository,
             _search: Option<String>,
+            _cancellation: CancellationToken,
         ) -> Result<(), String> {
             unreachable!("lifecycle regression uses a video path")
         }
@@ -403,6 +495,7 @@ mod tests {
             _repo: Repository,
             _search: Option<String>,
             _spawner: Arc<dyn ProcessSpawner>,
+            _cancellation: CancellationToken,
         ) -> Result<(), String> {
             self.record(MediaKind::Video).await;
             Ok(())
@@ -414,6 +507,7 @@ mod tests {
             _storer: FileStorer,
             _repo: Repository,
             _search: Option<String>,
+            _cancellation: CancellationToken,
         ) -> Result<(), String> {
             self.record(MediaKind::Book).await;
             Ok(())
@@ -442,6 +536,7 @@ mod tests {
             exchange.new_sender(),
             Arc::new(NoSpawner::new()),
             processor,
+            CancellationToken::new(),
         )
     }
 
@@ -522,7 +617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborting_manager_handle_cancels_workers_before_later_persistence_work() {
+    async fn abort_signals_cancellation_and_still_drains_blocked_workers() {
         let processor = Arc::new(RecordingProcessor::new(true));
         let exchange = LocalMessageExchange::new();
         let receiver = exchange
@@ -561,12 +656,108 @@ mod tests {
             .unwrap();
 
         handle.abort();
-        let error = handle.await.unwrap_err();
-        assert!(error.is_cancelled());
+        let mut shutdown = tokio::spawn(handle);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err());
         processor.releases.add_permits(1);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        shutdown.await.unwrap().unwrap();
 
+        assert_eq!(processor.completed(), 1);
+    }
+
+    #[tokio::test]
+    async fn cooperative_shutdown_waits_for_a_blocked_worker_and_drains_it() {
+        let processor = Arc::new(RecordingProcessor::new(true));
+        let exchange = LocalMessageExchange::new();
+        let receiver = exchange
+            .listen_for_messages(MessageFilter::All)
+            .await
+            .unwrap();
+        let repository: Repository =
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let handle = MetaDataManager::consume_with_processor(
+            repository,
+            Arc::new(MockMediaStorer::new()),
+            Arc::new(FileSystemStore::new(
+                std::env::temp_dir()
+                    .join("tvserver-routing-cooperative-shutdown")
+                    .to_str()
+                    .unwrap(),
+            )),
+            receiver,
+            exchange.new_sender(),
+            Arc::new(NoSpawner::new()),
+            processor.clone(),
+        );
+        let started = processor.started.notified();
+        exchange
+            .new_sender()
+            .send(LocalMessage::Media(MediaEvent::new_media(
+                std::path::Path::new("shutdown-drain.mp4"),
+                None,
+            )))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started)
+            .await
+            .unwrap();
+
+        let mut shutdown = tokio::spawn(handle.shutdown());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err());
         assert_eq!(processor.completed(), 0);
+
+        processor.releases.add_permits(1);
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(processor.completed(), 1);
+    }
+
+    #[tokio::test]
+    async fn cooperative_shutdown_propagates_cancellation_to_workers() {
+        let processor = Arc::new(CancellationAwareProcessor {
+            started: Notify::new(),
+            observed: AtomicUsize::new(0),
+        });
+        let exchange = LocalMessageExchange::new();
+        let receiver = exchange
+            .listen_for_messages(MessageFilter::All)
+            .await
+            .unwrap();
+        let handle = MetaDataManager::consume_with_processor(
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap()),
+            Arc::new(MockMediaStorer::new()),
+            Arc::new(FileSystemStore::new(
+                std::env::temp_dir()
+                    .join("tvserver-routing-cancellation-token")
+                    .to_str()
+                    .unwrap(),
+            )),
+            receiver,
+            exchange.new_sender(),
+            Arc::new(NoSpawner::new()),
+            processor.clone(),
+        );
+        let started = processor.started.notified();
+        exchange
+            .new_sender()
+            .send(LocalMessage::Media(MediaEvent::new_media(
+                std::path::Path::new("cancellation-token.mp4"),
+                None,
+            )))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), started)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("cooperative worker should observe cancellation")
+            .unwrap();
+
+        assert_eq!(processor.observed.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

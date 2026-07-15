@@ -14,6 +14,7 @@ pub use book_metadata::{
     BookMetadataExtraction, BookMetadataExtractionError, DefaultPdfThumbnailRenderer,
     PdfThumbnailRenderer,
 };
+pub(crate) use book_metadata::generate_book_metadata_with_cancellation;
 pub use media_check::MediaCheck;
 pub use download_monitor::DownloadMonitor;
 pub use history::HistoryService;

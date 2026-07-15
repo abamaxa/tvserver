@@ -12,12 +12,14 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::domain::traits::{FileStore, Filer, StagedFile, StoreObject};
+use crate::domain::traits::{FileStore, Filer, PrivateSnapshot, StagedFile, StoreObject};
+
+const PRIVATE_SNAPSHOT_DIRECTORY: &str = ".tvserver-book-snapshots";
 
 trait MoveFileSystem: Send + Sync {
     fn hard_link_staged_to_destination(
@@ -651,6 +653,211 @@ impl FileStore for FileSystemStore {
         .await?
     }
 
+    async fn create_private_snapshot(&self, staged: &StagedFile) -> Result<PrivateSnapshot> {
+        let store = self.clone();
+        let staged = staged.clone();
+        tokio::task::spawn_blocking(move || {
+            if staged.staged_path.parent() != staged.original_path.parent() {
+                return Err(anyhow!("staged source must remain beside its original path"));
+            }
+            let root_path = store.normalized_root()?;
+            let root_dir = store.open_root()?;
+            let internal_staged = staged_relative_path(&root_path, &staged.staged_path);
+            let ambient_source;
+            let (source_dir, staged_source) = if let Some(relative) = internal_staged {
+                (root_dir, relative)
+            } else {
+                let parent = staged.staged_path.parent().ok_or_else(|| {
+                    anyhow!("staged source has no parent: {}", staged.staged_path.display())
+                })?;
+                let staged_name = staged.staged_path.file_name().ok_or_else(|| {
+                    anyhow!("staged source has no file name: {}", staged.staged_path.display())
+                })?;
+                ambient_source = Dir::open_ambient_dir(parent, ambient_authority())?;
+                (&ambient_source, PathBuf::from(staged_name))
+            };
+            ensure_cap_regular_file(source_dir, &staged_source, "staged source")?;
+
+            match root_dir.create_dir(PRIVATE_SNAPSHOT_DIRECTORY) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+            let snapshot_directory = Path::new(PRIVATE_SNAPSHOT_DIRECTORY);
+            let directory_metadata = root_dir.symlink_metadata(snapshot_directory)?;
+            if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+                return Err(anyhow!(
+                    "private book snapshot directory must be a directory and not a symlink"
+                ));
+            }
+
+            let snapshot_relative = snapshot_directory.join(unique_staging_name("snapshot"));
+            let copy_result = (|| -> Result<()> {
+                let mut source_options = OpenOptions::new();
+                source_options.read(true).follow(FollowSymlinks::No);
+                let mut source = source_dir.open_with(&staged_source, &source_options)?;
+                if !source.metadata()?.is_file() {
+                    return Err(anyhow!("opened staged source is not a regular file"));
+                }
+
+                let mut destination_options = OpenOptions::new();
+                destination_options
+                    .write(true)
+                    .create_new(true)
+                    .follow(FollowSymlinks::No);
+                let mut snapshot = root_dir.open_with(&snapshot_relative, &destination_options)?;
+                io::copy(&mut source, &mut snapshot)?;
+                snapshot.flush()?;
+                snapshot.sync_all()?;
+                drop(snapshot);
+                ensure_cap_regular_file(root_dir, &snapshot_relative, "private snapshot")?;
+                Ok(())
+            })();
+            if let Err(error) = copy_result {
+                let _ = root_dir.remove_file(&snapshot_relative);
+                return Err(error);
+            }
+
+            Ok(PrivateSnapshot {
+                path: root_path.join(snapshot_relative),
+            })
+        })
+        .await?
+    }
+
+    async fn publish_private_snapshot_no_replace(
+        &self,
+        snapshot: &PrivateSnapshot,
+        destination: &str,
+    ) -> Result<()> {
+        let store = self.clone();
+        let snapshot = snapshot.clone();
+        let destination = PathBuf::from(destination);
+        tokio::task::spawn_blocking(move || {
+            let root_path = store.normalized_root()?;
+            let snapshot_relative = staged_relative_path(&root_path, &snapshot.path)
+                .ok_or_else(|| anyhow!("private snapshot is outside the store root"))?;
+            if snapshot_relative.parent() != Some(Path::new(PRIVATE_SNAPSHOT_DIRECTORY)) {
+                return Err(anyhow!("private snapshot is outside the snapshot directory"));
+            }
+            let destination = store.rooted_relative_path(&destination)?;
+            let root_dir = store.open_root()?;
+            ensure_cap_regular_file(root_dir, &snapshot_relative, "private snapshot")?;
+            match store.move_filesystem.hard_link_staged_to_destination(
+                root_dir,
+                &snapshot_relative,
+                root_dir,
+                &destination,
+            ) {
+                Ok(()) => {
+                    remove_staged_source_after_publication(
+                        root_dir,
+                        &snapshot_relative,
+                        &destination,
+                    );
+                    Ok(())
+                }
+                Err(error) if is_cross_device(&error) => copy_staged_file_no_replace(
+                    root_dir,
+                    &snapshot_relative,
+                    root_dir,
+                    &destination,
+                ),
+                Err(error) => Err(anyhow!(
+                    "failed to publish {} without replacing an existing file: {error}",
+                    destination.display()
+                )),
+            }
+        })
+        .await?
+    }
+
+    async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> Result<()> {
+        let store = self.clone();
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || {
+            let root_path = store.normalized_root()?;
+            let snapshot_relative = staged_relative_path(&root_path, &snapshot.path)
+                .ok_or_else(|| anyhow!("private snapshot is outside the store root"))?;
+            if snapshot_relative.parent() != Some(Path::new(PRIVATE_SNAPSHOT_DIRECTORY)) {
+                return Err(anyhow!("private snapshot is outside the snapshot directory"));
+            }
+            let root_dir = store.open_root()?;
+            match root_dir.symlink_metadata(&snapshot_relative) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+                    anyhow!("private snapshot must be a regular file and not a symlink"),
+                ),
+                Ok(_) => Ok(root_dir.remove_file(&snapshot_relative)?),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await?
+    }
+
+    async fn remove_regular_no_follow(&self, path: &Path) -> Result<()> {
+        let store = self.clone();
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let absolute = std::path::absolute(&path)?;
+            let root_path = store.normalized_root()?;
+            if let Some(relative) = staged_relative_path(&root_path, &absolute) {
+                let root = store.open_root()?;
+                return match root.symlink_metadata(&relative) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+                        anyhow!("cleanup target must be a regular file and not a symlink"),
+                    ),
+                    Ok(_) => Ok(root.remove_file(relative)?),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                };
+            }
+
+            let parent = absolute.parent().ok_or_else(|| {
+                anyhow!("cleanup target has no parent: {}", absolute.display())
+            })?;
+            let name = absolute.file_name().ok_or_else(|| {
+                anyhow!("cleanup target has no file name: {}", absolute.display())
+            })?;
+            let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
+            match directory.symlink_metadata(name) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+                    anyhow!("cleanup target must be a regular file and not a symlink"),
+                ),
+                Ok(_) => Ok(directory.remove_file(name)?),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await?
+    }
+
+    async fn discard_staged(&self, staged: &StagedFile) -> Result<()> {
+        let store = self.clone();
+        let staged = staged.clone();
+        tokio::task::spawn_blocking(move || {
+            if staged.staged_path.parent() != staged.original_path.parent() {
+                return Err(anyhow!("staged source must remain beside its original path"));
+            }
+            let root_path = store.normalized_root()?;
+            if let Some(relative) = staged_relative_path(&root_path, &staged.staged_path) {
+                let root = store.open_root()?;
+                ensure_cap_regular_file(root, &relative, "staged source")?;
+                return Ok(root.remove_file(relative)?);
+            }
+            let parent = staged.staged_path.parent().ok_or_else(|| {
+                anyhow!("staged source has no parent: {}", staged.staged_path.display())
+            })?;
+            let name = staged.staged_path.file_name().ok_or_else(|| {
+                anyhow!("staged source has no file name: {}", staged.staged_path.display())
+            })?;
+            let source_dir = Dir::open_ambient_dir(parent, ambient_authority())?;
+            ensure_cap_regular_file(&source_dir, Path::new(name), "staged source")?;
+            Ok(source_dir.remove_file(name)?)
+        })
+        .await?
+    }
+
     async fn publish_staged_no_replace(
         &self,
         staged: &StagedFile,
@@ -903,6 +1110,114 @@ mod tests {
         assert!(std::fs::read_dir(&base)
             .unwrap()
             .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".tvserver-ingest-")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_has_a_new_inode_and_ignores_retained_source_fd_writes() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-private-snapshot-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"snapshot bytes").unwrap();
+        let mut downloader_fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        downloader_fd.seek(SeekFrom::Start(0)).unwrap();
+        downloader_fd.write_all(b"changed through").unwrap();
+        downloader_fd.flush().unwrap();
+
+        assert_ne!(
+            std::os::unix::fs::MetadataExt::ino(
+                &std::fs::metadata(&staged.staged_path).unwrap(),
+            ),
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&snapshot.path).unwrap())
+        );
+        assert_eq!(std::fs::read(&snapshot.path).unwrap(), b"snapshot bytes");
+        assert!(snapshot.path.starts_with(&root));
+        assert!(snapshot
+            .path
+            .parent()
+            .unwrap()
+            .file_name()
+            .is_some_and(|name| name == ".tvserver-book-snapshots"));
+
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+        store.restore_staged(&staged).await.unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_rejects_staged_symlink_without_reading_target() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-private-snapshot-symlink-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        let target = base.join("secret.epub");
+        std::fs::write(&source, b"original").unwrap();
+        std::fs::write(&target, b"must never be copied").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        std::fs::remove_file(&staged.staged_path).unwrap();
+        symlink(&target, &staged.staged_path).unwrap();
+
+        let result = store.create_private_snapshot(&staged).await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"must never be copied");
+        let snapshot_dir = root.join(".tvserver-book-snapshots");
+        assert!(!snapshot_dir.exists() || std::fs::read_dir(snapshot_dir).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remove_regular_no_follow_handles_ambient_files_and_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-remove-ambient-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let outside = base.join("covers");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let regular = outside.join("generated.jpg");
+        let target = outside.join("target.jpg");
+        let link = outside.join("link.jpg");
+        std::fs::write(&regular, b"generated").unwrap();
+        std::fs::write(&target, b"preserve").unwrap();
+        symlink(&target, &link).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        store.remove_regular_no_follow(&regular).await.unwrap();
+        let link_result = store.remove_regular_no_follow(&link).await;
+
+        assert!(!regular.exists());
+        assert!(link_result.is_err());
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
         let _ = std::fs::remove_dir_all(&base);
     }
 

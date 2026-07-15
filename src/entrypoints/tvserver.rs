@@ -57,9 +57,13 @@ impl TVServer {
         &self.context
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(self) {
         self.monitor_handle.abort();
-        self.metadata_manager.abort();
         self.history_service.abort();
+        if let Err(error) = self.metadata_manager.shutdown().await {
+            tracing::error!("metadata manager shutdown failed: {error}");
+        }
+        let _ = self.monitor_handle.await;
+        let _ = self.history_service.await;
     }
 }

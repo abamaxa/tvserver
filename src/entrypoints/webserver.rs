@@ -24,11 +24,11 @@ pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
 
     let tvserver = TVServer::new().await?;
 
-    run_http_server(&tvserver, port).await?;
+    let server_result = run_http_server(&tvserver, port).await;
 
-    tvserver.shutdown();
+    tvserver.shutdown().await;
 
-    Ok(())
+    server_result
 }
 
 async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Result<()> {

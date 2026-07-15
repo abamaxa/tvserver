@@ -119,6 +119,11 @@ pub struct StagedFile {
     pub staged_path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateSnapshot {
+    pub path: PathBuf,
+}
+
 /// An interface to a collection of files.
 ///
 /// Unlike the MediaStorer interface, this is a low level interface implemented
@@ -132,6 +137,18 @@ pub trait FileStore: Sync + Send {
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
     async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
     async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile>;
+    async fn create_private_snapshot(
+        &self,
+        staged: &StagedFile,
+    ) -> anyhow::Result<PrivateSnapshot>;
+    async fn publish_private_snapshot_no_replace(
+        &self,
+        snapshot: &PrivateSnapshot,
+        destination: &str,
+    ) -> anyhow::Result<()>;
+    async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()>;
+    async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()>;
+    async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
     async fn publish_staged_no_replace(
         &self,
         staged: &StagedFile,
