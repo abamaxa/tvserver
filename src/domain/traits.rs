@@ -113,6 +113,12 @@ pub trait Filer: Sync + Send {
 
 pub type StoreObject = Arc<dyn Filer>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedFile {
+    pub original_path: PathBuf,
+    pub staged_path: PathBuf,
+}
+
 /// An interface to a collection of files.
 ///
 /// Unlike the MediaStorer interface, this is a low level interface implemented
@@ -125,6 +131,13 @@ pub trait FileStore: Sync + Send {
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
     async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile>;
+    async fn publish_staged_no_replace(
+        &self,
+        staged: &StagedFile,
+        destination: &str,
+    ) -> anyhow::Result<()>;
+    async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
     async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()>;
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;

@@ -1,6 +1,6 @@
 use crate::domain::messagebus::MessageFilter;
 use crate::domain::services::HistoryService;
-use crate::services::{MetaDataManager, Monitor};
+use crate::services::{MetaDataManager, MetaDataManagerHandle, Monitor};
 use anyhow::Error;
 use tokio::task::JoinHandle;
 
@@ -9,7 +9,7 @@ use super::context::{create_context, Context};
 pub struct TVServer {
     context: Context,
     monitor_handle: JoinHandle<()>,
-    metadata_manager: JoinHandle<()>,
+    metadata_manager: MetaDataManagerHandle,
     history_service: JoinHandle<()>,
 }
 

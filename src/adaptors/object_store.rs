@@ -17,19 +17,49 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::domain::traits::{FileStore, Filer, StoreObject};
+use crate::domain::traits::{FileStore, Filer, StagedFile, StoreObject};
+
+trait MoveFileSystem: Send + Sync {
+    fn hard_link_staged_to_destination(
+        &self,
+        source_dir: &Dir,
+        staged_source: &Path,
+        destination_dir: &Dir,
+        destination: &Path,
+    ) -> io::Result<()>;
+}
+
+struct CapabilityMoveFileSystem;
+
+impl MoveFileSystem for CapabilityMoveFileSystem {
+    fn hard_link_staged_to_destination(
+        &self,
+        source_dir: &Dir,
+        staged_source: &Path,
+        destination_dir: &Dir,
+        destination: &Path,
+    ) -> io::Result<()> {
+        source_dir.hard_link(staged_source, destination_dir, destination)
+    }
+}
 
 #[derive(Clone)]
 pub struct FileSystemStore {
     root: String,
     root_dir: Arc<OnceLock<Dir>>,
+    move_filesystem: Arc<dyn MoveFileSystem>,
 }
 
 impl FileSystemStore {
     pub fn new(root: &str) -> Self {
+        Self::new_with_move_filesystem(root, Arc::new(CapabilityMoveFileSystem))
+    }
+
+    fn new_with_move_filesystem(root: &str, move_filesystem: Arc<dyn MoveFileSystem>) -> Self {
         let store = Self {
             root: root.to_string(),
             root_dir: Arc::new(OnceLock::new()),
+            move_filesystem,
         };
         let _ = store.open_root();
         store
@@ -254,6 +284,10 @@ fn restore_staged_file(dir: &Dir, staged: &Path, original: &Path) -> Result<()> 
         );
     }
     Ok(())
+}
+
+fn staged_relative_path(root_path: &Path, absolute_path: &Path) -> Option<PathBuf> {
+    absolute_path.strip_prefix(root_path).ok().map(Path::to_path_buf)
 }
 
 fn remove_staged_source_after_publication(
@@ -554,69 +588,146 @@ impl FileStore for FileSystemStore {
     }
 
     async fn rename_no_replace(&self, _old_path: &str, _new_path: &str) -> Result<()> {
+        let staged = self.stage_no_follow(_old_path).await?;
+        self.publish_staged_no_replace(&staged, _new_path).await
+    }
+
+    async fn stage_no_follow(&self, source: &str) -> Result<StagedFile> {
         let store = self.clone();
-        let old_path = _old_path.to_string();
-        let new_path = PathBuf::from(_new_path);
+        let source = source.to_string();
         tokio::task::spawn_blocking(move || {
-            let old_path = store.source_path(&old_path)?;
-            let destination = store.rooted_relative_path(&new_path)?;
-            let destination_dir = store.open_root()?;
+            let original_path = store.source_path(&source)?;
             let root_path = store.normalized_root()?;
-            let internal_source = old_path.strip_prefix(&root_path).ok().map(Path::to_path_buf);
+            let root_dir = store.open_root()?;
+            let internal_source = staged_relative_path(&root_path, &original_path);
             let ambient_source;
             let (source_dir, source_path) = if let Some(relative) = internal_source {
-                (destination_dir, relative)
+                (root_dir, relative)
             } else {
-                let old_parent = old_path.parent().ok_or_else(|| {
-                    anyhow!("source path has no parent: {}", old_path.display())
+                let original_parent = original_path.parent().ok_or_else(|| {
+                    anyhow!("source path has no parent: {}", original_path.display())
                 })?;
-                let old_name = old_path.file_name().ok_or_else(|| {
-                    anyhow!("source path has no file name: {}", old_path.display())
+                let original_name = original_path.file_name().ok_or_else(|| {
+                    anyhow!("source path has no file name: {}", original_path.display())
                 })?;
-                ambient_source = Dir::open_ambient_dir(old_parent, ambient_authority())?;
-                (&ambient_source, PathBuf::from(old_name))
+                ambient_source = Dir::open_ambient_dir(original_parent, ambient_authority())?;
+                (&ambient_source, PathBuf::from(original_name))
             };
             ensure_cap_regular_file(source_dir, &source_path, "source file")?;
 
-            let staged_source = PathBuf::from(unique_staging_name("tvserver-move"));
+            let staged_source = source_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(unique_staging_name("tvserver-ingest"));
             source_dir.rename(&source_path, source_dir, &staged_source)?;
-
-            let move_result = (|| -> Result<()> {
-                ensure_cap_regular_file(source_dir, &staged_source, "source file")?;
-                match source_dir.hard_link(&staged_source, destination_dir, &destination) {
-                    Ok(()) => {
-                        ensure_cap_regular_file(
-                            destination_dir,
-                            &destination,
-                            "destination file",
-                        )?;
-                        remove_staged_source_after_publication(
-                            source_dir,
-                            &staged_source,
-                            &destination,
-                        );
-                        Ok(())
+            if let Err(error) = ensure_cap_regular_file(source_dir, &staged_source, "staged source") {
+                if source_dir.symlink_metadata(&staged_source).is_ok() {
+                    if let Err(restore_error) = source_dir
+                        .hard_link(&staged_source, source_dir, &source_path)
+                        .and_then(|_| source_dir.remove_file(&staged_source))
+                    {
+                        return Err(anyhow!(
+                            "{error}; additionally failed to restore rejected staged source {}: {restore_error}",
+                            original_path.display()
+                        ));
                     }
-                    Err(error) if is_cross_device(&error) => copy_staged_file_no_replace(
+                }
+                return Err(error);
+            }
+
+            let staged_path = if original_path.starts_with(&root_path) {
+                root_path.join(&staged_source)
+            } else {
+                original_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(staged_source)
+            };
+            Ok(StagedFile {
+                original_path,
+                staged_path,
+            })
+        })
+        .await?
+    }
+
+    async fn publish_staged_no_replace(
+        &self,
+        staged: &StagedFile,
+        destination: &str,
+    ) -> Result<()> {
+        let store = self.clone();
+        let staged = staged.clone();
+        let destination = PathBuf::from(destination);
+        tokio::task::spawn_blocking(move || {
+            if staged.staged_path.parent() != staged.original_path.parent() {
+                return Err(anyhow!("staged source must remain beside its original path"));
+            }
+            let destination = store.rooted_relative_path(&destination)?;
+            let destination_dir = store.open_root()?;
+            let root_path = store.normalized_root()?;
+            let internal_staged = staged_relative_path(&root_path, &staged.staged_path);
+            let ambient_source;
+            let (source_dir, staged_source, original_source) = if let Some(relative) = internal_staged {
+                let original = staged_relative_path(&root_path, &staged.original_path)
+                    .ok_or_else(|| anyhow!("staged and original paths cross the store root"))?;
+                (destination_dir, relative, original)
+            } else {
+                let parent = staged.staged_path.parent().ok_or_else(|| {
+                    anyhow!("staged source has no parent: {}", staged.staged_path.display())
+                })?;
+                let staged_name = staged.staged_path.file_name().ok_or_else(|| {
+                    anyhow!("staged source has no file name: {}", staged.staged_path.display())
+                })?;
+                let original_name = staged.original_path.file_name().ok_or_else(|| {
+                    anyhow!("original source has no file name: {}", staged.original_path.display())
+                })?;
+                ambient_source = Dir::open_ambient_dir(parent, ambient_authority())?;
+                (
+                    &ambient_source,
+                    PathBuf::from(staged_name),
+                    PathBuf::from(original_name),
+                )
+            };
+
+            ensure_cap_regular_file(source_dir, &staged_source, "staged source")?;
+            let move_result = match store.move_filesystem.hard_link_staged_to_destination(
+                source_dir,
+                &staged_source,
+                destination_dir,
+                &destination,
+            ) {
+                Ok(()) => ensure_cap_regular_file(
+                    destination_dir,
+                    &destination,
+                    "destination file",
+                )
+                .map(|_| {
+                    remove_staged_source_after_publication(
                         source_dir,
                         &staged_source,
-                        destination_dir,
                         &destination,
-                    ),
-                    Err(error) => Err(anyhow!(
-                        "failed to publish {} without replacing an existing file: {error}",
-                        destination.display()
-                    )),
-                }
-            })();
+                    );
+                }),
+                Err(error) if is_cross_device(&error) => copy_staged_file_no_replace(
+                    source_dir,
+                    &staged_source,
+                    destination_dir,
+                    &destination,
+                ),
+                Err(error) => Err(anyhow!(
+                    "failed to publish {} without replacing an existing file: {error}",
+                    destination.display()
+                )),
+            };
 
             if let Err(error) = move_result {
                 if source_dir.symlink_metadata(&staged_source).is_ok() {
-                    restore_staged_file(source_dir, &staged_source, &source_path).map_err(
+                    restore_staged_file(source_dir, &staged_source, &original_source).map_err(
                         |restore_error| {
                             anyhow!(
                                 "{error}; additionally failed to restore source {}: {restore_error}",
-                                old_path.display()
+                                staged.original_path.display()
                             )
                         },
                     )?;
@@ -624,6 +735,42 @@ impl FileStore for FileSystemStore {
                 return Err(error);
             }
             Ok(())
+        })
+        .await?
+    }
+
+    async fn restore_staged(&self, staged: &StagedFile) -> Result<()> {
+        let store = self.clone();
+        let staged = staged.clone();
+        tokio::task::spawn_blocking(move || {
+            if staged.staged_path.parent() != staged.original_path.parent() {
+                return Err(anyhow!("staged source must remain beside its original path"));
+            }
+            let root_path = store.normalized_root()?;
+            if let Some(staged_relative) = staged_relative_path(&root_path, &staged.staged_path) {
+                let original_relative = staged_relative_path(&root_path, &staged.original_path)
+                    .ok_or_else(|| anyhow!("staged and original paths cross the store root"))?;
+                return restore_staged_file(
+                    store.open_root()?,
+                    &staged_relative,
+                    &original_relative,
+                );
+            }
+            let parent = staged.staged_path.parent().ok_or_else(|| {
+                anyhow!("staged source has no parent: {}", staged.staged_path.display())
+            })?;
+            let staged_name = staged.staged_path.file_name().ok_or_else(|| {
+                anyhow!("staged source has no file name: {}", staged.staged_path.display())
+            })?;
+            let original_name = staged.original_path.file_name().ok_or_else(|| {
+                anyhow!("original source has no file name: {}", staged.original_path.display())
+            })?;
+            let source_dir = Dir::open_ambient_dir(parent, ambient_authority())?;
+            restore_staged_file(
+                &source_dir,
+                Path::new(staged_name),
+                Path::new(original_name),
+            )
         })
         .await?
     }
@@ -687,6 +834,134 @@ mod tests {
     use std::path::PathBuf;
 
     const TEST_DIR: &str = "tests/fixtures/media_dir";
+
+    struct ForcedCrossDevice;
+
+    impl MoveFileSystem for ForcedCrossDevice {
+        fn hard_link_staged_to_destination(
+            &self,
+            _source_dir: &Dir,
+            _staged_source: &Path,
+            _destination_dir: &Dir,
+            _destination: &Path,
+        ) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::CrossesDevices))
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_no_follow_moves_one_regular_identity_to_an_unguessable_sibling() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-stage-regular-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"stable book").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+
+        assert_eq!(staged.original_path, source);
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&staged.staged_path).unwrap(), b"stable book");
+        assert_eq!(staged.staged_path.parent(), source.parent());
+        assert!(staged
+            .staged_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".tvserver-ingest-"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stage_no_follow_rejects_a_source_symlink_without_reading_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-stage-symlink-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = base.join("secret.epub");
+        let source = base.join("Dune.epub");
+        std::fs::write(&target, b"must never be processed").unwrap();
+        symlink(&target, &source).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let result = store.stage_no_follow(source.to_str().unwrap()).await;
+
+        assert!(result.is_err());
+        assert!(source.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"must never be processed");
+        assert!(std::fs::read_dir(&base)
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".tvserver-ingest-")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn rename_no_replace_exdev_seam_publishes_and_removes_source_end_to_end() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-exdev-publish-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        let destination = root.join("Dune.epub");
+        std::fs::write(&source, b"cross-device bytes").unwrap();
+        let store = FileSystemStore::new_with_move_filesystem(
+            root.to_str().unwrap(),
+            Arc::new(ForcedCrossDevice),
+        );
+
+        store
+            .rename_no_replace(source.to_str().unwrap(), destination.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"cross-device bytes");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn rename_no_replace_exdev_seam_restores_source_on_collision_and_cleans_temp() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-exdev-collision-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        let destination = root.join("Dune.epub");
+        std::fs::write(&source, b"incoming").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+        let store = FileSystemStore::new_with_move_filesystem(
+            root.to_str().unwrap(),
+            Arc::new(ForcedCrossDevice),
+        );
+
+        let result = store
+            .rename_no_replace(source.to_str().unwrap(), destination.to_str().unwrap())
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"incoming");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[tokio::test]
     async fn test_list_directory() -> Result<()> {
