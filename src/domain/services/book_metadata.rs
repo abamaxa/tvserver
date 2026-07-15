@@ -440,6 +440,67 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             }
             lease = thumbnail_lock.lock_owned() => lease,
         };
+        let existing = match repository.retrieve_book(checksum).await {
+            Ok(existing) => Some(existing),
+            Err(sqlx::Error::RowNotFound) => None,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    None,
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error.into(), cleanup));
+            }
+        };
+        if let Some(existing) = existing {
+            let canonical_relative = (|| -> anyhow::Result<PathBuf> {
+                validate_collection(&existing.collection)?;
+                let existing_file = Path::new(&existing.file_name);
+                if existing_file.components().count() != 1
+                    || !matches!(
+                        existing_file.components().next(),
+                        Some(std::path::Component::Normal(_))
+                    )
+                {
+                    anyhow::bail!("stored book file name is not a safe path component");
+                }
+                Ok(PathBuf::from(
+                    crate::domain::algorithm::get_book_download_path(
+                        &existing.collection,
+                        &existing.file_name,
+                    ),
+                ))
+            })();
+            let canonical_exists = match canonical_relative {
+                Ok(relative) => storer.regular_file_exists_no_follow(&relative).await,
+                Err(error) => Err(error),
+            };
+            match canonical_exists {
+                Ok(true) => {
+                    let cleanup = cleanup_healthy_duplicate(&storer, &staged, &snapshot).await;
+                    staged_guard.disarm();
+                    cleanup?;
+                    return Ok(Some(existing));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let cleanup = cleanup_prepublication(
+                        &storer,
+                        &staged,
+                        Some(&snapshot),
+                        None,
+                        CleanupMode::Restore,
+                    )
+                    .await;
+                    staged_guard.disarm();
+                    return Err(with_cleanup_error(error, cleanup));
+                }
+            }
+        }
         let thumbnail_preexisted = generated_thumbnail_path.symlink_metadata().is_ok();
         let mut thumbnail_guard = GeneratedThumbnailGuard::new(
             generated_thumbnail_path,
@@ -800,6 +861,28 @@ async fn cleanup_prepublication(
     } else {
         anyhow::bail!(failures.join("; "))
     }
+}
+
+async fn cleanup_healthy_duplicate(
+    storer: &FileStorer,
+    staged: &StagedFile,
+    snapshot: &PrivateSnapshot,
+) -> anyhow::Result<()> {
+    if let Err(error) = storer.remove_private_snapshot(snapshot).await {
+        let restore = storer.restore_staged(staged).await;
+        return Err(with_cleanup_error(
+            anyhow::anyhow!("private snapshot cleanup failed: {error}"),
+            restore,
+        ));
+    }
+    if let Err(error) = storer.discard_staged(staged).await {
+        let restore = storer.restore_staged(staged).await;
+        return Err(with_cleanup_error(
+            anyhow::anyhow!("staged source discard failed: {error}"),
+            restore,
+        ));
+    }
+    Ok(())
 }
 
 fn with_cleanup_error(error: anyhow::Error, cleanup: anyhow::Result<()>) -> anyhow::Error {
@@ -4939,6 +5022,107 @@ mod tests {
         assert_eq!(saved.title, details.title);
         assert_eq!(saved.authors, details.authors);
         assert_eq!(saved.state, details.state);
+    }
+
+    #[tokio::test]
+    async fn identical_second_ingestion_keeps_first_file_and_row_canonical() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let first_source = source_dir.join("first.epub");
+        let second_source = source_dir.join("second.epub");
+        write_epub(
+            &first_source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata><dc:title>First Canonical Copy</dc:title></metadata><manifest/>
+               </package>"#,
+            &[],
+        );
+        fs::copy(&first_source, &second_source).unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let first = generate_book_metadata_with_roots(
+            first_source,
+            storer.clone(),
+            repository.clone(),
+            Some("originals".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let canonical = repository.retrieve_book(first.checksum).await.unwrap();
+        let second = generate_book_metadata_with_roots(
+            second_source.clone(),
+            storer,
+            repository.clone(),
+            Some("reprints".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(second, canonical);
+        assert!(book_root.join("Originals/first.epub").exists());
+        assert!(!book_root.join("Reprints/second.epub").exists());
+        assert!(!second_source.exists());
+        let saved = repository.retrieve_book(first.checksum).await.unwrap();
+        assert_eq!(saved.collection, "Originals");
+        assert_eq!(saved.file_name, "first.epub");
+    }
+
+    #[tokio::test]
+    async fn identical_ingestion_repairs_checksum_row_when_canonical_file_is_missing() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("repair.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata><dc:title>Repaired Copy</dc:title></metadata><manifest/>
+               </package>"#,
+            &[],
+        );
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let mut stale = BookDetails::new(
+            "missing.epub".to_string(),
+            "Originals".to_string(),
+            &book_root.join("Originals/missing.epub"),
+            BookFormat::Epub,
+        );
+        stale.checksum = checksum;
+        repository.save_book(&stale).await.unwrap();
+
+        let repaired = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("reprints".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(repaired.checksum, checksum);
+        assert!(!source.exists());
+        assert!(!book_root.join("Originals/missing.epub").exists());
+        assert!(book_root.join("Reprints/repair.epub").exists());
+        let saved = repository.retrieve_book(checksum).await.unwrap();
+        assert_eq!(saved.collection, "Reprints");
+        assert_eq!(saved.file_name, "repair.epub");
     }
 
     #[tokio::test]
