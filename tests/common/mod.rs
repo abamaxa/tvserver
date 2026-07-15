@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
+mod context;
 mod json_fetcher;
+mod media_checker;
 mod media_store;
 mod player;
 mod repository;
@@ -10,10 +12,11 @@ mod spawner;
 mod task_manager;
 mod text_fetcher;
 mod torrents;
-mod media_checker;
-mod context;
 
+#[allow(unused_imports)]
+pub use context::{get_book_services, get_context};
 pub use json_fetcher::get_json_fetcher;
+pub use media_checker::get_checker;
 #[allow(unused_imports)]
 pub use media_store::get_media_store;
 #[allow(unused_imports)]
@@ -27,6 +30,3 @@ pub use spawner::{get_no_spawner, get_spawner};
 pub use task_manager::get_task_manager;
 pub use text_fetcher::get_text_fetcher;
 pub use torrents::get_torrent_downloader;
-pub use media_checker::get_checker;
-#[allow(unused_imports)]
-pub use context::get_context;
