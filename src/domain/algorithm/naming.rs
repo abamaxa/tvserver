@@ -115,6 +115,21 @@ pub fn path_to_collection_id(path: &Path) -> Option<String> {
         .map(|components| components.join("/"))
 }
 
+pub fn collection_id_to_path(collection: &str) -> Option<PathBuf> {
+    if collection.is_empty() {
+        return Some(PathBuf::new());
+    }
+
+    let mut path = PathBuf::new();
+    for segment in collection.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\') {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
+}
+
 pub fn get_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> String {
     let short_path = match path.strip_prefix(root.as_ref()) {
         Ok(p) => PathBuf::from(p),
@@ -304,6 +319,33 @@ mod test {
         );
         assert_eq!(path_to_collection_id(Path::new("")), Some(String::new()));
         assert_eq!(path_to_collection_id(Path::new("../Fiction")), None);
+    }
+
+    #[test]
+    fn collection_id_to_path_accepts_empty_and_nested_canonical_ids() {
+        assert_eq!(collection_id_to_path(""), Some(PathBuf::new()));
+        assert_eq!(
+            collection_id_to_path("Fiction/Classics"),
+            Some(PathBuf::from("Fiction").join("Classics"))
+        );
+    }
+
+    #[test]
+    fn collection_id_to_path_rejects_noncanonical_and_host_dependent_ids() {
+        for collection in [
+            "../Fiction",
+            "Fiction/./Classics",
+            "Fiction//Classics",
+            "/Fiction",
+            "Fiction/",
+            r"Fiction\Classics",
+        ] {
+            assert_eq!(
+                collection_id_to_path(collection),
+                None,
+                "expected {collection:?} to be rejected"
+            );
+        }
     }
 
     #[cfg(windows)]

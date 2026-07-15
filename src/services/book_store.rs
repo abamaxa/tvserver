@@ -3,7 +3,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    algorithm::{get_book_thumbnail_url, path_to_collection_id, title_case},
+    algorithm::{
+        collection_id_to_path, get_book_thumbnail_url, path_to_collection_id, title_case,
+    },
     config::{get_book_dir, get_book_thumbnail_dir},
     models::{
         is_default_book_thumbnail, BookCollectionDetails, BookCollectionItem,
@@ -361,25 +363,11 @@ fn safe_file_name(file_name: &str, description: &str) -> Result<PathBuf> {
 }
 
 fn safe_relative_collection(collection: &str) -> Result<PathBuf> {
-    let original = Path::new(collection);
-    let mut relative = PathBuf::new();
-    for component in original.components() {
-        match component {
-            Component::Normal(part) => relative.push(part),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "book collection must be a relative path without traversal: {collection}"
-                ));
-            }
-        }
-    }
-    if original.as_os_str() == relative.as_os_str() {
-        Ok(relative)
-    } else {
-        Err(anyhow::anyhow!(
-            "book collection must already be canonical: {collection}"
-        ))
-    }
+    collection_id_to_path(collection).ok_or_else(|| {
+        anyhow::anyhow!(
+            "book collection must be a relative path without traversal: {collection}"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -532,6 +520,54 @@ mod tests {
         assert!(destination.exists());
         assert!(!source.exists());
         assert!(!layout.movie_root.join("Science Fiction/Dune.epub").exists());
+    }
+
+    #[tokio::test]
+    async fn add_file_uses_nested_suggested_collection_as_native_components() {
+        let layout = TestLayout::new("nested-suggested-collection");
+        let source = layout.source_root.join("Emma.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let destination = store
+            .add_file(&source, Some("Fiction/Classics".to_string()))
+            .await
+            .unwrap();
+
+        let expected = layout
+            .book_root
+            .join("Fiction")
+            .join("Classics")
+            .join("Emma.epub");
+        assert_eq!(destination, expected);
+        assert!(expected.exists());
+        assert!(!source.exists());
+    }
+
+    #[tokio::test]
+    async fn add_file_rejects_backslash_suggested_collection_before_creating_destination() {
+        let layout = TestLayout::new("backslash-suggested-collection");
+        let source = layout.source_root.join("Emma.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let result = store
+            .add_file(&source, Some(r"Fiction\Classics".to_string()))
+            .await;
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!layout.book_root.join(r"Fiction\Classics").exists());
+        assert!(!layout.book_root.join("Fiction").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn safe_relative_collection_accepts_portable_nested_id_on_windows() {
+        assert_eq!(
+            super::safe_relative_collection("Fiction/Classics").unwrap(),
+            PathBuf::from("Fiction").join("Classics")
+        );
     }
 
     #[tokio::test]
@@ -704,6 +740,31 @@ mod tests {
 
         assert!(!book_path.exists());
         assert!(!thumbnail_path.exists());
+        assert!(matches!(
+            repository.retrieve_book(book.checksum).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_resolves_nested_collection_as_native_components() {
+        let layout = TestLayout::new("delete-nested-collection");
+        let book_path = layout
+            .book_root
+            .join("Fiction")
+            .join("Classics")
+            .join("Emma.epub");
+        tokio::fs::create_dir_all(book_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&book_path, b"book").await.unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let book = sample_book(13, "Fiction/Classics", "Emma.epub");
+        repository.save_book(&book).await.unwrap();
+
+        store.delete(book.checksum).await.unwrap();
+
+        assert!(!book_path.exists());
         assert!(matches!(
             repository.retrieve_book(book.checksum).await,
             Err(sqlx::Error::RowNotFound)
