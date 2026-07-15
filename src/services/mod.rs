@@ -18,5 +18,5 @@ pub use pirate_bay::{PirateClient, PirateFetcher};
 pub use search::{SearchEngine, SearchEngineMap, SearchService};
 pub use sharing::SharingService;
 pub use task_manager::TaskManager;
-pub use video_information::MetaDataManager;
+pub use video_information::{MetaDataManager, MetaDataManagerHandle};
 pub use youtube::{YoutubeClient, YoutubeFetcher, YoutubeResult};
