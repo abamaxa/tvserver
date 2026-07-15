@@ -8,18 +8,20 @@ use crate::domain::{
     traits::{FileStorer, Repository},
 };
 use lopdf::{decode_text_string, Dictionary, Document};
+use once_cell::sync::Lazy;
 use quick_xml::{
     events::{BytesStart, Event},
     Reader,
 };
 use serde_json::json;
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex, Weak,
     },
 };
 use zip::ZipArchive;
@@ -38,6 +40,8 @@ const SVG_FONT_BYTES: &[u8] = include_bytes!(concat!(
     "/assets/book/FiraSans-Regular.ttf"
 ));
 static NEXT_THUMBNAIL_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+static BOOK_DESTINATION_LOCKS: Lazy<StdMutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BookMetadataExtraction {
@@ -95,6 +99,33 @@ async fn generate_book_metadata_with_roots(
     thumbnail_root: PathBuf,
 ) -> anyhow::Result<Option<BookDetails>> {
     let format = book_format(&path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("book path has no UTF-8 file name: {}", path.display()))?
+        .to_string();
+    let collection = match suggested_collection.as_deref() {
+        Some(collection) => title_case(collection),
+        None => collection_from_source(&path, &book_root)?,
+    };
+    validate_collection(&collection)?;
+    let destination_directory = book_root.join(&collection);
+    let destination = destination_directory.join(&file_name);
+    let source_absolute = absolute_path(&path)?;
+    let destination_absolute = absolute_path(&destination)?;
+    let destination_lock = destination_lock(&destination_absolute)?;
+    let _destination_guard = destination_lock.lock_owned().await;
+    if source_absolute != destination_absolute {
+        match tokio::fs::symlink_metadata(&destination).await {
+            Ok(_) => anyhow::bail!(
+                "book destination already exists; refusing to replace it: {}",
+                destination.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     let metadata = tokio::fs::symlink_metadata(&path).await?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         anyhow::bail!(
@@ -111,16 +142,6 @@ async fn generate_book_metadata_with_roots(
     }
 
     let checksum = super::video_metadata::calculate_checksum(&path).await?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("book path has no UTF-8 file name: {}", path.display()))?
-        .to_string();
-    let collection = match suggested_collection.as_deref() {
-        Some(collection) => title_case(collection),
-        None => collection_from_source(&path, &book_root)?,
-    };
-    validate_collection(&collection)?;
 
     let mut details = BookDetails::new(file_name.clone(), collection.clone(), &path, format);
     details.checksum = checksum;
@@ -156,10 +177,8 @@ async fn generate_book_metadata_with_roots(
         }
     }
 
-    let destination_directory = book_root.join(&collection);
-    let destination = destination_directory.join(&file_name);
     storer.create_folder(&destination_directory).await?;
-    if absolute_path(&path)? != absolute_path(&destination)? {
+    if source_absolute != destination_absolute {
         let source = path.to_str().ok_or_else(|| {
             anyhow::anyhow!("book source path is not valid UTF-8: {}", path.display())
         })?;
@@ -180,6 +199,13 @@ async fn generate_book_metadata_with_roots(
 }
 
 fn apply_extraction(details: &mut BookDetails, extraction: BookMetadataExtraction) {
+    if extraction.metadata.extraction_error.is_some() {
+        details.thumbnail = DEFAULT_BOOK_THUMBNAIL.to_string();
+        details.metadata = extraction.metadata;
+        details.state = BookState::MetadataError;
+        return;
+    }
+
     if let Some(title) = extraction.title {
         details.title = title;
     }
@@ -216,6 +242,9 @@ fn collection_from_source(path: &Path, book_root: &Path) -> anyhow::Result<Strin
     let Some(parent) = path.parent() else {
         return Ok(String::new());
     };
+    if parent.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
     let parent = absolute_path(parent)?;
     let book_root = absolute_path(book_root)?;
     match parent.strip_prefix(&book_root) {
@@ -247,6 +276,19 @@ fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
     std::path::absolute(path).map_err(|error| {
         anyhow::anyhow!("could not make path absolute ({}): {error}", path.display())
     })
+}
+
+fn destination_lock(path: &Path) -> anyhow::Result<Arc<tokio::sync::Mutex<()>>> {
+    let mut locks = BOOK_DESTINATION_LOCKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("book destination reservation lock is poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
 }
 
 async fn is_book_file_being_written(path: &Path) -> std::io::Result<bool> {
@@ -1348,6 +1390,7 @@ fn isbn_value(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use base64::Engine as _;
     use lopdf::{dictionary, text_string, Document, Object};
     use std::{
@@ -1364,8 +1407,9 @@ mod tests {
     use crate::{
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
-            models::{BookFormat, BookState},
-            traits::{FileStorer, Repository},
+            messagebus::{LocalMessageExchange, MessageFilter},
+            models::{BookFormat, BookState, CollectionItem, VideoDetails},
+            traits::{Databaser, FileStore, FileStorer, Repository, StoreObject},
         },
     };
 
@@ -2262,6 +2306,357 @@ mod tests {
         ));
         let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
         (storer, repository)
+    }
+
+    struct FailingRenameStore {
+        inner: FileStorer,
+    }
+
+    #[async_trait]
+    impl FileStore for FailingRenameStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, _old_path: &str, _new_path: &str) -> anyhow::Result<()> {
+            anyhow::bail!("forced book move failure")
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    struct FailingSaveRepository {
+        inner: Repository,
+    }
+
+    #[async_trait]
+    impl Databaser for FailingSaveRepository {
+        async fn save_book(&self, _details: &BookDetails) -> Result<i64, sqlx::Error> {
+            Err(sqlx::Error::Protocol("forced book save failure".to_string()))
+        }
+
+        async fn list_book_collections(
+            &self,
+            collection: &str,
+        ) -> Result<Vec<String>, sqlx::Error> {
+            self.inner.list_book_collections(collection).await
+        }
+
+        async fn list_books(&self, collection: &str) -> Result<Vec<BookDetails>, sqlx::Error> {
+            self.inner.list_books(collection).await
+        }
+
+        async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error> {
+            self.inner.list_all_books().await
+        }
+
+        async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error> {
+            self.inner.retrieve_book(checksum).await
+        }
+
+        async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error> {
+            self.inner.delete_book(checksum).await
+        }
+
+        async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
+            self.inner.save_video(details).await
+        }
+
+        async fn list_collection(&self, collection: &str) -> Result<Vec<String>, sqlx::Error> {
+            self.inner.list_collection(collection).await
+        }
+
+        async fn list_videos(&self, collection: &str) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_videos(collection).await
+        }
+
+        async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error> {
+            self.inner.list_all_series().await
+        }
+
+        async fn list_series_details(
+            &self,
+            series: &str,
+            season: Option<&str>,
+        ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_series_details(series, season).await
+        }
+
+        async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error> {
+            self.inner.retrieve_video(checksum).await
+        }
+
+        async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error> {
+            self.inner.delete_video(checksum).await
+        }
+
+        async fn update_watched_video(
+            &self,
+            checksum: i64,
+            current_time: f64,
+        ) -> Result<(), sqlx::Error> {
+            self.inner
+                .update_watched_video(checksum, current_time)
+                .await
+        }
+
+        async fn get_history(
+            &self,
+            offset: i32,
+            limit: i32,
+        ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.get_history(offset, limit).await
+        }
+
+        async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_all_videos().await
+        }
+    }
+
+    async fn repository_with_book_listener(
+    ) -> (Repository, crate::domain::messages::LocalMessageReceiver) {
+        let exchange = LocalMessageExchange::new();
+        let receiver = exchange
+            .listen_for_messages(MessageFilter::Book)
+            .await
+            .unwrap();
+        let repository: Repository = Arc::new(
+            SqlRepository::new(":memory:", Some(exchange.new_sender()))
+                .await
+                .unwrap(),
+        );
+        (repository, receiver)
+    }
+
+    async fn assert_no_book_event(receiver: &mut crate::domain::messages::LocalMessageReceiver) {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn ingestion_malformed_partial_epub_retains_only_filename_fallback_fields() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("fallback_title.epub");
+        write_epub(
+            &source,
+            "<package><metadata><title>Leaked Title</title><creator>Leaked Author</creator></metadata><manifest>",
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            Some("fallbacks".to_string()),
+            book_root,
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(details.title, "fallback title");
+        assert!(details.authors.is_empty());
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(details.state, BookState::MetadataError);
+        assert!(details.metadata.extraction_error.is_some());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.title, "fallback title");
+        assert!(saved.authors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingestion_concurrent_destination_collision_has_one_winner_without_overwrite() {
+        let temp = TestDir::new();
+        let first_dir = temp.path().join("first");
+        let second_dir = temp.path().join("second");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let first = first_dir.join("shared.pdf");
+        let second = second_dir.join("shared.pdf");
+        write_pdf(&first, Some(dictionary! { "Title" => text_string("First") }), 1);
+        write_pdf(
+            &second,
+            Some(dictionary! { "Title" => text_string("Second") }),
+            2,
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let (first_result, second_result) = tokio::join!(
+            generate_book_metadata_with_roots(
+                first.clone(),
+                storer.clone(),
+                repository.clone(),
+                Some("collision".to_string()),
+                book_root.clone(),
+                thumbnail_root.clone(),
+            ),
+            generate_book_metadata_with_roots(
+                second.clone(),
+                storer,
+                repository.clone(),
+                Some("collision".to_string()),
+                book_root.clone(),
+                thumbnail_root,
+            )
+        );
+
+        let (winner, loser_source) = match (first_result, second_result) {
+            (Ok(Some(winner)), Err(_)) => (winner, second),
+            (Err(_), Ok(Some(winner))) => (winner, first),
+            results => panic!("expected exactly one collision winner, got {results:?}"),
+        };
+        let destination = book_root.join("Collision/shared.pdf");
+        assert!(destination.exists());
+        assert!(loser_source.exists());
+        assert_eq!(
+            super::super::video_metadata::calculate_checksum(&destination)
+                .await
+                .unwrap(),
+            winner.checksum
+        );
+        let saved = repository.retrieve_book(winner.checksum).await.unwrap();
+        assert_eq!(saved.title, winner.title);
+        assert_eq!(repository.list_all_books().await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ingestion_parentless_relative_source_targets_book_root() {
+        let book_root = Path::new("configured-books");
+        let source = Path::new("book.pdf");
+
+        let collection = collection_from_source(source, book_root).unwrap();
+        let destination = book_root
+            .join(&collection)
+            .join(source.file_name().unwrap());
+
+        assert_eq!(collection, "");
+        assert_eq!(destination, book_root.join("book.pdf"));
+    }
+
+    #[tokio::test]
+    async fn ingestion_zero_byte_input_creates_no_row_or_event() {
+        let temp = TestDir::new();
+        let source = temp.path().join("empty.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::write(&source, []).unwrap();
+        let inner_storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
+        let (repository, mut receiver) = repository_with_book_listener().await;
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            inner_storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.unwrap_err().to_string().contains("zero-byte"));
+        assert!(source.exists());
+        assert!(!book_root.join("empty.pdf").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert_no_book_event(&mut receiver).await;
+    }
+
+    #[tokio::test]
+    async fn ingestion_move_failure_propagates_without_row_or_event() {
+        let temp = TestDir::new();
+        let source = temp.path().join("move-failure.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(&source, None, 1);
+        let inner_storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
+        let storer: FileStorer = Arc::new(FailingRenameStore {
+            inner: inner_storer,
+        });
+        let (repository, mut receiver) = repository_with_book_listener().await;
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("failures".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forced book move failure"));
+        assert!(source.exists());
+        assert!(!book_root.join("Failures/move-failure.pdf").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert_no_book_event(&mut receiver).await;
+    }
+
+    #[tokio::test]
+    async fn ingestion_save_failure_leaves_moved_orphan_without_row_or_event() {
+        let temp = TestDir::new();
+        let source = temp.path().join("save-failure.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(&source, None, 1);
+        let storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
+        let (inner, mut receiver) = repository_with_book_listener().await;
+        let repository: Repository = Arc::new(FailingSaveRepository {
+            inner: inner.clone(),
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository,
+            Some("failures".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forced book save failure"));
+        assert!(!source.exists());
+        assert!(book_root.join("Failures/save-failure.pdf").exists());
+        assert!(inner.list_all_books().await.unwrap().is_empty());
+        assert_no_book_event(&mut receiver).await;
     }
 
     #[tokio::test]
