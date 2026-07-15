@@ -17,7 +17,7 @@ use axum::routing::any;
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{rejection::PathRejection, ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, patch},
@@ -184,14 +184,19 @@ fn book_store_error_status(error: &anyhow::Error) -> StatusCode {
 fn parse_book_checksum(checksum: &str) -> Result<i64, StdResponse> {
     checksum
         .parse::<i64>()
-        .map_err(|_| std_error(BAD_REQUEST, "invalid book checksum".to_string()))
+        .map_err(|_| invalid_book_checksum_error())
+}
+
+fn invalid_book_checksum_error() -> StdResponse {
+    std_error(BAD_REQUEST, "invalid book checksum".to_string())
 }
 
 #[debug_handler]
 async fn get_book(
     state: State<SharedState>,
-    checksum: Path<String>,
+    checksum: Result<Path<String>, PathRejection>,
 ) -> Result<Json<BookDetails>, (StatusCode, Json<Response>)> {
+    let checksum = checksum.map_err(|_| invalid_book_checksum_error())?;
     let checksum = parse_book_checksum(&checksum.0)?;
 
     match state.get_repository().retrieve_book(checksum).await {
@@ -212,7 +217,14 @@ async fn get_book(
 }
 
 #[debug_handler]
-async fn delete_book(state: State<SharedState>, checksum: Path<String>) -> StdResponse {
+async fn delete_book(
+    state: State<SharedState>,
+    checksum: Result<Path<String>, PathRejection>,
+) -> StdResponse {
+    let checksum = match checksum {
+        Ok(checksum) => checksum,
+        Err(_) => return invalid_book_checksum_error(),
+    };
     let checksum = match parse_book_checksum(&checksum.0) {
         Ok(checksum) => checksum,
         Err(response) => return response,

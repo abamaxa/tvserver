@@ -225,7 +225,7 @@ async fn invalid_book_checksums_return_json_bad_request() -> Result<()> {
     let client = reqwest::Client::new();
 
     for method in [Method::GET, Method::DELETE] {
-        for checksum in ["not-a-number", "9223372036854775808"] {
+        for checksum in ["not-a-number", "9223372036854775808", "%FF"] {
             let response = client
                 .request(
                     method.clone(),
