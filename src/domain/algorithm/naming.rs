@@ -230,8 +230,17 @@ pub fn get_thumbnails_url(thumbnails: &Vec<String>) -> Vec<String> {
 
 #[cfg(feature = "webserver")]
 pub fn get_book_url(collection: &str, file_name: &str) -> String {
-    let download_path = get_book_download_path(collection, file_name);
-    format!("/api/books/download/{}", download_path)
+    let mut segments = Path::new(collection)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => part
+                .to_str()
+                .map(|part| urlencoding::encode(part).into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    segments.push(urlencoding::encode(&get_book_thumbnail_file_name(file_name)).into_owned());
+    format!("/api/books/download/{}", segments.join("/"))
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -370,6 +379,15 @@ mod test {
         assert_eq!(
             get_collection_and_file_from_rooted_path(book_path, "/library/books"),
             ("Fiction/Classics".to_string(), "novel.epub".to_string())
+        );
+    }
+
+    #[cfg(feature = "webserver")]
+    #[test]
+    fn get_book_url_percent_encodes_each_path_segment() {
+        assert_eq!(
+            get_book_url("Programming/C# & Rust", "100%? Complete.epub"),
+            "/api/books/download/Programming/C%23%20%26%20Rust/100%25%3F%20Complete.epub"
         );
     }
 }

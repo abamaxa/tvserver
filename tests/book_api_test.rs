@@ -2,6 +2,7 @@ mod common;
 
 use std::{
     env,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -24,6 +25,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use sqlx::{Connection, SqliteConnection};
 use tokio::{fs, task::JoinHandle};
+use zip::{write::SimpleFileOptions, ZipWriter};
 
 use crate::common::{
     get_book_services_at, get_checker, get_context_with_book_services, get_media_store,
@@ -56,6 +58,40 @@ fn sample_book(checksum: i64, collection: &str, file_name: &str) -> BookDetails 
         updated_on: now,
         ..BookDetails::default()
     }
+}
+
+fn epub_fixture() -> Result<Vec<u8>> {
+    let mut epub = ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    epub.start_file("mimetype", stored)?;
+    epub.write_all(b"application/epub+zip")?;
+
+    let deflated =
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    epub.start_file("META-INF/container.xml", deflated)?;
+    epub.write_all(
+        br#"<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles>
+    <rootfile full-path="EPUB/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"#,
+    )?;
+    epub.start_file("EPUB/content.opf", deflated)?;
+    epub.write_all(
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="book-id">reserved-characters</dc:identifier>
+    <dc:title>Reserved Characters</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest/>
+  <spine/>
+</package>"#,
+    )?;
+
+    Ok(epub.finish()?.into_inner())
 }
 
 async fn start_server(port: u16) -> Result<(JoinHandle<Result<()>>, Repository)> {
@@ -317,6 +353,51 @@ async fn serves_nested_book_downloads_from_book_dir() -> Result<()> {
         .send()
         .await?;
     assert_eq!(public_response.status(), StatusCode::UNAUTHORIZED);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn serves_book_downloads_with_percent_encoded_url_segments() -> Result<()> {
+    let temp_root = TempRoot::new("reserved-download", 57211)?;
+    let book_root = temp_root.0.join("books");
+    let book_thumbnail_root = book_root.join(".thumbnails");
+    let collection = "Programming/C# % & Rust";
+    let file_name = "100% # & Complete.epub";
+    let book_path = book_root.join(collection).join(file_name);
+    fs::create_dir_all(book_path.parent().unwrap()).await?;
+    let epub = epub_fixture()?;
+    fs::write(&book_path, &epub).await?;
+
+    let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
+    repository
+        .save_book(&sample_book(104, collection, file_name))
+        .await?;
+    let (server, _) =
+        start_server_with_repository(57211, repository, &book_root, &book_thumbnail_root).await?;
+
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let book: Value = client
+        .get("http://localhost:57211/api/book/104")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        book["url"],
+        "/api/books/download/Programming/C%23%20%25%20%26%20Rust/100%25%20%23%20%26%20Complete.epub"
+    );
+
+    let response = client
+        .get(format!(
+            "http://localhost:57211{}",
+            book["url"].as_str().unwrap()
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(response.bytes().await?.as_ref(), epub);
 
     Ok(server.abort())
 }

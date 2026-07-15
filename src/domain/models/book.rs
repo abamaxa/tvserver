@@ -388,7 +388,7 @@ mod test {
         #[cfg(feature = "webserver")]
         assert_eq!(
             value["url"],
-            json!("/api/books/download/Programming/Clean Code.epub")
+            json!("/api/books/download/Programming/Clean%20Code.epub")
         );
         #[cfg(not(feature = "webserver"))]
         assert_eq!(
@@ -623,7 +623,7 @@ mod test {
         #[cfg(feature = "webserver")]
         assert_eq!(
             get_book_url("Programming", "Clean Code.epub"),
-            "/api/books/download/Programming/Clean Code.epub"
+            "/api/books/download/Programming/Clean%20Code.epub"
         );
         #[cfg(feature = "webserver")]
         assert_eq!(get_book_url("", "Dune.pdf"), "/api/books/download/Dune.pdf");
