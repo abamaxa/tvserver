@@ -502,6 +502,21 @@ async fn generate_book_metadata_with_roots_and_cancellation(
 
         let snapshot_before_verification = staged_fingerprint(&snapshot.path).await;
         let verified_checksum = super::video_metadata::calculate_checksum(&snapshot.path).await;
+        let snapshot_seal = match storer.seal_private_snapshot(&snapshot).await {
+            Ok(seal) => seal,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    Some(&mut thumbnail_guard),
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
         let snapshot_after_verification = staged_fingerprint(&snapshot.path).await;
         let snapshot_is_verified = matches!(
             (&snapshot_before_verification, &verified_checksum, &snapshot_after_verification),
@@ -558,11 +573,17 @@ async fn generate_book_metadata_with_roots_and_cancellation(
                 details.state = BookState::MetadataError;
             }
         }
-        accepted = Some((details, thumbnail_guard, snapshot, thumbnail_lease));
+        accepted = Some((
+            details,
+            thumbnail_guard,
+            snapshot,
+            snapshot_seal,
+            thumbnail_lease,
+        ));
         break;
     }
 
-    let (mut details, mut thumbnail_guard, snapshot, _thumbnail_lease) = match accepted {
+    let (mut details, mut thumbnail_guard, snapshot, snapshot_seal, _thumbnail_lease) = match accepted {
         Some(accepted) => accepted,
         None => {
             let error = anyhow::anyhow!(
@@ -601,7 +622,11 @@ async fn generate_book_metadata_with_roots_and_cancellation(
         ));
     }
     if let Err(error) = storer
-        .publish_private_snapshot_no_replace(&snapshot, destination_path)
+        .publish_private_snapshot_no_replace(
+            &snapshot,
+            destination_path,
+            &snapshot_seal,
+        )
         .await
     {
         let thumbnail_cleanup = thumbnail_guard.cleanup(&storer).await;
@@ -2000,6 +2025,7 @@ mod tests {
     use crate::{
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
+            algorithm::file_integrity::FileSeal,
             messagebus::{LocalMessageExchange, MessageFilter},
             models::{BookFormat, BookState, CollectionItem, VideoDetails},
             traits::{Databaser, FileStore, FileStorer, Repository, StagedFile, StoreObject},
@@ -2905,6 +2931,11 @@ mod tests {
         inner: FileStorer,
     }
 
+    struct PostSealMutationStore {
+        inner: FileStorer,
+        seal_calls: AtomicUsize,
+    }
+
     struct DestinationRaceStore {
         inner: FileStorer,
     }
@@ -2957,6 +2988,111 @@ mod tests {
     }
 
     #[async_trait]
+    impl FileStore for PostSealMutationStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            let seal = self.inner.seal_private_snapshot(snapshot).await?;
+            self.seal_calls.fetch_add(1, Ordering::SeqCst);
+            let modified = std::fs::metadata(&snapshot.path)?.modified().ok();
+            let mut bytes = std::fs::read(&snapshot.path)?;
+            let last = bytes
+                .last_mut()
+                .ok_or_else(|| anyhow::anyhow!("test snapshot must not be empty"))?;
+            *last ^= 1;
+            std::fs::write(&snapshot.path, bytes)?;
+            if let Some(modified) = modified {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&snapshot.path)?
+                    .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+            }
+            Ok(seal)
+        }
+
+        async fn publish_private_snapshot_no_replace(
+            &self,
+            snapshot: &PrivateSnapshot,
+            destination: &str,
+            expected_seal: &FileSeal,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
+                .await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner.publish_staged_no_replace(staged, destination).await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    #[async_trait]
     impl FileStore for CleanupAuditStore {
         async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
             self.inner.create_folder(path).await
@@ -3000,13 +3136,21 @@ mod tests {
             Ok(snapshot)
         }
 
+        async fn seal_private_snapshot(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
         async fn publish_private_snapshot_no_replace(
             &self,
             snapshot: &PrivateSnapshot,
             destination: &str,
+            expected_seal: &FileSeal,
         ) -> anyhow::Result<()> {
             self.inner
-                .publish_private_snapshot_no_replace(snapshot, destination)
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
                 .await
         }
 
@@ -3016,6 +3160,10 @@ mod tests {
         ) -> anyhow::Result<()> {
             self.snapshot_cleanup_calls.fetch_add(1, Ordering::SeqCst);
             anyhow::bail!("forced snapshot cleanup failure")
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
         }
 
         async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
@@ -3102,13 +3250,21 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
-        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str) -> anyhow::Result<()> {
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
             self.block(BlockingFilePhase::Publication).await;
-            self.inner.publish_private_snapshot_no_replace(snapshot, destination).await
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
         }
 
         async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
             self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
         }
 
         async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
@@ -3198,15 +3354,23 @@ mod tests {
             Ok(snapshot)
         }
 
-        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str) -> anyhow::Result<()> {
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
             if self.phase == SnapshotMutationPhase::Publication {
                 self.mutate_staged_once().await?;
             }
-            self.inner.publish_private_snapshot_no_replace(snapshot, destination).await
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
         }
 
         async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
             self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
         }
 
         async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
@@ -3286,12 +3450,20 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
-        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str) -> anyhow::Result<()> {
-            self.inner.publish_private_snapshot_no_replace(snapshot, destination).await
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
         }
 
         async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
             self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
         }
 
         async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
@@ -3372,13 +3544,21 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
-        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str) -> anyhow::Result<()> {
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
             self.create_competing_destination(destination).await?;
-            self.inner.publish_private_snapshot_no_replace(snapshot, destination).await
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
         }
 
         async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
             self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
         }
 
         async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
@@ -3451,12 +3631,20 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
-        async fn publish_private_snapshot_no_replace(&self, _snapshot: &PrivateSnapshot, _destination: &str) -> anyhow::Result<()> {
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, _snapshot: &PrivateSnapshot, _destination: &str, _expected_seal: &FileSeal) -> anyhow::Result<()> {
             anyhow::bail!("forced book move failure")
         }
 
         async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
             self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
         }
 
         async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
@@ -3933,6 +4121,52 @@ mod tests {
             fs::read(book_root.join("Copy Boundary/copy-boundary.epub")).unwrap(),
             replacement_bytes
         );
+        let snapshot_dir = book_root.join(".tvserver-book-snapshots");
+        assert!(fs::read_dir(snapshot_dir).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn ingestion_rejects_snapshot_mutated_after_post_extraction_seal() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("mutated.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let original_source = fs::read(&source).unwrap();
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(PostSealMutationStore {
+            inner,
+            seal_calls: AtomicUsize::new(0),
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            Some("sealed".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("integrity"), "{error}");
+        assert_eq!(store.seal_calls.load(Ordering::SeqCst), 1);
+        assert!(!book_root.join("Sealed/mutated.epub").exists());
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert!(!thumbnail_root.join(format!("{checksum}.jpg")).exists());
         let snapshot_dir = book_root.join(".tvserver-book-snapshots");
         assert!(fs::read_dir(snapshot_dir).unwrap().next().is_none());
     }

@@ -1,4 +1,7 @@
-use crate::domain::models::VideoDetails;
+use crate::domain::{
+    algorithm::file_integrity::{seal_reader, FileSeal},
+    models::VideoDetails,
+};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use cap_fs_ext::{
@@ -12,7 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::{fs, io::AsyncWriteExt};
@@ -223,6 +226,14 @@ impl FileSystemStore {
             Err(error) => Err(error.into()),
         }
     }
+
+    fn private_snapshot_relative_path(&self, snapshot: &PrivateSnapshot) -> Result<PathBuf> {
+        let snapshot_relative = self.rooted_relative_path(&snapshot.path)?;
+        if snapshot_relative.parent() != Some(Path::new(PRIVATE_SNAPSHOT_DIRECTORY)) {
+            return Err(anyhow!("private snapshot is outside the snapshot directory"));
+        }
+        Ok(snapshot_relative)
+    }
 }
 
 fn append_relative_components(components: &mut Vec<OsString>, path: &Path) -> Result<()> {
@@ -404,6 +415,89 @@ fn copy_staged_file_no_replace(
     })();
     if result.is_err() {
         let _ = destination_dir.remove_file(&temporary);
+    }
+    result
+}
+
+fn copy_and_seal<R: Read, W: Write>(source: &mut R, destination: &mut W) -> io::Result<FileSeal> {
+    struct CopyReader<'a, R, W> {
+        source: &'a mut R,
+        destination: &'a mut W,
+    }
+
+    impl<R: Read, W: Write> Read for CopyReader<'_, R, W> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let read = self.source.read(buffer)?;
+            self.destination.write_all(&buffer[..read])?;
+            Ok(read)
+        }
+    }
+
+    seal_reader(&mut CopyReader {
+        source,
+        destination,
+    })
+}
+
+fn copy_private_snapshot_no_replace_verified(
+    root_dir: &Dir,
+    snapshot: &Path,
+    destination: &Path,
+    expected_seal: &FileSeal,
+) -> Result<()> {
+    let mut source_options = OpenOptions::new();
+    source_options.read(true).follow(FollowSymlinks::No);
+    let mut source = root_dir.open_with(snapshot, &source_options)?;
+    let source_metadata = source.metadata()?;
+    if !source_metadata.is_file() {
+        return Err(anyhow!("private snapshot must be a regular file"));
+    }
+
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new(""));
+    let temporary = destination_parent.join(unique_staging_name("tvserver-verified-copy"));
+    let mut destination_options = OpenOptions::new();
+    destination_options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    let mut copied = root_dir.open_with(&temporary, &destination_options)?;
+
+    let result = (|| -> Result<()> {
+        let actual_seal = copy_and_seal(&mut source, &mut copied)?;
+        root_dir.set_permissions(&temporary, source_metadata.permissions())?;
+        copied.sync_all()?;
+        if actual_seal != *expected_seal {
+            return Err(anyhow!(
+                "private snapshot integrity check failed: expected {expected_seal:?}, copied {actual_seal:?}"
+            ));
+        }
+        drop(copied);
+        drop(source);
+        root_dir
+            .hard_link(&temporary, root_dir, destination)
+            .map_err(|error| {
+                anyhow!(
+                    "failed to publish {} without replacing an existing file: {error}",
+                    destination.display()
+                )
+            })?;
+        if let Err(error) = ensure_cap_regular_file(root_dir, destination, "destination file") {
+            let _ = root_dir.remove_file(destination);
+            return Err(error);
+        }
+        if let Err(error) = root_dir.remove_file(&temporary) {
+            tracing::warn!(
+                "Published verified copy at {} but could not remove temporary file {}: {}",
+                destination.display(),
+                temporary.display(),
+                error
+            );
+        }
+        remove_staged_source_after_publication(root_dir, snapshot, destination);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = root_dir.remove_file(&temporary);
     }
     result
 }
@@ -725,49 +819,45 @@ impl FileStore for FileSystemStore {
         .await?
     }
 
+    async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> Result<FileSeal> {
+        let store = self.clone();
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || {
+            let snapshot_relative = store.private_snapshot_relative_path(&snapshot)?;
+            let root_dir = store.open_root()?;
+            let mut source_options = OpenOptions::new();
+            source_options.read(true).follow(FollowSymlinks::No);
+            let mut source = root_dir.open_with(&snapshot_relative, &source_options)?;
+            if !source.metadata()?.is_file() {
+                return Err(anyhow!(
+                    "private snapshot must be a regular file and not a symlink"
+                ));
+            }
+            Ok(seal_reader(&mut source)?)
+        })
+        .await?
+    }
+
     async fn publish_private_snapshot_no_replace(
         &self,
         snapshot: &PrivateSnapshot,
         destination: &str,
+        expected_seal: &FileSeal,
     ) -> Result<()> {
         let store = self.clone();
         let snapshot = snapshot.clone();
         let destination = PathBuf::from(destination);
+        let expected_seal = expected_seal.clone();
         tokio::task::spawn_blocking(move || {
-            let root_path = store.normalized_root()?;
-            let snapshot_relative = staged_relative_path(&root_path, &snapshot.path)
-                .ok_or_else(|| anyhow!("private snapshot is outside the store root"))?;
-            if snapshot_relative.parent() != Some(Path::new(PRIVATE_SNAPSHOT_DIRECTORY)) {
-                return Err(anyhow!("private snapshot is outside the snapshot directory"));
-            }
+            let snapshot_relative = store.private_snapshot_relative_path(&snapshot)?;
             let destination = store.rooted_relative_path(&destination)?;
             let root_dir = store.open_root()?;
-            ensure_cap_regular_file(root_dir, &snapshot_relative, "private snapshot")?;
-            match store.move_filesystem.hard_link_staged_to_destination(
+            copy_private_snapshot_no_replace_verified(
                 root_dir,
                 &snapshot_relative,
-                root_dir,
                 &destination,
-            ) {
-                Ok(()) => {
-                    remove_staged_source_after_publication(
-                        root_dir,
-                        &snapshot_relative,
-                        &destination,
-                    );
-                    Ok(())
-                }
-                Err(error) if is_cross_device(&error) => copy_staged_file_no_replace(
-                    root_dir,
-                    &snapshot_relative,
-                    root_dir,
-                    &destination,
-                ),
-                Err(error) => Err(anyhow!(
-                    "failed to publish {} without replacing an existing file: {error}",
-                    destination.display()
-                )),
-            }
+                &expected_seal,
+            )
         })
         .await?
     }
@@ -776,12 +866,7 @@ impl FileStore for FileSystemStore {
         let store = self.clone();
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
-            let root_path = store.normalized_root()?;
-            let snapshot_relative = staged_relative_path(&root_path, &snapshot.path)
-                .ok_or_else(|| anyhow!("private snapshot is outside the store root"))?;
-            if snapshot_relative.parent() != Some(Path::new(PRIVATE_SNAPSHOT_DIRECTORY)) {
-                return Err(anyhow!("private snapshot is outside the snapshot directory"));
-            }
+            let snapshot_relative = store.private_snapshot_relative_path(&snapshot)?;
             let root_dir = store.open_root()?;
             match root_dir.symlink_metadata(&snapshot_relative) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
@@ -789,6 +874,26 @@ impl FileStore for FileSystemStore {
                 ),
                 Ok(_) => Ok(root_dir.remove_file(&snapshot_relative)?),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await?
+    }
+
+    async fn regular_file_exists_no_follow(&self, path: &Path) -> Result<bool> {
+        let store = self.clone();
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let relative = store.rooted_relative_path(&path)?;
+            match store.open_root()?.symlink_metadata(&relative) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+                    anyhow!(
+                        "canonical file must be a regular file and not a symlink: {}",
+                        path.display()
+                    ),
+                ),
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
                 Err(error) => Err(error.into()),
             }
         })
@@ -1186,6 +1291,81 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"must never be copied");
         let snapshot_dir = root.join(".tvserver-book-snapshots");
         assert!(!snapshot_dir.exists() || std::fs::read_dir(snapshot_dir).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn verified_snapshot_publication_rejects_post_seal_mutation() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-verified-snapshot-mutation-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"sealed bytes").unwrap();
+        let destination = root.join("Dune.epub");
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        let seal = store.seal_private_snapshot(&snapshot).await.unwrap();
+        std::fs::write(&snapshot.path, b"mutated byte").unwrap();
+
+        let error = store
+            .publish_private_snapshot_no_replace(
+                &snapshot,
+                destination.to_str().unwrap(),
+                &seal,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("integrity"), "{error:#}");
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&snapshot.path).unwrap(), b"mutated byte");
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+        store.restore_staged(&staged).await.unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_snapshot_publication_uses_a_distinct_destination_inode() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-verified-snapshot-inode-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"sealed bytes").unwrap();
+        let destination = root.join("Dune.epub");
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        let seal = store.seal_private_snapshot(&snapshot).await.unwrap();
+        let snapshot_inode = std::os::unix::fs::MetadataExt::ino(
+            &std::fs::metadata(&snapshot.path).unwrap(),
+        );
+
+        store
+            .publish_private_snapshot_no_replace(
+                &snapshot,
+                destination.to_str().unwrap(),
+                &seal,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"sealed bytes");
+        assert!(!snapshot.path.exists());
+        assert_ne!(
+            snapshot_inode,
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&destination).unwrap())
+        );
+        store.restore_staged(&staged).await.unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 

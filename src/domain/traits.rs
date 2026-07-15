@@ -10,6 +10,8 @@ use mockall::automock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use super::algorithm::file_integrity::FileSeal;
+
 /*
 The following are higher level traits that provide polymorphism
 at the service layer.
@@ -141,12 +143,18 @@ pub trait FileStore: Sync + Send {
         &self,
         staged: &StagedFile,
     ) -> anyhow::Result<PrivateSnapshot>;
+    async fn seal_private_snapshot(
+        &self,
+        snapshot: &PrivateSnapshot,
+    ) -> anyhow::Result<FileSeal>;
     async fn publish_private_snapshot_no_replace(
         &self,
         snapshot: &PrivateSnapshot,
         destination: &str,
+        expected_seal: &FileSeal,
     ) -> anyhow::Result<()>;
     async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()>;
+    async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool>;
     async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()>;
     async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
     async fn publish_staged_no_replace(
