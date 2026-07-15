@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    algorithm::title_case,
+    algorithm::{get_book_thumbnail_url, title_case},
     config::{get_book_dir, get_book_thumbnail_dir},
     models::{
         is_default_book_thumbnail, BookCollectionDetails, BookCollectionItem,
@@ -53,7 +53,7 @@ impl BookStore {
             .into_iter()
             .map(|collection| BookCollectionItem {
                 collection,
-                thumbnail: DEFAULT_BOOK_THUMBNAIL.to_string(),
+                thumbnail: get_book_thumbnail_url(DEFAULT_BOOK_THUMBNAIL),
             })
             .collect();
         let books = self.repo.list_books(collection).await?;
@@ -485,6 +485,14 @@ mod tests {
     async fn list_returns_child_collections_and_books() {
         let book_root = Path::new("/tmp/tvserver-book-store-list-books");
         let thumbnail_root = Path::new("/tmp/tvserver-book-store-list-thumbnails");
+        #[cfg(not(feature = "webserver"))]
+        {
+            std::env::set_var(crate::domain::config::BOOK_DIR, book_root);
+            std::env::set_var(
+                crate::domain::config::BOOK_THUMBNAIL_DIR,
+                thumbnail_root,
+            );
+        }
         let (store, repository) = store_for_roots(book_root, thumbnail_root).await;
         repository
             .save_book(&sample_book(1, "Fiction", "Dune.epub"))
@@ -502,7 +510,10 @@ mod tests {
         assert_eq!(result.books[0].file_name, "Dune.epub");
         assert_eq!(result.child_collections.len(), 1);
         assert_eq!(result.child_collections[0].collection, "Classics");
-        assert_eq!(result.child_collections[0].thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(
+            result.child_collections[0].thumbnail,
+            crate::domain::algorithm::get_book_thumbnail_url(DEFAULT_BOOK_THUMBNAIL)
+        );
     }
 
     #[tokio::test]

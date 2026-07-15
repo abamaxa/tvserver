@@ -32,6 +32,8 @@ const BAD_REQUEST: StatusCode = StatusCode::BAD_REQUEST;
 const INTERNAL_SERVER_ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 const OK: StatusCode = StatusCode::OK;
 const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
+const BOOK_NOT_FOUND_MESSAGE: &str = "book not found";
+const INTERNAL_ERROR_MESSAGE: &str = "internal server error";
 
 pub type SharedState = Arc<Context>;
 
@@ -154,10 +156,13 @@ async fn list_book_collection(
 ) -> (StatusCode, Json<BookCollectionDetails>) {
     match state.get_book_store().list(collection).await {
         Ok(result) => (OK, Json(result)),
-        Err(error) => (
-            INTERNAL_SERVER_ERROR,
-            Json(BookCollectionDetails::error(error.to_string())),
-        ),
+        Err(error) => {
+            tracing::error!("Failed to list book collection {}: {}", collection, error);
+            (
+                INTERNAL_SERVER_ERROR,
+                Json(BookCollectionDetails::error(INTERNAL_ERROR_MESSAGE.to_string())),
+            )
+        }
     }
 }
 
@@ -181,24 +186,39 @@ async fn get_book(
     state: State<SharedState>,
     checksum: Path<i64>,
 ) -> Result<Json<BookDetails>, (StatusCode, Json<Response>)> {
-    state
-        .get_repository()
-        .retrieve_book(checksum.0)
-        .await
-        .map(Json)
-        .map_err(|error| {
-            (
-                repository_book_error_status(&error),
-                Json(Response::error(error.to_string())),
-            )
-        })
+    match state.get_repository().retrieve_book(checksum.0).await {
+        Ok(book) => Ok(Json(book)),
+        Err(error) => {
+            let status = repository_book_error_status(&error);
+            if status == INTERNAL_SERVER_ERROR {
+                tracing::error!("Failed to retrieve book {}: {}", checksum.0, error);
+            }
+            let message = if status == NOT_FOUND {
+                BOOK_NOT_FOUND_MESSAGE
+            } else {
+                INTERNAL_ERROR_MESSAGE
+            };
+            Err((status, Json(Response::error(message.to_string()))))
+        }
+    }
 }
 
 #[debug_handler]
 async fn delete_book(state: State<SharedState>, checksum: Path<i64>) -> StdResponse {
     match state.get_book_store().delete(checksum.0).await {
         Ok(()) => (OK, Json(Response::success("success".to_string()))),
-        Err(error) => std_error(book_store_error_status(&error), error.to_string()),
+        Err(error) => {
+            let status = book_store_error_status(&error);
+            if status == INTERNAL_SERVER_ERROR {
+                tracing::error!("Failed to delete book {}: {}", checksum.0, error);
+            }
+            let message = if status == NOT_FOUND {
+                BOOK_NOT_FOUND_MESSAGE
+            } else {
+                INTERNAL_ERROR_MESSAGE
+            };
+            std_error(status, message.to_string())
+        }
     }
 }
 

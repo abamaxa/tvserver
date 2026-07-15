@@ -10,7 +10,7 @@ use anyhow::Result;
 use app_lib::{
     adaptors::SqlRepository,
     domain::{
-        config::{BOOK_DIR, BOOK_THUMBNAIL_DIR, MOVIE_DIR},
+        config::MOVIE_DIR,
         messages::Response,
         models::{
             default_book_thumbnail_bytes, ensure_default_book_thumbnail, BookCollectionDetails,
@@ -76,8 +76,6 @@ async fn start_server_with_repository(
     book_thumbnail_root: &Path,
 ) -> Result<(JoinHandle<Result<()>>, Repository)> {
     env::set_var(MOVIE_DIR, MOVIE_ROOT);
-    env::set_var(BOOK_DIR, BOOK_ROOT);
-    env::remove_var(BOOK_THUMBNAIL_DIR);
 
     let (book_store, book_file_storer) =
         get_book_services_at(repository.clone(), book_root, book_thumbnail_root);
@@ -93,7 +91,16 @@ async fn start_server_with_repository(
     )
     .await?;
 
-    Ok((common::create_server(context, port).await, repository))
+    Ok((
+        common::create_server_with_book_roots(
+            context,
+            port,
+            book_root.to_path_buf(),
+            book_thumbnail_root.to_path_buf(),
+        )
+        .await,
+        repository,
+    ))
 }
 
 struct TempRoot(PathBuf);
@@ -141,6 +148,10 @@ async fn lists_root_and_nested_book_collections() -> Result<()> {
     assert_eq!(root.books[0].checksum, 100);
     assert_eq!(root.child_collections.len(), 1);
     assert_eq!(root.child_collections[0].collection, "Nonfiction");
+    assert_eq!(
+        root.child_collections[0].thumbnail,
+        "/api/book-thumbnails/default-book.jpg"
+    );
 
     let nested: BookCollectionDetails =
         reqwest::get("http://localhost:57200/api/books/Nonfiction/Programming")
@@ -182,7 +193,7 @@ async fn missing_book_get_returns_not_found() -> Result<()> {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let result: Response = response.json().await?;
     assert!(result.message.is_empty());
-    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors, ["book not found"]);
 
     Ok(server.abort())
 }
@@ -198,7 +209,7 @@ async fn missing_book_delete_returns_not_found() -> Result<()> {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let result: Response = response.json().await?;
     assert!(result.message.is_empty());
-    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors, ["book not found"]);
 
     Ok(server.abort())
 }
@@ -229,7 +240,8 @@ async fn repository_errors_return_internal_server_error() -> Result<()> {
         .await?;
     assert_eq!(list_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let list_result: BookCollectionDetails = list_response.json().await?;
-    assert_eq!(list_result.errors.len(), 1);
+    assert_eq!(list_result.errors, ["internal server error"]);
+    assert!(!format!("{list_result:?}").contains("no such table"));
 
     let get_response = client
         .get("http://localhost:57206/api/book/404")
@@ -237,7 +249,8 @@ async fn repository_errors_return_internal_server_error() -> Result<()> {
         .await?;
     assert_eq!(get_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let get_result: Response = get_response.json().await?;
-    assert_eq!(get_result.errors.len(), 1);
+    assert_eq!(get_result.errors, ["internal server error"]);
+    assert!(!format!("{get_result:?}").contains("no such table"));
 
     let delete_response = client
         .delete("http://localhost:57206/api/book/404")
@@ -245,7 +258,8 @@ async fn repository_errors_return_internal_server_error() -> Result<()> {
         .await?;
     assert_eq!(delete_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let delete_result: Response = delete_response.json().await?;
-    assert_eq!(delete_result.errors.len(), 1);
+    assert_eq!(delete_result.errors, ["internal server error"]);
+    assert!(!format!("{delete_result:?}").contains("no such table"));
 
     server.abort();
     Ok(())
