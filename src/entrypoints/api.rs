@@ -71,7 +71,7 @@ async fn tasks_add(state: State<SharedState>, payload: Json<DownloadRequest>) ->
 
 #[debug_handler]
 async fn tasks_delete(state: State<SharedState>, params: Path<(TaskType, String)>) -> StdResponse {
-    
+
     let key = params.0 .1;
 
     match state.get_task_manager().remove(&key, state.get_storer()).await {
@@ -154,8 +154,26 @@ async fn list_book_collection(
 ) -> (StatusCode, Json<BookCollectionDetails>) {
     match state.get_book_store().list(collection).await {
         Ok(result) => (OK, Json(result)),
-        Err(error) => (NOT_FOUND, Json(BookCollectionDetails::error(error.to_string()))),
+        Err(error) => (
+            INTERNAL_SERVER_ERROR,
+            Json(BookCollectionDetails::error(error.to_string())),
+        ),
     }
+}
+
+fn repository_book_error_status(error: &sqlx::Error) -> StatusCode {
+    if matches!(error, sqlx::Error::RowNotFound) {
+        NOT_FOUND
+    } else {
+        INTERNAL_SERVER_ERROR
+    }
+}
+
+fn book_store_error_status(error: &anyhow::Error) -> StatusCode {
+    error
+        .downcast_ref::<sqlx::Error>()
+        .map(repository_book_error_status)
+        .unwrap_or(INTERNAL_SERVER_ERROR)
 }
 
 #[debug_handler]
@@ -168,14 +186,19 @@ async fn get_book(
         .retrieve_book(checksum.0)
         .await
         .map(Json)
-        .map_err(|error| (NOT_FOUND, Json(Response::error(error.to_string()))))
+        .map_err(|error| {
+            (
+                repository_book_error_status(&error),
+                Json(Response::error(error.to_string())),
+            )
+        })
 }
 
 #[debug_handler]
 async fn delete_book(state: State<SharedState>, checksum: Path<i64>) -> StdResponse {
     match state.get_book_store().delete(checksum.0).await {
         Ok(()) => (OK, Json(Response::success("success".to_string()))),
-        Err(error) => std_error(INTERNAL_SERVER_ERROR, error.to_string()),
+        Err(error) => std_error(book_store_error_status(&error), error.to_string()),
     }
 }
 
