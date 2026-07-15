@@ -430,11 +430,29 @@ async fn serves_book_downloads_with_percent_encoded_url_segments() -> Result<()>
 
 #[tokio::test]
 async fn serves_default_and_generated_book_thumbnails() -> Result<()> {
-    let (server, _) = start_server(57204).await?;
+    let temp_root = TempRoot::new("thumbnails", 57204)?;
+    let book_root = temp_root.0.join("books");
+    let book_thumbnail_root = book_root.join(".thumbnails");
+    fs::create_dir_all(&book_thumbnail_root).await?;
+    let generated_bytes = default_book_thumbnail_bytes();
+    fs::write(
+        book_thumbnail_root.join("generated-cover.jpg"),
+        generated_bytes,
+    )
+    .await?;
+    let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
+    let (server, _) = start_server_with_repository(
+        57204,
+        repository,
+        &book_root,
+        &book_thumbnail_root,
+    )
+    .await?;
 
     let default_response =
         reqwest::get("http://localhost:57204/api/book-thumbnails/default-book.jpg").await?;
     assert_eq!(default_response.status(), StatusCode::OK);
+    assert_eq!(default_response.headers()[CONTENT_TYPE], "image/jpeg");
     assert_eq!(
         default_response.bytes().await?.as_ref(),
         default_book_thumbnail_bytes()
@@ -443,9 +461,10 @@ async fn serves_default_and_generated_book_thumbnails() -> Result<()> {
     let generated_response =
         reqwest::get("http://localhost:57204/api/book-thumbnails/generated-cover.jpg").await?;
     assert_eq!(generated_response.status(), StatusCode::OK);
+    assert_eq!(generated_response.headers()[CONTENT_TYPE], "image/jpeg");
     assert_eq!(
         generated_response.bytes().await?.as_ref(),
-        b"generated thumbnail fixture\n"
+        generated_bytes
     );
 
     Ok(server.abort())

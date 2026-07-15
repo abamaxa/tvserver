@@ -136,7 +136,7 @@ async fn book_static_routes_enforce_capability_and_file_type_boundaries() -> Res
 
     let epub_bytes = b"valid nested epub";
     let pdf_bytes = b"valid uppercase pdf";
-    let generated_thumbnail = b"valid generated thumbnail";
+    let generated_thumbnail = default_book_thumbnail_bytes();
     std::fs::write(book_root.join("Valid/Nested.EPUB"), epub_bytes)?;
     std::fs::write(book_root.join("Valid/Manual.PDF"), pdf_bytes)?;
     std::fs::write(book_root.join("notes.txt"), b"unsupported download")?;
