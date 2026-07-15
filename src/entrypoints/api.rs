@@ -6,7 +6,10 @@ use crate::domain::messages::{
     ClientLogMessage, Command, ConversionRequest, DownloadRequest,
     MediaItem, PlayRequest, PlayerList, Response,
 };
-use crate::domain::models::{Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
+use crate::domain::models::{
+    BookCollectionDetails, BookDetails, Conversion, SearchResults, TaskListResults,
+    AVAILABLE_CONVERSIONS,
+};
 use crate::domain::traits::{MediaSharer, Searcher};
 use crate::domain::{SearchEngineType, TaskType};
 use axum::body::Body;
@@ -43,6 +46,10 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/media/{*media}", delete(delete_video))
         .route("/api/media/{*media}", post(convert_video))
         .route("/api/media/{*media}", patch(share_video))
+        .route("/api/books", get(list_root_books))
+        .route("/api/books/{*collection}", get(list_books))
+        .route("/api/book/{checksum}", get(get_book))
+        .route("/api/book/{checksum}", delete(delete_book))
         .route("/api/remote", get(list_player))
         .route("/api/remote/control", post(remote_command))
         .route("/api/remote/play", post(remote_play))
@@ -125,6 +132,50 @@ async fn list_media(state: &SharedState, collection: &str) -> (StatusCode, Json<
     match state.get_store().list(collection).await {
         Ok(result) => (OK, Json(result)),
         Err(e) => (NOT_FOUND, Json(MediaItem::from(e))),
+    }
+}
+
+#[debug_handler]
+async fn list_root_books(state: State<SharedState>) -> impl IntoResponse {
+    list_book_collection(&state, "").await
+}
+
+#[debug_handler]
+async fn list_books(
+    state: State<SharedState>,
+    collection: Path<String>,
+) -> impl IntoResponse {
+    list_book_collection(&state, &collection).await
+}
+
+async fn list_book_collection(
+    state: &SharedState,
+    collection: &str,
+) -> (StatusCode, Json<BookCollectionDetails>) {
+    match state.get_book_store().list(collection).await {
+        Ok(result) => (OK, Json(result)),
+        Err(error) => (NOT_FOUND, Json(BookCollectionDetails::error(error.to_string()))),
+    }
+}
+
+#[debug_handler]
+async fn get_book(
+    state: State<SharedState>,
+    checksum: Path<i64>,
+) -> Result<Json<BookDetails>, (StatusCode, Json<Response>)> {
+    state
+        .get_repository()
+        .retrieve_book(checksum.0)
+        .await
+        .map(Json)
+        .map_err(|error| (NOT_FOUND, Json(Response::error(error.to_string()))))
+}
+
+#[debug_handler]
+async fn delete_book(state: State<SharedState>, checksum: Path<i64>) -> StdResponse {
+    match state.get_book_store().delete(checksum.0).await {
+        Ok(()) => (OK, Json(Response::success("success".to_string()))),
+        Err(error) => std_error(INTERNAL_SERVER_ERROR, error.to_string()),
     }
 }
 

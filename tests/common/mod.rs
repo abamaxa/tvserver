@@ -14,7 +14,9 @@ mod text_fetcher;
 mod torrents;
 
 #[allow(unused_imports)]
-pub use context::{get_book_services, get_context};
+pub use context::{
+    get_book_services, get_book_services_at, get_context, get_context_with_book_services,
+};
 pub use json_fetcher::get_json_fetcher;
 pub use media_checker::get_checker;
 #[allow(unused_imports)]

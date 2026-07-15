@@ -15,7 +15,9 @@ use tower_http::{
 };
 use crate::adaptors::restrict_access;
 use crate::services::{setup_logging, TVSERVER_LOG};
-use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
+use crate::domain::config::{
+    get_book_dir, get_book_thumbnail_dir, get_client_path, get_movie_dir, get_thumbnail_dir,
+};
 use crate::entrypoints::TVServer;
 use crate::entrypoints::register;
 
@@ -33,6 +35,8 @@ pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
 
 async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Result<()> {
     let context = tvserver.get_context().clone();
+    let book_dir = get_book_dir();
+    let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
 
     // Protected routes: API endpoints, player, and fallback (app)
     let protected_routes = register(Arc::new(context))
@@ -44,6 +48,11 @@ async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Resu
     let unprotected_routes = Router::new()
         .route("/api/stream-audio/{audio_index}/{*path}", get(crate::entrypoints::api::stream_audio))
         .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
+        .nest_service("/api/books/download", ServeDir::new(book_dir))
+        .nest_service(
+            "/api/book-thumbnails",
+            ServeDir::new(book_thumbnail_dir),
+        )
         .nest_service(
             "/api/thumbnails",
             ServeDir::new(get_thumbnail_dir(&get_movie_dir())),
