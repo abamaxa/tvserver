@@ -20,7 +20,7 @@ use std::{
     io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex, Weak,
     },
 };
@@ -42,7 +42,6 @@ const SVG_FONT_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/book/FiraSans-Regular.ttf"
 ));
-static NEXT_THUMBNAIL_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 static BOOK_DESTINATION_LOCKS: Lazy<StdMutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
 static BOOK_THUMBNAIL_LOCKS: Lazy<StdMutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
@@ -1045,7 +1044,7 @@ fn thumbnail_lock(path: &Path) -> anyhow::Result<Arc<tokio::sync::Mutex<()>>> {
 }
 
 pub trait PdfThumbnailRenderer {
-    fn render_thumbnail(&self, pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String>;
+    fn render_thumbnail(&self, pdf_path: &Path) -> Result<image::DynamicImage, String>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1053,14 +1052,14 @@ pub struct DefaultPdfThumbnailRenderer;
 
 #[cfg(not(feature = "pdf-thumbnails"))]
 impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
-    fn render_thumbnail(&self, _pdf_path: &Path, _thumbnail_path: &Path) -> Result<(), String> {
+    fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
         Err("PDF thumbnail rendering is disabled".to_string())
     }
 }
 
 #[cfg(feature = "pdf-thumbnails")]
 impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
-    fn render_thumbnail(&self, pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String> {
+    fn render_thumbnail(&self, pdf_path: &Path) -> Result<image::DynamicImage, String> {
         use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
 
         let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
@@ -1083,9 +1082,7 @@ impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
             .map_err(|error| format!("could not render first PDF page: {error}"))?
             .as_image()
             .into_rgb8();
-        image
-            .save_with_format(thumbnail_path, image::ImageFormat::Jpeg)
-            .map_err(|error| format!("could not write PDF thumbnail: {error}"))
+        Ok(image::DynamicImage::ImageRgb8(image))
     }
 }
 
@@ -1185,16 +1182,10 @@ fn render_pdf_thumbnail<R: PdfThumbnailRenderer + ?Sized>(
     fs::create_dir_all(thumbnail_dir)
         .map_err(|error| format!("could not create PDF thumbnail directory: {error}"))?;
     let thumbnail_path = thumbnail_dir.join(&thumbnail);
-    let (temp_path, temp_file) = create_thumbnail_temp_file(&thumbnail_path)?;
-    drop(temp_file);
-    let result = (|| {
-        renderer
-            .render_thumbnail(pdf_path, &temp_path)
-            .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
-        publish_thumbnail_temp_no_replace(&temp_path, &thumbnail_path)
-    })();
-    let _ = fs::remove_file(&temp_path);
-    result?;
+    let image = renderer
+        .render_thumbnail(pdf_path)
+        .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
+    write_jpeg_atomically(&thumbnail_path, &image)?;
     Ok(thumbnail)
 }
 
@@ -2001,24 +1992,50 @@ fn write_jpeg_atomically(path: &Path, image: &image::DynamicImage) -> Result<(),
         })?;
         file.sync_all()
             .map_err(|error| format!("could not sync temporary thumbnail: {error}"))?;
-        drop(file);
-        publish_thumbnail_temp_no_replace(&temp_path, path)?;
+        publish_thumbnail_temp_no_replace(&temp_path, &file, path)?;
         Ok(())
     })();
     let _ = fs::remove_file(&temp_path);
     result
 }
 
-fn publish_thumbnail_temp_no_replace(temp_path: &Path, final_path: &Path) -> Result<(), String> {
-    let temp_metadata = temp_path
-        .symlink_metadata()
-        .map_err(|error| format!("could not inspect temporary thumbnail: {error}"))?;
-    if temp_metadata.file_type().is_symlink() || !temp_metadata.is_file() {
-        return Err("temporary thumbnail must be a regular file and not a symlink".to_string());
+fn publish_thumbnail_temp_no_replace(
+    temp_path: &Path,
+    retained_file: &File,
+    final_path: &Path,
+) -> Result<(), String> {
+    let retained_metadata = retained_file
+        .metadata()
+        .map_err(|error| format!("could not inspect retained temporary thumbnail: {error}"))?;
+    if !retained_metadata.is_file() {
+        return Err("retained temporary thumbnail must be a regular file".to_string());
     }
 
     match fs::hard_link(temp_path, final_path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let published_metadata = match final_path.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    return Err(rollback_published_thumbnail(
+                        final_path,
+                        format!("could not inspect published thumbnail identity: {error}"),
+                    ));
+                }
+            };
+            if published_metadata.file_type().is_symlink()
+                || !published_metadata.is_file()
+                || cap_fs_ext::MetadataExt::dev(&published_metadata)
+                    != cap_fs_ext::MetadataExt::dev(&retained_metadata)
+                || cap_fs_ext::MetadataExt::ino(&published_metadata)
+                    != cap_fs_ext::MetadataExt::ino(&retained_metadata)
+            {
+                return Err(rollback_published_thumbnail(
+                    final_path,
+                    "temporary thumbnail changed before publication".to_string(),
+                ));
+            }
+            Ok(())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let existing = final_path
                 .symlink_metadata()
@@ -2038,6 +2055,15 @@ fn publish_thumbnail_temp_no_replace(temp_path: &Path, final_path: &Path) -> Res
     }
 }
 
+fn rollback_published_thumbnail(final_path: &Path, error: String) -> String {
+    match fs::remove_file(final_path) {
+        Ok(()) => error,
+        Err(rollback_error) => {
+            format!("{error}; additionally failed to remove rejected thumbnail: {rollback_error}")
+        }
+    }
+}
+
 fn create_thumbnail_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
     let parent = path
         .parent()
@@ -2047,8 +2073,10 @@ fn create_thumbnail_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
         .and_then(|filename| filename.to_str())
         .ok_or_else(|| "thumbnail filename is not valid UTF-8".to_string())?;
     for _ in 0..16 {
-        let sequence = NEXT_THUMBNAIL_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-        let temp_path = parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), sequence));
+        let temp_path = parent.join(format!(
+            ".{filename}.{:032x}.tmp",
+            rand::random::<u128>()
+        ));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2256,7 +2284,7 @@ mod tests {
     struct FailingPdfRenderer;
 
     impl PdfThumbnailRenderer for FailingPdfRenderer {
-        fn render_thumbnail(&self, _pdf_path: &Path, _thumbnail_path: &Path) -> Result<(), String> {
+        fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
             Err("test renderer unavailable".to_string())
         }
     }
@@ -2264,8 +2292,10 @@ mod tests {
     struct WritingPdfRenderer;
 
     impl PdfThumbnailRenderer for WritingPdfRenderer {
-        fn render_thumbnail(&self, _pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String> {
-            fs::write(thumbnail_path, b"rendered thumbnail").map_err(|error| error.to_string())
+        fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
+            Ok(image::DynamicImage::ImageRgb8(
+                image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3])),
+            ))
         }
     }
 
@@ -2969,6 +2999,26 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(entries, [std::ffi::OsString::from("existing.jpg")]);
+    }
+
+    #[test]
+    fn thumbnail_publication_rejects_a_swapped_temporary_path() {
+        let temp = TestDir::new();
+        let final_path = temp.path().join("cover.jpg");
+        let (temp_path, mut retained_file) = create_thumbnail_temp_file(&final_path).unwrap();
+        retained_file.write_all(b"verified thumbnail bytes").unwrap();
+        retained_file.sync_all().unwrap();
+        let displaced_path = temp.path().join("displaced-original.tmp");
+        fs::rename(&temp_path, &displaced_path).unwrap();
+        fs::write(&temp_path, b"attacker replacement bytes").unwrap();
+
+        let result =
+            publish_thumbnail_temp_no_replace(&temp_path, &retained_file, &final_path);
+
+        assert!(result.is_err());
+        assert!(!final_path.exists());
+        assert_eq!(fs::read(&displaced_path).unwrap(), b"verified thumbnail bytes");
+        assert_eq!(fs::read(&temp_path).unwrap(), b"attacker replacement bytes");
     }
 
     #[test]

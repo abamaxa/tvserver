@@ -260,19 +260,6 @@ impl FileSystemStore {
         &self,
         snapshot: &PrivateSnapshot,
     ) -> Result<PrivateSnapshotAuthority> {
-        match self
-            .open_root()?
-            .symlink_metadata(PRIVATE_SNAPSHOT_DIRECTORY)
-        {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(anyhow!(
-                    "private book snapshot directory must be a directory and not a symlink"
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
         let token_name = self.private_snapshot_name(snapshot)?;
         let snapshots = self
             .private_snapshots
@@ -288,6 +275,23 @@ impl FileSystemStore {
             return Err(anyhow!("private snapshot token identity does not match its authority"));
         }
         Ok(authority.clone())
+    }
+
+    fn validate_visible_private_snapshot_directory(&self) -> Result<()> {
+        match self
+            .open_root()?
+            .symlink_metadata(PRIVATE_SNAPSHOT_DIRECTORY)
+        {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(anyhow!(
+                    "private book snapshot directory must be a directory and not a symlink"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
     }
 
     fn forget_private_snapshot(&self, snapshot: &PrivateSnapshot) {
@@ -956,6 +960,7 @@ impl FileStore for FileSystemStore {
         let store = self.clone();
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
+            store.validate_visible_private_snapshot_directory()?;
             let authority = store.private_snapshot_authority(&snapshot)?;
             let mut source_options = OpenOptions::new();
             source_options.read(true).follow(FollowSymlinks::No);
@@ -977,6 +982,7 @@ impl FileStore for FileSystemStore {
         let destination = PathBuf::from(destination);
         let expected_seal = expected_seal.clone();
         tokio::task::spawn_blocking(move || {
+            store.validate_visible_private_snapshot_directory()?;
             let authority = store.private_snapshot_authority(&snapshot)?;
             let destination = store.rooted_relative_path(&destination)?;
             let root_dir = store.open_root()?;
@@ -1470,16 +1476,25 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn private_snapshot_directory_symlink_rejects_removal_and_preserves_decoy() {
-        let (base, _root, store, snapshot, _seal, decoy) =
+    async fn private_snapshot_directory_symlink_does_not_block_retained_cleanup() {
+        let (base, root, store, snapshot, _seal, decoy) =
             swapped_private_snapshot_directory("snapshot-dir-remove-symlink").await;
+        let original = root
+            .join("original-private-snapshots")
+            .join(snapshot.path.file_name().unwrap());
 
-        let result = store.remove_private_snapshot(&snapshot).await;
-        let decoy_bytes = std::fs::read(&decoy).ok();
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+
+        assert!(!original.exists());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"legitimate snapshot bytes");
+        assert!(root
+            .join(PRIVATE_SNAPSHOT_DIRECTORY)
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&base);
-
-        assert!(result.is_err());
-        assert_eq!(decoy_bytes.as_deref(), Some(b"legitimate snapshot bytes".as_slice()));
     }
 
     #[tokio::test]
