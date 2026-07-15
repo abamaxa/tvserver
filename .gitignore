@@ -17,3 +17,4 @@ docs/.lock
 *.sqlite*
 .vscode
 .claude
+/.worktrees/
