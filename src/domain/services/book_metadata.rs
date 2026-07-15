@@ -188,7 +188,7 @@ async fn generate_book_metadata_with_roots(
                 destination.display()
             )
         })?;
-        storer.rename(source, destination_path).await?;
+        storer.rename_no_replace(source, destination_path).await?;
     }
 
     details.collection = collection;
@@ -2312,6 +2312,58 @@ mod tests {
         inner: FileStorer,
     }
 
+    struct DestinationRaceStore {
+        inner: FileStorer,
+    }
+
+    impl DestinationRaceStore {
+        async fn create_competing_destination(&self, path: &str) -> anyhow::Result<()> {
+            tokio::fs::write(path, b"external writer bytes").await?;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for DestinationRaceStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.create_competing_destination(new_path).await?;
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.create_competing_destination(new_path).await?;
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
     #[async_trait]
     impl FileStore for FailingRenameStore {
         async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
@@ -2327,6 +2379,10 @@ mod tests {
         }
 
         async fn rename(&self, _old_path: &str, _new_path: &str) -> anyhow::Result<()> {
+            anyhow::bail!("forced book move failure")
+        }
+
+        async fn rename_no_replace(&self, _old_path: &str, _new_path: &str) -> anyhow::Result<()> {
             anyhow::bail!("forced book move failure")
         }
 
@@ -2550,6 +2606,42 @@ mod tests {
         let saved = repository.retrieve_book(winner.checksum).await.unwrap();
         assert_eq!(saved.title, winner.title);
         assert_eq!(repository.list_all_books().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingestion_external_destination_race_preserves_both_existing_destination_and_source() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("raced.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! { "Title" => text_string("Incoming") }),
+            1,
+        );
+        let original_source = fs::read(&source).unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let storer: FileStorer = Arc::new(DestinationRaceStore { inner });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("collision".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert_eq!(
+            fs::read(book_root.join("Collision/raced.pdf")).unwrap(),
+            b"external writer bytes"
+        );
+        assert!(repository.list_all_books().await.unwrap().is_empty());
     }
 
     #[test]

@@ -302,6 +302,61 @@ fn copy_staged_file(
     result
 }
 
+fn copy_staged_file_no_replace(
+    source_dir: &Dir,
+    staged_source: &Path,
+    destination_dir: &Dir,
+    destination: &Path,
+) -> Result<()> {
+    let mut source_options = OpenOptions::new();
+    source_options.read(true).follow(FollowSymlinks::No);
+    let mut source = source_dir.open_with(staged_source, &source_options)?;
+    let source_metadata = source.metadata()?;
+    if !source_metadata.is_file() {
+        return Err(anyhow!("source must be a regular file"));
+    }
+
+    let destination_parent = destination.parent().unwrap_or_else(|| Path::new(""));
+    let temporary = destination_parent.join(unique_staging_name("tvserver-copy"));
+    let mut destination_options = OpenOptions::new();
+    destination_options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    let mut copied = destination_dir.open_with(&temporary, &destination_options)?;
+
+    let result = (|| -> Result<()> {
+        io::copy(&mut source, &mut copied)?;
+        destination_dir.set_permissions(&temporary, source_metadata.permissions())?;
+        copied.sync_all()?;
+        drop(copied);
+        drop(source);
+        destination_dir
+            .hard_link(&temporary, destination_dir, destination)
+            .map_err(|error| {
+                anyhow!(
+                    "failed to publish {} without replacing an existing file: {error}",
+                    destination.display()
+                )
+            })?;
+        ensure_cap_regular_file(destination_dir, destination, "destination file")?;
+        if let Err(error) = destination_dir.remove_file(&temporary) {
+            tracing::warn!(
+                "Published cross-device copy at {} but could not remove temporary file {}: {}",
+                destination.display(),
+                temporary.display(),
+                error
+            );
+        }
+        source_dir.remove_file(staged_source)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = destination_dir.remove_file(&temporary);
+    }
+    result
+}
+
 pub struct FileStoreObject {
     file: PathBuf,
 }
@@ -483,6 +538,77 @@ impl FileStore for FileSystemStore {
         .await?
     }
 
+    async fn rename_no_replace(&self, _old_path: &str, _new_path: &str) -> Result<()> {
+        let store = self.clone();
+        let old_path = _old_path.to_string();
+        let new_path = PathBuf::from(_new_path);
+        tokio::task::spawn_blocking(move || {
+            let old_path = store.source_path(&old_path)?;
+            let destination = store.rooted_relative_path(&new_path)?;
+            let destination_dir = store.open_root()?;
+            let root_path = store.normalized_root()?;
+            let internal_source = old_path.strip_prefix(&root_path).ok().map(Path::to_path_buf);
+            let ambient_source;
+            let (source_dir, source_path) = if let Some(relative) = internal_source {
+                (destination_dir, relative)
+            } else {
+                let old_parent = old_path.parent().ok_or_else(|| {
+                    anyhow!("source path has no parent: {}", old_path.display())
+                })?;
+                let old_name = old_path.file_name().ok_or_else(|| {
+                    anyhow!("source path has no file name: {}", old_path.display())
+                })?;
+                ambient_source = Dir::open_ambient_dir(old_parent, ambient_authority())?;
+                (&ambient_source, PathBuf::from(old_name))
+            };
+            ensure_cap_regular_file(source_dir, &source_path, "source file")?;
+
+            let staged_source = PathBuf::from(unique_staging_name("tvserver-move"));
+            source_dir.rename(&source_path, source_dir, &staged_source)?;
+
+            let move_result = (|| -> Result<()> {
+                ensure_cap_regular_file(source_dir, &staged_source, "source file")?;
+                match source_dir.hard_link(&staged_source, destination_dir, &destination) {
+                    Ok(()) => {
+                        ensure_cap_regular_file(
+                            destination_dir,
+                            &destination,
+                            "destination file",
+                        )?;
+                        source_dir.remove_file(&staged_source)?;
+                        Ok(())
+                    }
+                    Err(error) if is_cross_device(&error) => copy_staged_file_no_replace(
+                        source_dir,
+                        &staged_source,
+                        destination_dir,
+                        &destination,
+                    ),
+                    Err(error) => Err(anyhow!(
+                        "failed to publish {} without replacing an existing file: {error}",
+                        destination.display()
+                    )),
+                }
+            })();
+
+            if let Err(error) = move_result {
+                if source_dir.symlink_metadata(&staged_source).is_ok() {
+                    restore_staged_file(source_dir, &staged_source, &source_path).map_err(
+                        |restore_error| {
+                            anyhow!(
+                                "{error}; additionally failed to restore source {}: {restore_error}",
+                                old_path.display()
+                            )
+                        },
+                    )?;
+                }
+                return Err(error);
+            }
+            Ok(())
+        })
+        .await?
+    }
+
     async fn restore(&self, staged_path: &str, original_path: &str) -> Result<()> {
         let store = self.clone();
         let staged_path = PathBuf::from(staged_path);
@@ -633,6 +759,134 @@ mod tests {
             .await?;
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn rename_no_replace_preserves_existing_destination_and_source() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-no-replace-existing-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        fs::create_dir_all(&root).await.unwrap();
+        let source = base.join("incoming.epub");
+        let destination = root.join("book.epub");
+        fs::write(&source, b"incoming bytes").await.unwrap();
+        fs::write(&destination, b"existing bytes").await.unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let result = store
+            .rename_no_replace(source.to_str().unwrap(), destination.to_str().unwrap())
+            .await;
+        let source_contents = fs::read(&source).await.unwrap();
+        let destination_contents = fs::read(&destination).await.unwrap();
+        let _ = fs::remove_dir_all(&base).await;
+
+        assert!(result.is_err());
+        assert_eq!(source_contents, b"incoming bytes");
+        assert_eq!(destination_contents, b"existing bytes");
+    }
+
+    #[tokio::test]
+    async fn concurrent_rename_no_replace_calls_have_exactly_one_winner() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-no-replace-concurrent-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        fs::create_dir_all(&root).await.unwrap();
+        let first = base.join("first.epub");
+        let second = base.join("second.epub");
+        let destination = root.join("book.epub");
+        fs::write(&first, b"first bytes").await.unwrap();
+        fs::write(&second, b"second bytes").await.unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let (first_result, second_result) = tokio::join!(
+            store.rename_no_replace(first.to_str().unwrap(), destination.to_str().unwrap()),
+            store.rename_no_replace(second.to_str().unwrap(), destination.to_str().unwrap())
+        );
+        let destination_contents = fs::read(&destination).await.unwrap();
+
+        match (first_result, second_result) {
+            (Ok(()), Err(_)) => {
+                assert!(!first.exists());
+                assert_eq!(fs::read(&second).await.unwrap(), b"second bytes");
+                assert_eq!(destination_contents, b"first bytes");
+            }
+            (Err(_), Ok(())) => {
+                assert_eq!(fs::read(&first).await.unwrap(), b"first bytes");
+                assert!(!second.exists());
+                assert_eq!(destination_contents, b"second bytes");
+            }
+            results => panic!("expected exactly one no-replace winner, got {results:?}"),
+        }
+        let _ = fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn case_equivalent_no_replace_destinations_have_one_winner_when_supported() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-no-replace-case-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        fs::create_dir_all(&root).await.unwrap();
+        let probe = root.join("CaseProbe");
+        fs::write(&probe, b"probe").await.unwrap();
+        let is_case_insensitive = root.join("caseprobe").exists();
+        fs::remove_file(&probe).await.unwrap();
+        if !is_case_insensitive {
+            let _ = fs::remove_dir_all(&base).await;
+            return;
+        }
+
+        let first = base.join("first.epub");
+        let second = base.join("second.epub");
+        let first_destination = root.join("Book.epub");
+        let second_destination = root.join("book.epub");
+        fs::write(&first, b"first bytes").await.unwrap();
+        fs::write(&second, b"second bytes").await.unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let (first_result, second_result) = tokio::join!(
+            store.rename_no_replace(first.to_str().unwrap(), first_destination.to_str().unwrap()),
+            store.rename_no_replace(second.to_str().unwrap(), second_destination.to_str().unwrap())
+        );
+
+        assert!(matches!(
+            (first_result, second_result),
+            (Ok(()), Err(_)) | (Err(_), Ok(()))
+        ));
+        let _ = fs::remove_dir_all(&base).await;
+    }
+
+    #[tokio::test]
+    async fn rename_still_replaces_an_existing_destination() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-rename-replace-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        fs::create_dir_all(&root).await.unwrap();
+        let source = base.join("incoming.mp4");
+        let destination = root.join("video.mp4");
+        fs::write(&source, b"incoming video").await.unwrap();
+        fs::write(&destination, b"old video").await.unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        store
+            .rename(source.to_str().unwrap(), destination.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).await.unwrap(), b"incoming video");
+        let _ = fs::remove_dir_all(&base).await;
     }
 
     #[test]
@@ -959,6 +1213,44 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(destination_contents, b"book");
         assert!(source_exists);
+    }
+
+    #[test]
+    fn cross_device_no_replace_copy_preserves_collision_and_cleans_temporary_file() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-no-replace-copy-collision-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let source_root = base.join("source");
+        let destination_root = base.join("destination");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir(&destination_root).unwrap();
+        std::fs::write(source_root.join("staged.epub"), b"incoming").unwrap();
+        std::fs::write(destination_root.join("Dune.epub"), b"existing").unwrap();
+        let source_dir = Dir::open_ambient_dir(&source_root, ambient_authority()).unwrap();
+        let destination_dir =
+            Dir::open_ambient_dir(&destination_root, ambient_authority()).unwrap();
+
+        let result = copy_staged_file_no_replace(
+            &source_dir,
+            Path::new("staged.epub"),
+            &destination_dir,
+            Path::new("Dune.epub"),
+        );
+        let destination_entries = std::fs::read_dir(&destination_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(source_root.join("staged.epub")).unwrap(), b"incoming");
+        assert_eq!(
+            std::fs::read(destination_root.join("Dune.epub")).unwrap(),
+            b"existing"
+        );
+        assert_eq!(destination_entries, [OsString::from("Dune.epub")]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
