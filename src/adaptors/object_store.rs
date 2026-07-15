@@ -256,6 +256,21 @@ fn restore_staged_file(dir: &Dir, staged: &Path, original: &Path) -> Result<()> 
     Ok(())
 }
 
+fn remove_staged_source_after_publication(
+    source_dir: &Dir,
+    staged_source: &Path,
+    destination: &Path,
+) {
+    if let Err(error) = source_dir.remove_file(staged_source) {
+        tracing::warn!(
+            "Published file at {} but could not remove staged source {}: {}",
+            destination.display(),
+            staged_source.display(),
+            error
+        );
+    }
+}
+
 fn copy_staged_file(
     source_dir: &Dir,
     staged_source: &Path,
@@ -348,7 +363,7 @@ fn copy_staged_file_no_replace(
                 error
             );
         }
-        source_dir.remove_file(staged_source)?;
+        remove_staged_source_after_publication(source_dir, staged_source, destination);
         Ok(())
     })();
     if result.is_err() {
@@ -575,7 +590,11 @@ impl FileStore for FileSystemStore {
                             &destination,
                             "destination file",
                         )?;
-                        source_dir.remove_file(&staged_source)?;
+                        remove_staged_source_after_publication(
+                            source_dir,
+                            &staged_source,
+                            &destination,
+                        );
                         Ok(())
                     }
                     Err(error) if is_cross_device(&error) => copy_staged_file_no_replace(
@@ -1251,6 +1270,42 @@ mod tests {
         );
         assert_eq!(destination_entries, [OsString::from("Dune.epub")]);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cross_device_no_replace_copy_is_committed_after_destination_publication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-no-replace-copy-commit-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let source_root = base.join("source");
+        let destination_root = base.join("destination");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir(&destination_root).unwrap();
+        std::fs::write(source_root.join("staged.epub"), b"book").unwrap();
+        let source_dir = Dir::open_ambient_dir(&source_root, ambient_authority()).unwrap();
+        let destination_dir =
+            Dir::open_ambient_dir(&destination_root, ambient_authority()).unwrap();
+        std::fs::set_permissions(&source_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = copy_staged_file_no_replace(
+            &source_dir,
+            Path::new("staged.epub"),
+            &destination_dir,
+            Path::new("Dune.epub"),
+        );
+        std::fs::set_permissions(&source_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let destination_contents = std::fs::read(destination_root.join("Dune.epub")).unwrap();
+        let source_exists = source_root.join("staged.epub").exists();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(result.is_ok());
+        assert_eq!(destination_contents, b"book");
+        assert!(source_exists);
     }
 
     #[tokio::test]
