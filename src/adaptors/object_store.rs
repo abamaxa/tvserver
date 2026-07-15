@@ -358,6 +358,162 @@ fn ensure_snapshot_identity(
     Ok(())
 }
 
+fn private_snapshot_identity_names(authority: &PrivateSnapshotAuthority) -> Result<Vec<PathBuf>> {
+    let mut owned_names = Vec::new();
+    let entries = authority.directory.entries().map_err(|error| {
+        anyhow!(
+            "failed to enumerate the retained private snapshot directory: {error}"
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            anyhow!("failed to enumerate a retained private snapshot entry: {error}")
+        })?;
+        let name = PathBuf::from(entry.file_name());
+        match authority.directory.symlink_metadata(&name) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.dev() == authority.device
+                    && metadata.ino() == authority.inode =>
+            {
+                owned_names.push(name);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to inspect private snapshot cleanup candidate {}: {error}",
+                    name.display()
+                ));
+            }
+        }
+    }
+
+    Ok(owned_names)
+}
+
+fn create_private_snapshot_cleanup_directory(
+    authority: &PrivateSnapshotAuthority,
+) -> Result<(PathBuf, Dir)> {
+    loop {
+        let name = PathBuf::from(unique_staging_name("tvserver-snapshot-cleanup"));
+        match authority.directory.create_dir(&name) {
+            Ok(()) => {
+                let directory = authority.directory.open_dir(&name).map_err(|error| {
+                    anyhow!(
+                        "failed to open private snapshot cleanup quarantine {}: {error}",
+                        name.display()
+                    )
+                })?;
+                return Ok((name, directory));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to create a private snapshot cleanup quarantine: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn quarantine_private_snapshot_candidate(
+    authority: &PrivateSnapshotAuthority,
+    name: &Path,
+) -> Result<()> {
+    const QUARANTINED_NAME: &str = "candidate";
+
+    let (quarantine_name, quarantine) = create_private_snapshot_cleanup_directory(authority)?;
+    let result = match authority
+        .directory
+        .rename(name, &quarantine, QUARANTINED_NAME)
+    {
+        Ok(()) => match quarantine.symlink_metadata(QUARANTINED_NAME) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.dev() == authority.device
+                    && metadata.ino() == authority.inode =>
+            {
+                // POSIX has no identity-conditioned unlink. Moving the candidate beneath a fresh,
+                // random adaptor-private directory first removes the caller-visible pathname race.
+                // A process running as the same OS account that actively discovers and mutates this
+                // private quarantine is outside the FileStore caller trust boundary.
+                quarantine
+                    .remove_file(QUARANTINED_NAME)
+                    .map_err(|error| {
+                        anyhow!(
+                            "failed to remove quarantined owned private snapshot entry {}: {error}",
+                            name.display()
+                        )
+                    })
+            }
+            Ok(_) => match quarantine.hard_link(
+                QUARANTINED_NAME,
+                &authority.directory,
+                name,
+            ) {
+                Ok(()) => quarantine.remove_file(QUARANTINED_NAME).map_err(|error| {
+                    anyhow!(
+                        "restored unowned cleanup candidate {} but failed to remove its quarantine link: {error}",
+                        name.display()
+                    )
+                }),
+                Err(error) => Err(anyhow!(
+                    "private snapshot cleanup candidate {} changed identity; it remains preserved beneath quarantine {} because it could not be restored without replacement: {error}",
+                    name.display(),
+                    quarantine_name.display()
+                )),
+            },
+            Err(error) => Err(anyhow!(
+                "failed to inspect quarantined private snapshot cleanup candidate {}: {error}",
+                name.display()
+            )),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow!(
+            "failed to quarantine private snapshot cleanup candidate {}: {error}",
+            name.display()
+        )),
+    };
+
+    let quarantine_is_empty = quarantine.entries()?.next().is_none();
+    if quarantine_is_empty {
+        authority
+            .directory
+            .remove_dir(&quarantine_name)
+            .map_err(|error| {
+                anyhow!(
+                    "failed to remove empty private snapshot cleanup quarantine {}: {error}",
+                    quarantine_name.display()
+                )
+            })?;
+    }
+
+    result
+}
+
+fn remove_private_snapshot_identity(authority: &PrivateSnapshotAuthority) -> Result<()> {
+    const MAX_CLEANUP_PASSES: usize = 16;
+
+    for _ in 0..MAX_CLEANUP_PASSES {
+        let owned_names = private_snapshot_identity_names(authority)?;
+        if owned_names.is_empty() {
+            return Ok(());
+        }
+
+        for name in owned_names {
+            quarantine_private_snapshot_candidate(authority, &name)?;
+        }
+    }
+
+    let remaining = private_snapshot_identity_names(authority)?;
+    Err(anyhow!(
+        "private snapshot cleanup did not converge; {} owned directory entries remain",
+        remaining.len()
+    ))
+}
+
 fn restore_staged_file(dir: &Dir, staged: &Path, original: &Path) -> Result<()> {
     ensure_cap_regular_file(dir, staged, "staged file")?;
     dir.hard_link(staged, dir, original).map_err(|error| {
@@ -1008,17 +1164,8 @@ impl FileStore for FileSystemStore {
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
             let authority = store.private_snapshot_authority(&snapshot)?;
-            let result = match authority.directory.symlink_metadata(&authority.name) {
-                Ok(metadata) => {
-                    ensure_snapshot_identity(&metadata, authority.device, authority.inode)?;
-                    Ok(authority.directory.remove_file(&authority.name)?)
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.into()),
-            };
-            if result.is_ok() {
-                store.forget_private_snapshot(&snapshot);
-            }
+            let result = remove_private_snapshot_identity(&authority);
+            store.forget_private_snapshot(&snapshot);
             result
         })
         .await?
@@ -1433,6 +1580,93 @@ mod tests {
 
         assert!(!original.exists());
         assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy bytes must be preserved");
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_removal_finds_owned_inode_after_basename_replacement() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-snapshot-name-replacement-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"owned snapshot bytes").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        let snapshot_directory = snapshot.path.parent().unwrap().to_path_buf();
+        let owned_metadata = std::fs::metadata(&snapshot.path).unwrap();
+        let renamed_owned = snapshot_directory.join("renamed-owned-snapshot");
+        let second_owned_link = snapshot_directory.join("second-owned-link");
+        std::fs::rename(&snapshot.path, &renamed_owned).unwrap();
+        std::fs::hard_link(&renamed_owned, &second_owned_link).unwrap();
+        std::fs::write(&snapshot.path, b"decoy must be preserved").unwrap();
+
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&snapshot.path).unwrap(),
+            b"decoy must be preserved"
+        );
+        assert!(std::fs::read_dir(&snapshot_directory).unwrap().all(|entry| {
+            let metadata = entry.unwrap().metadata().unwrap();
+            cap_fs_ext::MetadataExt::dev(&metadata)
+                != cap_fs_ext::MetadataExt::dev(&owned_metadata)
+                || cap_fs_ext::MetadataExt::ino(&metadata)
+                    != cap_fs_ext::MetadataExt::ino(&owned_metadata)
+        }));
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_quarantine_preserves_decoy_swapped_after_identity_scan() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-snapshot-cleanup-race-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"owned snapshot bytes").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        let authority = store.private_snapshot_authority(&snapshot).unwrap();
+        let scanned_name = private_snapshot_identity_names(&authority).unwrap().remove(0);
+        let renamed_owned = snapshot
+            .path
+            .parent()
+            .unwrap()
+            .join("owned-moved-after-scan");
+
+        std::fs::rename(&snapshot.path, &renamed_owned).unwrap();
+        std::fs::write(&snapshot.path, b"late decoy must be preserved").unwrap();
+        quarantine_private_snapshot_candidate(&authority, &scanned_name).unwrap();
+
+        assert_eq!(
+            std::fs::read(&snapshot.path).unwrap(),
+            b"late decoy must be preserved"
+        );
+        assert_eq!(
+            std::fs::read(&renamed_owned).unwrap(),
+            b"owned snapshot bytes"
+        );
+
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&snapshot.path).unwrap(),
+            b"late decoy must be preserved"
+        );
+        assert!(!renamed_owned.exists());
         assert!(store.private_snapshots.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
