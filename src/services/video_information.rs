@@ -2,6 +2,7 @@ use crate::domain::algorithm::{classify_media_kind, MediaKind};
 use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender, MediaEvent};
 use crate::domain::services::{generate_book_metadata, generate_video_metadatas};
 use crate::domain::traits::{FileStorer, ProcessSpawner, Repository, Storer};
+use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -21,6 +22,58 @@ static WORKER_SEMAPHORE: Lazy<Arc<Semaphore>> = Lazy::new(|| {
     Arc::new(Semaphore::new(concurrent_limit))
 });
 
+#[async_trait]
+trait MetadataProcessor: Send + Sync {
+    async fn process_video(
+        &self,
+        path: PathBuf,
+        storer: Storer,
+        repo: Repository,
+        search: Option<String>,
+        spawner: Arc<dyn ProcessSpawner>,
+    ) -> Result<(), String>;
+
+    async fn process_book(
+        &self,
+        path: PathBuf,
+        storer: FileStorer,
+        repo: Repository,
+        search: Option<String>,
+    ) -> Result<(), String>;
+}
+
+struct ProductionMetadataProcessor;
+
+#[async_trait]
+impl MetadataProcessor for ProductionMetadataProcessor {
+    async fn process_video(
+        &self,
+        path: PathBuf,
+        storer: Storer,
+        repo: Repository,
+        search: Option<String>,
+        spawner: Arc<dyn ProcessSpawner>,
+    ) -> Result<(), String> {
+        generate_video_metadatas(path, storer, repo, search, spawner)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn process_book(
+        &self,
+        path: PathBuf,
+        storer: FileStorer,
+        repo: Repository,
+        search: Option<String>,
+    ) -> Result<(), String> {
+        generate_book_metadata(path, storer, repo, search)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
 pub struct MetaDataManager {
     repo: Repository,
     storer: Storer,
@@ -29,6 +82,7 @@ pub struct MetaDataManager {
     _sender: LocalMessageSender,
     processing_paths: Arc<Mutex<HashSet<PathBuf>>>,
     spawner: Arc<dyn ProcessSpawner>,
+    processor: Arc<dyn MetadataProcessor>,
 }
 
 impl MetaDataManager {
@@ -40,6 +94,26 @@ impl MetaDataManager {
         sender: LocalMessageSender,
         spawner: Arc<dyn ProcessSpawner>,
     ) -> Self {
+        Self::new_with_processor(
+            repo,
+            storer,
+            book_storer,
+            receiver,
+            sender,
+            spawner,
+            Arc::new(ProductionMetadataProcessor),
+        )
+    }
+
+    fn new_with_processor(
+        repo: Repository,
+        storer: Storer,
+        book_storer: FileStorer,
+        receiver: LocalMessageReceiver,
+        sender: LocalMessageSender,
+        spawner: Arc<dyn ProcessSpawner>,
+        processor: Arc<dyn MetadataProcessor>,
+    ) -> Self {
         Self {
             repo,
             storer,
@@ -48,6 +122,7 @@ impl MetaDataManager {
             _sender: sender,
             processing_paths: Arc::new(Mutex::new(HashSet::new())),
             spawner,
+            processor,
         }
     }
 
@@ -117,6 +192,7 @@ impl MetaDataManager {
                 let processing_paths = self.processing_paths.clone();
                 let path_for_cleanup = full_path.clone();
                 let spawner = self.spawner.clone();
+                let processor = self.processor.clone();
                 // Spawn a new task to process the media event
                 tokio::spawn(async move {
                     // Acquire a permit from the semaphore, which will limit concurrent tasks
@@ -125,16 +201,17 @@ impl MetaDataManager {
                     // Process the media event on its media-specific path.
                     match route {
                         MediaKind::Video => {
-                            if let Err(err) =
-                                generate_video_metadatas(full_path, storer, repo, search, spawner)
-                                    .await
+                            if let Err(err) = processor
+                                .process_video(full_path, storer, repo, search, spawner)
+                                .await
                             {
                                 tracing::error!("processing MediaAvailable: {}", err);
                             }
                         }
                         MediaKind::Book => {
-                            if let Err(err) =
-                                generate_book_metadata(full_path, book_storer, repo, search).await
+                            if let Err(err) = processor
+                                .process_book(full_path, book_storer, repo, search)
+                                .await
                             {
                                 tracing::error!("processing book MediaAvailable: {}", err);
                             }
@@ -168,25 +245,156 @@ fn processing_route(path: impl AsRef<std::path::Path>) -> MediaKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::algorithm::MediaKind;
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Notify;
 
-    #[test]
-    fn routes_completed_pdf_and_epub_files_to_book_processing() {
-        assert_eq!(processing_route("library/book.pdf"), MediaKind::Book);
-        assert_eq!(processing_route("library/BOOK.EPUB"), MediaKind::Book);
+    use crate::{
+        adaptors::{FileSystemStore, SqlRepository},
+        domain::{
+            messagebus::{LocalMessageExchange, MessageFilter},
+            traits::{MockMediaStorer, Repository},
+            NoSpawner,
+        },
+    };
+
+    struct RecordingProcessor {
+        calls: StdMutex<Vec<MediaKind>>,
+        started: Notify,
+        releases: Semaphore,
     }
 
-    #[test]
-    fn keeps_existing_completed_video_files_on_video_processing() {
-        for path in ["movie.mp4", "episode.MKV", "clip.webm", "archive.avi"] {
-            assert_eq!(processing_route(path), MediaKind::Video);
+    impl RecordingProcessor {
+        fn new(blocked: bool) -> Self {
+            Self {
+                calls: StdMutex::new(Vec::new()),
+                started: Notify::new(),
+                releases: Semaphore::new(if blocked { 0 } else { 16 }),
+            }
+        }
+
+        async fn record(&self, kind: MediaKind) {
+            self.calls.lock().unwrap().push(kind);
+            self.started.notify_one();
+            self.releases.acquire().await.unwrap().forget();
+        }
+
+        fn calls(&self) -> Vec<MediaKind> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
-    #[test]
-    fn routes_unrelated_completed_files_to_unsupported() {
+    #[async_trait]
+    impl MetadataProcessor for RecordingProcessor {
+        async fn process_video(
+            &self,
+            _path: PathBuf,
+            _storer: Storer,
+            _repo: Repository,
+            _search: Option<String>,
+            _spawner: Arc<dyn ProcessSpawner>,
+        ) -> Result<(), String> {
+            self.record(MediaKind::Video).await;
+            Ok(())
+        }
+
+        async fn process_book(
+            &self,
+            _path: PathBuf,
+            _storer: FileStorer,
+            _repo: Repository,
+            _search: Option<String>,
+        ) -> Result<(), String> {
+            self.record(MediaKind::Book).await;
+            Ok(())
+        }
+    }
+
+    async fn manager_with_processor(processor: Arc<dyn MetadataProcessor>) -> MetaDataManager {
+        let exchange = LocalMessageExchange::new();
+        let receiver = exchange
+            .listen_for_messages(MessageFilter::All)
+            .await
+            .unwrap();
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let storer: Storer = Arc::new(MockMediaStorer::new());
+        let book_storer: FileStorer = Arc::new(FileSystemStore::new(
+            std::env::temp_dir()
+                .join("tvserver-routing-test-books")
+                .to_str()
+                .unwrap(),
+        ));
+        MetaDataManager::new_with_processor(
+            repository,
+            storer,
+            book_storer,
+            receiver,
+            exchange.new_sender(),
+            Arc::new(NoSpawner::new()),
+            processor,
+        )
+    }
+
+    async fn dispatch_and_wait(
+        manager: &MetaDataManager,
+        processor: &RecordingProcessor,
+        path: &str,
+    ) {
+        let started = processor.started.notified();
+        manager
+            .handle_media_event(MediaEvent::new_media(std::path::Path::new(path), None))
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), started)
+            .await
+            .expect("metadata processor should be dispatched");
+    }
+
+    #[tokio::test]
+    async fn routes_completed_pdf_and_epub_events_to_book_processing() {
+        let processor = Arc::new(RecordingProcessor::new(false));
+        let manager = manager_with_processor(processor.clone()).await;
+
+        dispatch_and_wait(&manager, &processor, "library/book.pdf").await;
+        dispatch_and_wait(&manager, &processor, "library/BOOK.EPUB").await;
+
+        assert_eq!(processor.calls(), [MediaKind::Book, MediaKind::Book]);
+    }
+
+    #[tokio::test]
+    async fn keeps_existing_completed_video_events_on_video_processing() {
+        let processor = Arc::new(RecordingProcessor::new(false));
+        let manager = manager_with_processor(processor.clone()).await;
+
+        dispatch_and_wait(&manager, &processor, "movie.mp4").await;
+
+        assert_eq!(processor.calls(), [MediaKind::Video]);
+    }
+
+    #[tokio::test]
+    async fn unsupported_completed_events_dispatch_no_processor() {
+        let processor = Arc::new(RecordingProcessor::new(false));
+        let manager = manager_with_processor(processor.clone()).await;
+
         for path in ["cover.jpg", "notes.txt", "README", ".hidden.epub"] {
-            assert_eq!(processing_route(path), MediaKind::Unsupported);
+            manager
+                .handle_media_event(MediaEvent::new_media(std::path::Path::new(path), None))
+                .await;
         }
+
+        assert!(processor.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_completed_events_dispatch_only_once_while_processing() {
+        let processor = Arc::new(RecordingProcessor::new(true));
+        let manager = manager_with_processor(processor.clone()).await;
+
+        dispatch_and_wait(&manager, &processor, "movie.mp4").await;
+        manager
+            .handle_media_event(MediaEvent::new_media(std::path::Path::new("movie.mp4"), None))
+            .await;
+
+        assert_eq!(processor.calls(), [MediaKind::Video]);
+        processor.releases.add_permits(1);
     }
 }
