@@ -10,6 +10,8 @@ use mockall::automock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use super::algorithm::file_integrity::FileSeal;
+
 /*
 The following are higher level traits that provide polymorphism
 at the service layer.
@@ -113,6 +115,41 @@ pub trait Filer: Sync + Send {
 
 pub type StoreObject = Arc<dyn Filer>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedFile {
+    pub original_path: PathBuf,
+    pub staged_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateSnapshot {
+    pub path: PathBuf,
+    pub(crate) id: u128,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+impl PrivateSnapshot {
+    pub(crate) fn new(path: PathBuf, id: u128, device: u64, inode: u64) -> Self {
+        Self {
+            path,
+            id,
+            device,
+            inode,
+        }
+    }
+
+    pub(crate) fn path_has_creation_identity(&self) -> anyhow::Result<bool> {
+        use cap_fs_ext::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(&self.path)?;
+        Ok(metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode)
+    }
+}
+
 /// An interface to a collection of files.
 ///
 /// Unlike the MediaStorer interface, this is a low level interface implemented
@@ -124,6 +161,32 @@ pub trait FileStore: Sync + Send {
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile>;
+    async fn create_private_snapshot(
+        &self,
+        staged: &StagedFile,
+    ) -> anyhow::Result<PrivateSnapshot>;
+    async fn seal_private_snapshot(
+        &self,
+        snapshot: &PrivateSnapshot,
+    ) -> anyhow::Result<FileSeal>;
+    async fn publish_private_snapshot_no_replace(
+        &self,
+        snapshot: &PrivateSnapshot,
+        destination: &str,
+        expected_seal: &FileSeal,
+    ) -> anyhow::Result<()>;
+    async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()>;
+    async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool>;
+    async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()>;
+    async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
+    async fn publish_staged_no_replace(
+        &self,
+        staged: &StagedFile,
+        destination: &str,
+    ) -> anyhow::Result<()>;
+    async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
     async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()>;
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;

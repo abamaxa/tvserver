@@ -1,20 +1,31 @@
-use crate::domain::models::{ensure_default_book_thumbnail, BookMetadata, DEFAULT_BOOK_THUMBNAIL};
+use crate::domain::{
+    algorithm::title_case,
+    config::{get_book_dir, get_book_thumbnail_dir},
+    models::{
+        ensure_default_book_thumbnail, BookDetails, BookFormat, BookMetadata, BookState,
+        DEFAULT_BOOK_THUMBNAIL,
+    },
+    traits::{FileStorer, PrivateSnapshot, Repository, StagedFile},
+};
 use lopdf::{decode_text_string, Dictionary, Document};
+use once_cell::sync::Lazy;
 use quick_xml::{
     events::{BytesStart, Event},
     Reader,
 };
 use serde_json::json;
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, Weak,
     },
 };
 use zip::ZipArchive;
+use tokio_util::sync::CancellationToken;
 
 const MAX_EPUB_ARCHIVE_ENTRIES: u16 = 4_096;
 const MAX_CENTRAL_DIRECTORY_BYTES: u32 = 8 * 1024 * 1024;
@@ -25,11 +36,97 @@ const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_COVER_DIMENSION: u32 = 8_192;
 const MAX_COVER_PIXELS: u64 = 8_000_000;
 const MAX_COVER_DECODE_ALLOC_BYTES: u64 = 48 * 1024 * 1024;
+const BOOK_STABILITY_ATTEMPTS: usize = 3;
+const BOOK_STABILITY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const SVG_FONT_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/book/FiraSans-Regular.ttf"
 ));
-static NEXT_THUMBNAIL_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+static BOOK_DESTINATION_LOCKS: Lazy<StdMutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+static BOOK_THUMBNAIL_LOCKS: Lazy<StdMutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+#[cfg(test)]
+static BOOK_EXTRACTION_BARRIERS: Lazy<StdMutex<HashMap<PathBuf, Weak<ExtractionTestBarrier>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+#[cfg(test)]
+static BOOK_POST_EXTRACTION_BARRIERS: Lazy<StdMutex<HashMap<PathBuf, Weak<ExtractionTestBarrier>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(test)]
+struct ExtractionTestBarrier {
+    started: tokio::sync::Notify,
+    released: StdMutex<bool>,
+    released_signal: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl ExtractionTestBarrier {
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.released_signal.notify_all();
+    }
+
+    fn wait(&self) {
+        self.started.notify_one();
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.released_signal.wait(released).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_extraction_test_barrier(path: &Path) -> Arc<ExtractionTestBarrier> {
+    let barrier = Arc::new(ExtractionTestBarrier {
+        started: tokio::sync::Notify::new(),
+        released: StdMutex::new(false),
+        released_signal: std::sync::Condvar::new(),
+    });
+    BOOK_EXTRACTION_BARRIERS
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), Arc::downgrade(&barrier));
+    barrier
+}
+
+#[cfg(test)]
+fn install_post_extraction_test_barrier(path: &Path) -> Arc<ExtractionTestBarrier> {
+    let barrier = Arc::new(ExtractionTestBarrier {
+        started: tokio::sync::Notify::new(),
+        released: StdMutex::new(false),
+        released_signal: std::sync::Condvar::new(),
+    });
+    BOOK_POST_EXTRACTION_BARRIERS
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), Arc::downgrade(&barrier));
+    barrier
+}
+
+#[cfg(test)]
+fn wait_for_extraction_test_barrier(path: &Path) {
+    let barrier = BOOK_EXTRACTION_BARRIERS
+        .lock()
+        .unwrap()
+        .get(path)
+        .and_then(Weak::upgrade);
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(test)]
+fn wait_for_post_extraction_test_barrier(path: &Path) {
+    let barrier = BOOK_POST_EXTRACTION_BARRIERS
+        .lock()
+        .unwrap()
+        .get(path)
+        .and_then(Weak::upgrade);
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BookMetadataExtraction {
@@ -58,8 +155,896 @@ pub enum BookMetadataExtractionError {
     Pdf(String),
 }
 
+pub async fn generate_book_metadata(
+    path: PathBuf,
+    storer: FileStorer,
+    repository: Repository,
+    suggested_collection: Option<String>,
+) -> anyhow::Result<Option<BookDetails>> {
+    generate_book_metadata_with_cancellation(
+        path,
+        storer,
+        repository,
+        suggested_collection,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) async fn generate_book_metadata_with_cancellation(
+    path: PathBuf,
+    storer: FileStorer,
+    repository: Repository,
+    suggested_collection: Option<String>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<Option<BookDetails>> {
+    let book_dir = get_book_dir();
+    let book_root = PathBuf::from(&book_dir);
+    let thumbnail_root = get_book_thumbnail_dir(&book_dir);
+    generate_book_metadata_with_roots_and_cancellation(
+        path,
+        storer,
+        repository,
+        suggested_collection,
+        book_root,
+        thumbnail_root,
+        cancellation,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn generate_book_metadata_with_roots(
+    path: PathBuf,
+    storer: FileStorer,
+    repository: Repository,
+    suggested_collection: Option<String>,
+    book_root: PathBuf,
+    thumbnail_root: PathBuf,
+) -> anyhow::Result<Option<BookDetails>> {
+    generate_book_metadata_with_roots_and_cancellation(
+        path,
+        storer,
+        repository,
+        suggested_collection,
+        book_root,
+        thumbnail_root,
+        CancellationToken::new(),
+    )
+    .await
+}
+
+async fn generate_book_metadata_with_roots_and_cancellation(
+    path: PathBuf,
+    storer: FileStorer,
+    repository: Repository,
+    suggested_collection: Option<String>,
+    book_root: PathBuf,
+    thumbnail_root: PathBuf,
+    cancellation: CancellationToken,
+) -> anyhow::Result<Option<BookDetails>> {
+    if cancellation.is_cancelled() {
+        anyhow::bail!("book ingestion cancelled before staging: {}", path.display());
+    }
+    let format = book_format(&path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("book path has no UTF-8 file name: {}", path.display()))?
+        .to_string();
+    let collection = match suggested_collection.as_deref() {
+        Some(collection) => title_case(collection),
+        None => collection_from_source(&path, &book_root)?,
+    };
+    validate_collection(&collection)?;
+    let destination_directory = book_root.join(&collection);
+    let destination = destination_directory.join(&file_name);
+    let source_absolute = absolute_path(&path)?;
+    let destination_absolute = absolute_path(&destination)?;
+    let destination_lock = destination_lock(&destination_absolute)?;
+    let _destination_guard = destination_lock.lock_owned().await;
+    if source_absolute != destination_absolute {
+        match tokio::fs::symlink_metadata(&destination).await {
+            Ok(_) => anyhow::bail!(
+                "book destination already exists; refusing to replace it: {}",
+                destination.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let source = path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("book source path is not valid UTF-8: {}", path.display())
+    })?;
+    let staged = storer.stage_no_follow(source).await?;
+    let mut staged_guard = StagedSourceGuard::new(staged.clone());
+    let staged_path = staged.staged_path.clone();
+    if cancellation.is_cancelled() {
+        storer.restore_staged(&staged).await?;
+        staged_guard.disarm();
+        anyhow::bail!("book ingestion cancelled after staging: {}", path.display());
+    }
+    if let Err(error) = storer.create_folder(&destination_directory).await {
+        storer.restore_staged(&staged).await.map_err(|restore_error| {
+            anyhow::anyhow!(
+                "{error}; additionally failed to restore staged source: {restore_error}"
+            )
+        })?;
+        staged_guard.disarm();
+        return Err(error);
+    }
+
+    let mut accepted = None;
+    for attempt in 1..=BOOK_STABILITY_ATTEMPTS {
+        let before = match staged_fingerprint(&staged_path).await {
+            Ok(before) => before,
+            Err(error) => {
+                tracing::warn!(book = %path.display(), attempt, "Unsafe staged source fingerprint: {error}");
+                continue;
+            }
+        };
+        if before.len == 0 {
+            storer.restore_staged(&staged).await?;
+            staged_guard.disarm();
+            anyhow::bail!("cannot ingest zero-byte book: {}", path.display());
+        }
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                storer.restore_staged(&staged).await?;
+                staged_guard.disarm();
+                anyhow::bail!("book ingestion cancelled during stability check: {}", path.display());
+            }
+            _ = tokio::time::sleep(BOOK_STABILITY_INTERVAL) => {}
+        }
+        let stable = match staged_fingerprint(&staged_path).await {
+            Ok(stable) => stable,
+            Err(error) => {
+                tracing::warn!(book = %path.display(), attempt, "Unsafe staged source after stability wait: {error}");
+                continue;
+            }
+        };
+        if before != stable {
+            tracing::info!(
+                book = %path.display(),
+                attempt,
+                "Book source changed during stability check; retrying"
+            );
+            continue;
+        }
+
+        let snapshot = match storer.create_private_snapshot(&staged).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    book = %path.display(),
+                    attempt,
+                    "Could not create a stable private book snapshot: {error}"
+                );
+                continue;
+            }
+        };
+        if cancellation.is_cancelled() {
+            let cleanup = cleanup_prepublication(
+                &storer,
+                &staged,
+                Some(&snapshot),
+                None,
+                CleanupMode::Restore,
+            )
+            .await;
+            staged_guard.disarm();
+            return Err(with_cleanup_error(
+                anyhow::anyhow!("book ingestion cancelled after snapshot creation: {}", path.display()),
+                cleanup,
+            ));
+        }
+        let after_copy = match staged_fingerprint(&staged_path).await {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let primary = anyhow::anyhow!(
+                    "staged source became unsafe during private snapshot copy: {error}"
+                );
+                if let Err(cleanup_error) = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    None,
+                    CleanupMode::RetryIfClean,
+                )
+                .await
+                {
+                    staged_guard.disarm();
+                    return Err(with_cleanup_error(primary, Err(cleanup_error)));
+                }
+                tracing::warn!(
+                    book = %path.display(),
+                    attempt,
+                    "Staged source became unsafe during private snapshot copy: {error}"
+                );
+                continue;
+            }
+        };
+        if stable != after_copy {
+            let primary = anyhow::anyhow!("book source changed during private snapshot copy");
+            if let Err(cleanup_error) = cleanup_prepublication(
+                &storer,
+                &staged,
+                Some(&snapshot),
+                None,
+                CleanupMode::RetryIfClean,
+            )
+            .await
+            {
+                staged_guard.disarm();
+                return Err(with_cleanup_error(primary, Err(cleanup_error)));
+            }
+            tracing::warn!(
+                book = %path.display(),
+                attempt,
+                "Book source changed during private snapshot copy; retrying"
+            );
+            continue;
+        }
+
+        let checksum_result = async {
+            let before = private_snapshot_fingerprint(&snapshot).await?;
+            let checksum = super::video_metadata::calculate_checksum(&snapshot.path).await?;
+            let after = private_snapshot_fingerprint(&snapshot).await?;
+            if before != after {
+                anyhow::bail!("private snapshot identity changed during checksum calculation");
+            }
+            anyhow::Result::<_>::Ok(checksum)
+        }
+        .await;
+        let checksum = match checksum_result {
+            Ok(checksum) => checksum,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    None,
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error.into(), cleanup));
+            }
+        };
+        let thumbnail_key = checksum.to_string();
+        let generated_thumbnail_path = thumbnail_root.join(format!("{thumbnail_key}.jpg"));
+        let thumbnail_lock = match thumbnail_lock(&generated_thumbnail_path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    None,
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
+        let thumbnail_lease = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    None,
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(
+                    anyhow::anyhow!("book ingestion cancelled while waiting for thumbnail ownership: {}", path.display()),
+                    cleanup,
+                ));
+            }
+            lease = thumbnail_lock.lock_owned() => lease,
+        };
+        let existing = match repository.retrieve_book(checksum).await {
+            Ok(existing) => Some(existing),
+            Err(sqlx::Error::RowNotFound) => None,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    None,
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error.into(), cleanup));
+            }
+        };
+        if let Some(existing) = existing {
+            let canonical_relative = (|| -> anyhow::Result<PathBuf> {
+                validate_collection(&existing.collection)?;
+                let existing_file = Path::new(&existing.file_name);
+                if existing_file.components().count() != 1
+                    || !matches!(
+                        existing_file.components().next(),
+                        Some(std::path::Component::Normal(_))
+                    )
+                {
+                    anyhow::bail!("stored book file name is not a safe path component");
+                }
+                Ok(PathBuf::from(
+                    crate::domain::algorithm::get_book_download_path(
+                        &existing.collection,
+                        &existing.file_name,
+                    ),
+                ))
+            })();
+            let canonical_exists = match canonical_relative {
+                Ok(relative) => storer.regular_file_exists_no_follow(&relative).await,
+                Err(error) => Err(error),
+            };
+            match canonical_exists {
+                Ok(true) => {
+                    let cleanup = cleanup_healthy_duplicate(&storer, &staged, &snapshot).await;
+                    staged_guard.disarm();
+                    cleanup?;
+                    return Ok(Some(existing));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let cleanup = cleanup_prepublication(
+                        &storer,
+                        &staged,
+                        Some(&snapshot),
+                        None,
+                        CleanupMode::Restore,
+                    )
+                    .await;
+                    staged_guard.disarm();
+                    return Err(with_cleanup_error(error, cleanup));
+                }
+            }
+        }
+        let thumbnail_preexisted = generated_thumbnail_path.symlink_metadata().is_ok();
+        let mut thumbnail_guard = GeneratedThumbnailGuard::new(
+            generated_thumbnail_path,
+            thumbnail_preexisted,
+        );
+        let snapshot_before_extraction = match private_snapshot_fingerprint(&snapshot).await {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    Some(&mut thumbnail_guard),
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
+        let extraction_path = snapshot.path.clone();
+        let extraction_thumbnail_root = thumbnail_root.clone();
+        let extraction = match tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            wait_for_extraction_test_barrier(&extraction_thumbnail_root);
+            let extraction = match format {
+                BookFormat::Pdf => extract_pdf_metadata(
+                    &extraction_path,
+                    &extraction_thumbnail_root,
+                    &thumbnail_key,
+                ),
+                BookFormat::Epub => extract_epub_metadata(
+                    &extraction_path,
+                    &extraction_thumbnail_root,
+                    &thumbnail_key,
+                ),
+            };
+            #[cfg(test)]
+            wait_for_post_extraction_test_barrier(&extraction_thumbnail_root);
+            extraction
+        })
+        .await {
+            Ok(extraction) => extraction,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    Some(&mut thumbnail_guard),
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(
+                    anyhow::anyhow!("book metadata worker failed: {error}"),
+                    cleanup,
+                ));
+            }
+        };
+        if cancellation.is_cancelled() {
+            let cleanup = cleanup_prepublication(
+                &storer,
+                &staged,
+                Some(&snapshot),
+                Some(&mut thumbnail_guard),
+                CleanupMode::Restore,
+            )
+            .await;
+            staged_guard.disarm();
+            return Err(with_cleanup_error(
+                anyhow::anyhow!("book ingestion cancelled during metadata extraction: {}", path.display()),
+                cleanup,
+            ));
+        }
+
+        let snapshot_before_verification = private_snapshot_fingerprint(&snapshot).await;
+        let verified_checksum = match &snapshot_before_verification {
+            Ok(_) => super::video_metadata::calculate_checksum(&snapshot.path).await,
+            Err(error) => Err(std::io::Error::other(format!("{error:#}"))),
+        };
+        let snapshot_seal = match storer.seal_private_snapshot(&snapshot).await {
+            Ok(seal) => seal,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    Some(&mut thumbnail_guard),
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
+        let snapshot_after_verification = private_snapshot_fingerprint(&snapshot).await;
+        let snapshot_is_verified = matches!(
+            (
+                &snapshot_before_verification,
+                &verified_checksum,
+                &snapshot_after_verification,
+            ),
+            (Ok(before), Ok(verified_checksum), Ok(after))
+                if snapshot_before_extraction == *before
+                    && before == after
+                    && checksum == *verified_checksum
+        );
+        if !snapshot_is_verified {
+            let primary = anyhow::anyhow!(
+                "private book snapshot changed during metadata extraction"
+            );
+            if let Err(cleanup_error) = cleanup_prepublication(
+                &storer,
+                &staged,
+                Some(&snapshot),
+                Some(&mut thumbnail_guard),
+                CleanupMode::RetryIfClean,
+            )
+            .await
+            {
+                staged_guard.disarm();
+                return Err(with_cleanup_error(primary, Err(cleanup_error)));
+            }
+            tracing::warn!(
+                book = %path.display(),
+                attempt,
+                "Private book snapshot changed during metadata extraction; retrying"
+            );
+            continue;
+        }
+
+        let mut details = BookDetails::new(file_name.clone(), collection.clone(), &path, format);
+        details.checksum = checksum;
+        details.search_phrase = suggested_collection.clone();
+        match extraction {
+            Ok(mut extraction) => {
+                if format == BookFormat::Pdf
+                    && extraction.title.as_deref()
+                        == Some(filename_derived_title(&staged_path).as_str())
+                {
+                    extraction.title = Some(filename_derived_title(&path));
+                }
+                apply_extraction(&mut details, extraction)
+            }
+            Err(error) => {
+                tracing::warn!(book = %path.display(), "book metadata extraction failed: {error}");
+                if let Err(thumbnail_error) = ensure_default_book_thumbnail(&thumbnail_root) {
+                    tracing::warn!(
+                        book = %path.display(),
+                        "could not prepare default book thumbnail: {thumbnail_error}"
+                    );
+                }
+                details.thumbnail = DEFAULT_BOOK_THUMBNAIL.to_string();
+                details.metadata.extraction_error = Some(error.to_string());
+                details.state = BookState::MetadataError;
+            }
+        }
+        accepted = Some((
+            details,
+            thumbnail_guard,
+            snapshot,
+            snapshot_seal,
+            thumbnail_lease,
+        ));
+        break;
+    }
+
+    let (mut details, mut thumbnail_guard, snapshot, snapshot_seal, _thumbnail_lease) = match accepted {
+        Some(accepted) => accepted,
+        None => {
+            let error = anyhow::anyhow!(
+                "book source did not become stable after {BOOK_STABILITY_ATTEMPTS} attempts: {}",
+                path.display()
+            );
+            storer.restore_staged(&staged).await.map_err(|restore_error| {
+                anyhow::anyhow!(
+                    "{error}; additionally failed to restore staged source: {restore_error}"
+                )
+            })?;
+            staged_guard.disarm();
+            return Err(error);
+        }
+    };
+
+    let destination_path = destination.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "book destination path is not valid UTF-8: {}",
+            destination.display()
+        )
+    })?;
+    if cancellation.is_cancelled() {
+        let cleanup = cleanup_prepublication(
+            &storer,
+            &staged,
+            Some(&snapshot),
+            Some(&mut thumbnail_guard),
+            CleanupMode::Restore,
+        )
+        .await;
+        staged_guard.disarm();
+        return Err(with_cleanup_error(
+            anyhow::anyhow!("book ingestion cancelled before publication: {}", path.display()),
+            cleanup,
+        ));
+    }
+    if let Err(error) = storer
+        .publish_private_snapshot_no_replace(
+            &snapshot,
+            destination_path,
+            &snapshot_seal,
+        )
+        .await
+    {
+        let thumbnail_cleanup = thumbnail_guard.cleanup(&storer).await;
+        let snapshot_cleanup = storer.remove_private_snapshot(&snapshot).await;
+        let restore = storer.restore_staged(&staged).await;
+        staged_guard.disarm();
+        if let Err(cleanup_error) = snapshot_cleanup {
+            return Err(anyhow::anyhow!(
+                "{error}; additionally failed to remove private snapshot: {cleanup_error}"
+            ));
+        }
+        if let Err(cleanup_error) = thumbnail_cleanup {
+            return Err(anyhow::anyhow!(
+                "{error}; additionally failed to remove generated thumbnail: {cleanup_error}"
+            ));
+        }
+        if let Err(restore_error) = restore {
+            return Err(anyhow::anyhow!(
+                "{error}; additionally failed to restore staged source: {restore_error}"
+            ));
+        }
+        return Err(error);
+    }
+    if let Err(error) = storer.discard_staged(&staged).await {
+        tracing::warn!(
+            staged = %staged.staged_path.display(),
+            "Published private book snapshot but could not remove staged downloader source: {error}"
+        );
+    }
+    staged_guard.disarm();
+
+    details.collection = collection;
+    details.file_name = file_name;
+    details.dir_path = None;
+    if let Err(error) = repository.save_book(&details).await {
+        let cleanup = thumbnail_guard.cleanup(&storer).await;
+        return Err(with_cleanup_error(error.into(), cleanup));
+    }
+    thumbnail_guard.disarm();
+    Ok(Some(details))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StagedFingerprint {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+async fn staged_fingerprint(path: &Path) -> anyhow::Result<StagedFingerprint> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "staged book source must be a regular file and not a symlink: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(StagedFingerprint {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+    })
+}
+
+async fn private_snapshot_fingerprint(
+    snapshot: &PrivateSnapshot,
+) -> anyhow::Result<StagedFingerprint> {
+    if !snapshot.path_has_creation_identity()? {
+        anyhow::bail!(
+            "private snapshot path no longer names its creation-time file identity: {}",
+            snapshot.path.display()
+        );
+    }
+    staged_fingerprint(&snapshot.path).await
+}
+
+struct StagedSourceGuard {
+    staged: Option<StagedFile>,
+}
+
+impl StagedSourceGuard {
+    fn new(staged: StagedFile) -> Self {
+        Self { staged: Some(staged) }
+    }
+
+    fn disarm(&mut self) {
+        self.staged = None;
+    }
+}
+
+impl Drop for StagedSourceGuard {
+    fn drop(&mut self) {
+        if let Some(staged) = self.staged.take() {
+            tracing::warn!(
+                staged = %staged.staged_path.display(),
+                original = %staged.original_path.display(),
+                "Staged book source guard dropped before awaited cleanup"
+            );
+        }
+    }
+}
+
+struct GeneratedThumbnailGuard {
+    path: Option<PathBuf>,
+}
+
+impl GeneratedThumbnailGuard {
+    fn new(path: PathBuf, preexisted: bool) -> Self {
+        Self {
+            path: (!preexisted).then_some(path),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+
+    async fn cleanup(&mut self, storer: &FileStorer) -> anyhow::Result<()> {
+        let Some(path) = self.path.take() else {
+            return Ok(());
+        };
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(DEFAULT_BOOK_THUMBNAIL))
+        {
+            return Ok(());
+        }
+        storer.remove_regular_no_follow(&path).await
+    }
+}
+
+impl Drop for GeneratedThumbnailGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            tracing::warn!(
+                thumbnail = %path.display(),
+                "Generated book thumbnail guard dropped before awaited cleanup"
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CleanupMode {
+    RetryIfClean,
+    Restore,
+}
+
+async fn cleanup_prepublication(
+    storer: &FileStorer,
+    staged: &StagedFile,
+    snapshot: Option<&PrivateSnapshot>,
+    thumbnail: Option<&mut GeneratedThumbnailGuard>,
+    mode: CleanupMode,
+) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
+    if let Some(thumbnail) = thumbnail {
+        if let Err(error) = thumbnail.cleanup(storer).await {
+            failures.push(format!("generated thumbnail cleanup failed: {error}"));
+        }
+    }
+    if let Some(snapshot) = snapshot {
+        if let Err(error) = storer.remove_private_snapshot(snapshot).await {
+            failures.push(format!("private snapshot cleanup failed: {error}"));
+        }
+    }
+    if mode == CleanupMode::Restore || !failures.is_empty() {
+        if let Err(error) = storer.restore_staged(staged).await {
+            failures.push(format!("staged source restoration failed: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(failures.join("; "))
+    }
+}
+
+async fn cleanup_healthy_duplicate(
+    storer: &FileStorer,
+    staged: &StagedFile,
+    snapshot: &PrivateSnapshot,
+) -> anyhow::Result<()> {
+    if let Err(error) = storer.remove_private_snapshot(snapshot).await {
+        let restore = storer.restore_staged(staged).await;
+        return Err(with_cleanup_error(
+            anyhow::anyhow!("private snapshot cleanup failed: {error}"),
+            restore,
+        ));
+    }
+    if let Err(error) = storer.discard_staged(staged).await {
+        let restore = storer.restore_staged(staged).await;
+        return Err(with_cleanup_error(
+            anyhow::anyhow!("staged source discard failed: {error}"),
+            restore,
+        ));
+    }
+    Ok(())
+}
+
+fn with_cleanup_error(error: anyhow::Error, cleanup: anyhow::Result<()>) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => anyhow::anyhow!("{error}; additionally {cleanup_error}"),
+    }
+}
+
+fn apply_extraction(details: &mut BookDetails, extraction: BookMetadataExtraction) {
+    if extraction.metadata.extraction_error.is_some() {
+        details.thumbnail = DEFAULT_BOOK_THUMBNAIL.to_string();
+        details.metadata = extraction.metadata;
+        details.state = BookState::MetadataError;
+        return;
+    }
+
+    if let Some(title) = extraction.title {
+        details.title = title;
+    }
+    details.authors = extraction.authors;
+    details.description = extraction.description;
+    details.publisher = extraction.publisher;
+    details.published_date = extraction.published_date;
+    details.language = extraction.language;
+    details.isbn = extraction.isbn;
+    details.page_count = extraction.page_count;
+    details.thumbnail = extraction.thumbnail;
+    details.metadata = extraction.metadata;
+    details.state = if details.metadata.extraction_error.is_some() {
+        BookState::MetadataError
+    } else {
+        BookState::Ready
+    };
+}
+
+fn book_format(path: &Path) -> anyhow::Result<BookFormat> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pdf") => Ok(BookFormat::Pdf),
+        Some("epub") => Ok(BookFormat::Epub),
+        _ => anyhow::bail!("unsupported book file: {}", path.display()),
+    }
+}
+
+fn collection_from_source(path: &Path, book_root: &Path) -> anyhow::Result<String> {
+    let Some(parent) = path.parent() else {
+        return Ok(String::new());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
+    let parent = absolute_path(parent)?;
+    let book_root = absolute_path(book_root)?;
+    match parent.strip_prefix(&book_root) {
+        Ok(relative) => relative
+            .to_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
+        Err(_) => Ok(parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string()),
+    }
+}
+
+fn validate_collection(collection: &str) -> anyhow::Result<()> {
+    if Path::new(collection)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || collection.is_empty()
+    {
+        Ok(())
+    } else {
+        anyhow::bail!("book collection must be a relative path without traversal: {collection}")
+    }
+}
+
+fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
+    std::path::absolute(path).map_err(|error| {
+        anyhow::anyhow!("could not make path absolute ({}): {error}", path.display())
+    })
+}
+
+fn destination_lock(path: &Path) -> anyhow::Result<Arc<tokio::sync::Mutex<()>>> {
+    let mut locks = BOOK_DESTINATION_LOCKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("book destination reservation lock is poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn thumbnail_lock(path: &Path) -> anyhow::Result<Arc<tokio::sync::Mutex<()>>> {
+    let mut locks = BOOK_THUMBNAIL_LOCKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("book thumbnail ownership lock is poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    Ok(lock)
+}
+
 pub trait PdfThumbnailRenderer {
-    fn render_thumbnail(&self, pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String>;
+    fn render_thumbnail(&self, pdf_path: &Path) -> Result<image::DynamicImage, String>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -67,14 +1052,14 @@ pub struct DefaultPdfThumbnailRenderer;
 
 #[cfg(not(feature = "pdf-thumbnails"))]
 impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
-    fn render_thumbnail(&self, _pdf_path: &Path, _thumbnail_path: &Path) -> Result<(), String> {
+    fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
         Err("PDF thumbnail rendering is disabled".to_string())
     }
 }
 
 #[cfg(feature = "pdf-thumbnails")]
 impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
-    fn render_thumbnail(&self, pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String> {
+    fn render_thumbnail(&self, pdf_path: &Path) -> Result<image::DynamicImage, String> {
         use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
 
         let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
@@ -97,9 +1082,7 @@ impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
             .map_err(|error| format!("could not render first PDF page: {error}"))?
             .as_image()
             .into_rgb8();
-        image
-            .save_with_format(thumbnail_path, image::ImageFormat::Jpeg)
-            .map_err(|error| format!("could not write PDF thumbnail: {error}"))
+        Ok(image::DynamicImage::ImageRgb8(image))
     }
 }
 
@@ -199,9 +1182,10 @@ fn render_pdf_thumbnail<R: PdfThumbnailRenderer + ?Sized>(
     fs::create_dir_all(thumbnail_dir)
         .map_err(|error| format!("could not create PDF thumbnail directory: {error}"))?;
     let thumbnail_path = thumbnail_dir.join(&thumbnail);
-    renderer
-        .render_thumbnail(pdf_path, &thumbnail_path)
+    let image = renderer
+        .render_thumbnail(pdf_path)
         .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
+    write_jpeg_atomically(&thumbnail_path, &image)?;
     Ok(thumbnail)
 }
 
@@ -1008,15 +1992,76 @@ fn write_jpeg_atomically(path: &Path, image: &image::DynamicImage) -> Result<(),
         })?;
         file.sync_all()
             .map_err(|error| format!("could not sync temporary thumbnail: {error}"))?;
-        drop(file);
-        fs::rename(&temp_path, path)
-            .map_err(|error| format!("could not rename temporary thumbnail: {error}"))?;
+        publish_thumbnail_temp_no_replace(&temp_path, &file, path)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
+    let _ = fs::remove_file(&temp_path);
     result
+}
+
+fn publish_thumbnail_temp_no_replace(
+    temp_path: &Path,
+    retained_file: &File,
+    final_path: &Path,
+) -> Result<(), String> {
+    let retained_metadata = retained_file
+        .metadata()
+        .map_err(|error| format!("could not inspect retained temporary thumbnail: {error}"))?;
+    if !retained_metadata.is_file() {
+        return Err("retained temporary thumbnail must be a regular file".to_string());
+    }
+
+    match fs::hard_link(temp_path, final_path) {
+        Ok(()) => {
+            let published_metadata = match final_path.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    return Err(rollback_published_thumbnail(
+                        final_path,
+                        format!("could not inspect published thumbnail identity: {error}"),
+                    ));
+                }
+            };
+            if published_metadata.file_type().is_symlink()
+                || !published_metadata.is_file()
+                || cap_fs_ext::MetadataExt::dev(&published_metadata)
+                    != cap_fs_ext::MetadataExt::dev(&retained_metadata)
+                || cap_fs_ext::MetadataExt::ino(&published_metadata)
+                    != cap_fs_ext::MetadataExt::ino(&retained_metadata)
+            {
+                return Err(rollback_published_thumbnail(
+                    final_path,
+                    "temporary thumbnail changed before publication".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = final_path
+                .symlink_metadata()
+                .map_err(|inspect_error| {
+                    format!("could not inspect existing thumbnail after collision: {inspect_error}")
+                })?;
+            if existing.file_type().is_symlink() || !existing.is_file() {
+                return Err(
+                    "existing thumbnail must be a regular file and not a symlink".to_string(),
+                );
+            }
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "could not publish temporary thumbnail without replacing the final path: {error}"
+        )),
+    }
+}
+
+fn rollback_published_thumbnail(final_path: &Path, error: String) -> String {
+    match fs::remove_file(final_path) {
+        Ok(()) => error,
+        Err(rollback_error) => {
+            format!("{error}; additionally failed to remove rejected thumbnail: {rollback_error}")
+        }
+    }
 }
 
 fn create_thumbnail_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
@@ -1028,8 +2073,10 @@ fn create_thumbnail_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
         .and_then(|filename| filename.to_str())
         .ok_or_else(|| "thumbnail filename is not valid UTF-8".to_string())?;
     for _ in 0..16 {
-        let sequence = NEXT_THUMBNAIL_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-        let temp_path = parent.join(format!(".{filename}.{}.{}.tmp", std::process::id(), sequence));
+        let temp_path = parent.join(format!(
+            ".{filename}.{:032x}.tmp",
+            rand::random::<u128>()
+        ));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1151,15 +2198,29 @@ fn isbn_value(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use base64::Engine as _;
     use lopdf::{dictionary, text_string, Document, Object};
     use std::{
         fs::{self, File},
         io::Write,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            Arc,
+        },
     };
     use zip::{write::SimpleFileOptions, ZipWriter};
+
+    use crate::{
+        adaptors::{FileSystemStore, SqlRepository},
+        domain::{
+            algorithm::file_integrity::FileSeal,
+            messagebus::{LocalMessageExchange, MessageFilter},
+            models::{BookFormat, BookState, CollectionItem, VideoDetails},
+            traits::{Databaser, FileStore, FileStorer, Repository, StagedFile, StoreObject},
+        },
+    };
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -1223,8 +2284,18 @@ mod tests {
     struct FailingPdfRenderer;
 
     impl PdfThumbnailRenderer for FailingPdfRenderer {
-        fn render_thumbnail(&self, _pdf_path: &Path, _thumbnail_path: &Path) -> Result<(), String> {
+        fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
             Err("test renderer unavailable".to_string())
+        }
+    }
+
+    struct WritingPdfRenderer;
+
+    impl PdfThumbnailRenderer for WritingPdfRenderer {
+        fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
+            Ok(image::DynamicImage::ImageRgb8(
+                image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3])),
+            ))
         }
     }
 
@@ -1342,6 +2413,74 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("test renderer unavailable")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdf_thumbnail_generation_does_not_follow_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("book.pdf");
+        let covers = temp.path().join("covers");
+        let target = temp.path().join("target.jpg");
+        fs::create_dir_all(&covers).unwrap();
+        fs::write(&target, b"preserve target bytes").unwrap();
+        symlink(&target, covers.join("pdf-symlink.jpg")).unwrap();
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &covers,
+            "pdf-symlink",
+            &WritingPdfRenderer,
+        )
+        .unwrap();
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(fs::read(&target).unwrap(), b"preserve target bytes");
+        assert!(covers
+            .join("pdf-symlink.jpg")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(fs::read_dir(&covers).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn pdf_thumbnail_generation_preserves_preexisting_regular_file_bytes() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("book.pdf");
+        let covers = temp.path().join("covers");
+        fs::create_dir_all(&covers).unwrap();
+        let existing = covers.join("pdf-existing.jpg");
+        fs::write(&existing, b"preexisting PDF thumbnail").unwrap();
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &covers,
+            "pdf-existing",
+            &WritingPdfRenderer,
+        )
+        .unwrap();
+
+        assert_eq!(result.thumbnail, "pdf-existing.jpg");
+        assert_eq!(fs::read(existing).unwrap(), b"preexisting PDF thumbnail");
+        assert!(fs::read_dir(&covers).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
@@ -1840,7 +2979,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_thumbnail_write_preserves_final_and_cleans_temp_on_rename_failure() {
+    fn no_replace_thumbnail_write_preserves_nonregular_final_and_cleans_temp() {
         let temp = TestDir::new();
         let final_path = temp.path().join("existing.jpg");
         fs::create_dir(&final_path).unwrap();
@@ -1853,13 +2992,33 @@ mod tests {
 
         let error = write_jpeg_atomically(&final_path, &image).unwrap_err();
 
-        assert!(error.contains("rename"));
+        assert!(error.contains("regular file"));
         assert_eq!(fs::read(final_path.join("marker")).unwrap(), b"preserve me");
         let entries: Vec<_> = fs::read_dir(temp.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(entries, [std::ffi::OsString::from("existing.jpg")]);
+    }
+
+    #[test]
+    fn thumbnail_publication_rejects_a_swapped_temporary_path() {
+        let temp = TestDir::new();
+        let final_path = temp.path().join("cover.jpg");
+        let (temp_path, mut retained_file) = create_thumbnail_temp_file(&final_path).unwrap();
+        retained_file.write_all(b"verified thumbnail bytes").unwrap();
+        retained_file.sync_all().unwrap();
+        let displaced_path = temp.path().join("displaced-original.tmp");
+        fs::rename(&temp_path, &displaced_path).unwrap();
+        fs::write(&temp_path, b"attacker replacement bytes").unwrap();
+
+        let result =
+            publish_thumbnail_temp_no_replace(&temp_path, &retained_file, &final_path);
+
+        assert!(result.is_err());
+        assert!(!final_path.exists());
+        assert_eq!(fs::read(&displaced_path).unwrap(), b"verified thumbnail bytes");
+        assert_eq!(fs::read(&temp_path).unwrap(), b"attacker replacement bytes");
     }
 
     #[test]
@@ -2046,5 +3205,2375 @@ mod tests {
         assert!(error
             .to_string()
             .contains("archive entry count 4097 exceeds limit 4096"));
+    }
+
+    async fn ingestion_dependencies(book_root: &Path) -> (FileStorer, Repository) {
+        let storer: FileStorer = Arc::new(FileSystemStore::new(
+            book_root.to_str().expect("test path should be UTF-8"),
+        ));
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        (storer, repository)
+    }
+
+    struct FailingRenameStore {
+        inner: FileStorer,
+    }
+
+    struct PostSealMutationStore {
+        inner: FileStorer,
+        seal_calls: AtomicUsize,
+    }
+
+    #[cfg(unix)]
+    struct SnapshotDirectoryReplacementStore {
+        inner: FileStorer,
+        book_root: PathBuf,
+        replaced: AtomicBool,
+        decoy_path: StdMutex<Option<PathBuf>>,
+        original_snapshot_path: StdMutex<Option<PathBuf>>,
+    }
+
+    struct DestinationRaceStore {
+        inner: FileStorer,
+    }
+
+    struct SourceSwapStore {
+        inner: FileStorer,
+        replacement: PathBuf,
+        swapped: AtomicBool,
+    }
+
+    struct MutatingSnapshotStore {
+        inner: FileStorer,
+        replacement: PathBuf,
+        phase: SnapshotMutationPhase,
+        staged_path: StdMutex<Option<PathBuf>>,
+        mutated: AtomicBool,
+        snapshot_calls: AtomicUsize,
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum SnapshotMutationPhase {
+        AfterSnapshotCopy,
+        Publication,
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum BlockingFilePhase {
+        Stage,
+        Publication,
+    }
+
+    struct BlockingPhaseStore {
+        inner: FileStorer,
+        phase: BlockingFilePhase,
+        started: tokio::sync::Notify,
+        releases: tokio::sync::Semaphore,
+    }
+
+    struct CleanupAuditStore {
+        inner: FileStorer,
+        mutate_staged_after_copy: bool,
+        fail_thumbnail_cleanup: bool,
+        mutated: AtomicBool,
+        staged_path: StdMutex<Option<PathBuf>>,
+        snapshot_path: StdMutex<Option<PathBuf>>,
+        snapshot_calls: AtomicUsize,
+        thumbnail_cleanup_calls: AtomicUsize,
+        snapshot_cleanup_calls: AtomicUsize,
+        restore_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl FileStore for PostSealMutationStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            let seal = self.inner.seal_private_snapshot(snapshot).await?;
+            self.seal_calls.fetch_add(1, Ordering::SeqCst);
+            let modified = std::fs::metadata(&snapshot.path)?.modified().ok();
+            let mut bytes = std::fs::read(&snapshot.path)?;
+            let last = bytes
+                .last_mut()
+                .ok_or_else(|| anyhow::anyhow!("test snapshot must not be empty"))?;
+            *last ^= 1;
+            std::fs::write(&snapshot.path, bytes)?;
+            if let Some(modified) = modified {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&snapshot.path)?
+                    .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+            }
+            Ok(seal)
+        }
+
+        async fn publish_private_snapshot_no_replace(
+            &self,
+            snapshot: &PrivateSnapshot,
+            destination: &str,
+            expected_seal: &FileSeal,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
+                .await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner.publish_staged_no_replace(staged, destination).await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl FileStore for SnapshotDirectoryReplacementStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(
+            &self,
+            staged: &StagedFile,
+        ) -> anyhow::Result<PrivateSnapshot> {
+            let snapshot = self.inner.create_private_snapshot(staged).await?;
+            if !self.replaced.swap(true, Ordering::SeqCst) {
+                let snapshot_directory = self.book_root.join(".tvserver-book-snapshots");
+                let original_directory = self.book_root.join("original-private-snapshots");
+                fs::rename(&snapshot_directory, &original_directory)?;
+                fs::create_dir(&snapshot_directory)?;
+                let name = snapshot.path.file_name().unwrap();
+                let decoy = snapshot_directory.join(name);
+                fs::write(&decoy, b"decoy must never be ingested or removed")?;
+                *self.decoy_path.lock().unwrap() = Some(decoy);
+                *self.original_snapshot_path.lock().unwrap() = Some(original_directory.join(name));
+            }
+            Ok(snapshot)
+        }
+
+        async fn seal_private_snapshot(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(
+            &self,
+            snapshot: &PrivateSnapshot,
+            destination: &str,
+            expected_seal: &FileSeal,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
+                .await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_staged_no_replace(staged, destination)
+                .await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for CleanupAuditStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            let staged = self.inner.stage_no_follow(source).await?;
+            *self.staged_path.lock().unwrap() = Some(staged.staged_path.clone());
+            Ok(staged)
+        }
+
+        async fn create_private_snapshot(
+            &self,
+            staged: &StagedFile,
+        ) -> anyhow::Result<PrivateSnapshot> {
+            self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let snapshot = self.inner.create_private_snapshot(staged).await?;
+            *self.snapshot_path.lock().unwrap() = Some(snapshot.path.clone());
+            if self.mutate_staged_after_copy && !self.mutated.swap(true, Ordering::SeqCst) {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&staged.staged_path)?
+                    .write_all(b"mutation")?;
+            }
+            Ok(snapshot)
+        }
+
+        async fn seal_private_snapshot(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(
+            &self,
+            snapshot: &PrivateSnapshot,
+            destination: &str,
+            expected_seal: &FileSeal,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
+                .await
+        }
+
+        async fn remove_private_snapshot(
+            &self,
+            _snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<()> {
+            self.snapshot_cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("forced snapshot cleanup failure")
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.thumbnail_cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_thumbnail_cleanup {
+                anyhow::bail!("forced thumbnail cleanup failure")
+            }
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_staged_no_replace(staged, destination)
+                .await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.restore_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    impl BlockingPhaseStore {
+        async fn block(&self, phase: BlockingFilePhase) {
+            if self.phase == phase {
+                self.started.notify_one();
+                self.releases.acquire().await.unwrap().forget();
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for BlockingPhaseStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.block(BlockingFilePhase::Stage).await;
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
+            self.block(BlockingFilePhase::Publication).await;
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(&self, staged: &StagedFile, destination: &str) -> anyhow::Result<()> {
+            self.inner.publish_staged_no_replace(staged, destination).await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    impl MutatingSnapshotStore {
+        async fn mutate_staged_once(&self) -> anyhow::Result<()> {
+            if self.mutated.swap(true, Ordering::SeqCst) {
+                return Ok(());
+            }
+            let staged_path = self
+                .staged_path
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("staged path was not recorded"))?;
+            tokio::fs::remove_file(&staged_path).await?;
+            tokio::fs::rename(&self.replacement, &staged_path).await?;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for MutatingSnapshotStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            let staged = self.inner.stage_no_follow(source).await?;
+            *self.staged_path.lock().unwrap() = Some(staged.staged_path.clone());
+            Ok(staged)
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+            let snapshot = self.inner.create_private_snapshot(staged).await?;
+            if self.phase == SnapshotMutationPhase::AfterSnapshotCopy {
+                self.mutate_staged_once().await?;
+            }
+            Ok(snapshot)
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
+            if self.phase == SnapshotMutationPhase::Publication {
+                self.mutate_staged_once().await?;
+            }
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(&self, staged: &StagedFile, destination: &str) -> anyhow::Result<()> {
+            self.mutate_staged_once().await?;
+            self.inner.publish_staged_no_replace(staged, destination).await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    impl SourceSwapStore {
+        async fn swap_once(&self, source: &str) -> anyhow::Result<()> {
+            if !self.swapped.swap(true, Ordering::SeqCst) {
+                tokio::fs::remove_file(source).await?;
+                tokio::fs::rename(&self.replacement, source).await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for SourceSwapStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.swap_once(old_path).await?;
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.swap_once(old_path).await?;
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.swap_once(source).await?;
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_staged_no_replace(staged, destination)
+                .await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    impl DestinationRaceStore {
+        async fn create_competing_destination(&self, path: &str) -> anyhow::Result<()> {
+            tokio::fs::write(path, b"external writer bytes").await?;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for DestinationRaceStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.create_competing_destination(new_path).await?;
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.create_competing_destination(new_path).await?;
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, snapshot: &PrivateSnapshot, destination: &str, expected_seal: &FileSeal) -> anyhow::Result<()> {
+            self.create_competing_destination(destination).await?;
+            self.inner.publish_private_snapshot_no_replace(snapshot, destination, expected_seal).await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.create_competing_destination(destination).await?;
+            self.inner
+                .publish_staged_no_replace(staged, destination)
+                .await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    #[async_trait]
+    impl FileStore for FailingRenameStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, _old_path: &str, _new_path: &str) -> anyhow::Result<()> {
+            anyhow::bail!("forced book move failure")
+        }
+
+        async fn rename_no_replace(&self, _old_path: &str, _new_path: &str) -> anyhow::Result<()> {
+            anyhow::bail!("forced book move failure")
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(&self, _snapshot: &PrivateSnapshot, _destination: &str, _expected_seal: &FileSeal) -> anyhow::Result<()> {
+            anyhow::bail!("forced book move failure")
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            _destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await?;
+            anyhow::bail!("forced book move failure")
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    struct FailingSaveRepository {
+        inner: Repository,
+        barrier: Option<Arc<SaveFailureBarrier>>,
+    }
+
+    struct SaveFailureBarrier {
+        started: tokio::sync::Notify,
+        releases: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl Databaser for FailingSaveRepository {
+        async fn save_book(&self, _details: &BookDetails) -> Result<i64, sqlx::Error> {
+            if let Some(barrier) = &self.barrier {
+                barrier.started.notify_one();
+                barrier.releases.acquire().await.unwrap().forget();
+            }
+            Err(sqlx::Error::Protocol("forced book save failure".to_string()))
+        }
+
+        async fn list_book_collections(
+            &self,
+            collection: &str,
+        ) -> Result<Vec<String>, sqlx::Error> {
+            self.inner.list_book_collections(collection).await
+        }
+
+        async fn list_books(&self, collection: &str) -> Result<Vec<BookDetails>, sqlx::Error> {
+            self.inner.list_books(collection).await
+        }
+
+        async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error> {
+            self.inner.list_all_books().await
+        }
+
+        async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error> {
+            self.inner.retrieve_book(checksum).await
+        }
+
+        async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error> {
+            self.inner.delete_book(checksum).await
+        }
+
+        async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
+            self.inner.save_video(details).await
+        }
+
+        async fn list_collection(&self, collection: &str) -> Result<Vec<String>, sqlx::Error> {
+            self.inner.list_collection(collection).await
+        }
+
+        async fn list_videos(&self, collection: &str) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_videos(collection).await
+        }
+
+        async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error> {
+            self.inner.list_all_series().await
+        }
+
+        async fn list_series_details(
+            &self,
+            series: &str,
+            season: Option<&str>,
+        ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_series_details(series, season).await
+        }
+
+        async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error> {
+            self.inner.retrieve_video(checksum).await
+        }
+
+        async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error> {
+            self.inner.delete_video(checksum).await
+        }
+
+        async fn update_watched_video(
+            &self,
+            checksum: i64,
+            current_time: f64,
+        ) -> Result<(), sqlx::Error> {
+            self.inner
+                .update_watched_video(checksum, current_time)
+                .await
+        }
+
+        async fn get_history(
+            &self,
+            offset: i32,
+            limit: i32,
+        ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.get_history(offset, limit).await
+        }
+
+        async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_all_videos().await
+        }
+    }
+
+    async fn repository_with_book_listener(
+    ) -> (Repository, crate::domain::messages::LocalMessageReceiver) {
+        let exchange = LocalMessageExchange::new();
+        let receiver = exchange
+            .listen_for_messages(MessageFilter::Book)
+            .await
+            .unwrap();
+        let repository: Repository = Arc::new(
+            SqlRepository::new(":memory:", Some(exchange.new_sender()))
+                .await
+                .unwrap(),
+        );
+        (repository, receiver)
+    }
+
+    async fn assert_no_book_event(receiver: &mut crate::domain::messages::LocalMessageReceiver) {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn ingestion_malformed_partial_epub_retains_only_filename_fallback_fields() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("fallback_title.epub");
+        write_epub(
+            &source,
+            "<package><metadata><title>Leaked Title</title><creator>Leaked Author</creator></metadata><manifest>",
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            Some("fallbacks".to_string()),
+            book_root,
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(details.title, "fallback title");
+        assert!(details.authors.is_empty());
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(details.state, BookState::MetadataError);
+        assert!(details.metadata.extraction_error.is_some());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.title, "fallback title");
+        assert!(saved.authors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingestion_concurrent_destination_collision_has_one_winner_without_overwrite() {
+        let temp = TestDir::new();
+        let first_dir = temp.path().join("first");
+        let second_dir = temp.path().join("second");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let first = first_dir.join("shared.pdf");
+        let second = second_dir.join("shared.pdf");
+        write_pdf(&first, Some(dictionary! { "Title" => text_string("First") }), 1);
+        write_pdf(
+            &second,
+            Some(dictionary! { "Title" => text_string("Second") }),
+            2,
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let (first_result, second_result) = tokio::join!(
+            generate_book_metadata_with_roots(
+                first.clone(),
+                storer.clone(),
+                repository.clone(),
+                Some("collision".to_string()),
+                book_root.clone(),
+                thumbnail_root.clone(),
+            ),
+            generate_book_metadata_with_roots(
+                second.clone(),
+                storer,
+                repository.clone(),
+                Some("collision".to_string()),
+                book_root.clone(),
+                thumbnail_root,
+            )
+        );
+
+        let (winner, loser_source) = match (first_result, second_result) {
+            (Ok(Some(winner)), Err(_)) => (winner, second),
+            (Err(_), Ok(Some(winner))) => (winner, first),
+            results => panic!("expected exactly one collision winner, got {results:?}"),
+        };
+        let destination = book_root.join("Collision/shared.pdf");
+        assert!(destination.exists());
+        assert!(loser_source.exists());
+        assert_eq!(
+            super::super::video_metadata::calculate_checksum(&destination)
+                .await
+                .unwrap(),
+            winner.checksum
+        );
+        let saved = repository.retrieve_book(winner.checksum).await.unwrap();
+        assert_eq!(saved.title, winner.title);
+        assert_eq!(repository.list_all_books().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingestion_external_destination_race_preserves_both_existing_destination_and_source() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("raced.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! { "Title" => text_string("Incoming") }),
+            1,
+        );
+        let original_source = fs::read(&source).unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let storer: FileStorer = Arc::new(DestinationRaceStore { inner });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("collision".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert_eq!(
+            fs::read(book_root.join("Collision/raced.pdf")).unwrap(),
+            b"external writer bytes"
+        );
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingestion_same_size_path_replacement_processes_and_publishes_one_identity() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("identity.pdf");
+        let replacement = source_dir.join("replacement.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! { "Title" => text_string("Original Identity") }),
+            1,
+        );
+        write_pdf(
+            &replacement,
+            Some(dictionary! { "Title" => text_string("Replacement Identity") }),
+            2,
+        );
+        let original_len = fs::metadata(&source).unwrap().len();
+        let replacement_len = fs::metadata(&replacement).unwrap().len();
+        let target_len = original_len.max(replacement_len);
+        for path in [&source, &replacement] {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            let padding = target_len - fs::metadata(path).unwrap().len();
+            file.write_all(&vec![b' '; padding as usize]).unwrap();
+        }
+        assert_eq!(fs::metadata(&source).unwrap().len(), fs::metadata(&replacement).unwrap().len());
+        let replacement_bytes = fs::read(&replacement).unwrap();
+        let expected_checksum = super::super::video_metadata::calculate_checksum(&replacement)
+            .await
+            .unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let storer: FileStorer = Arc::new(SourceSwapStore {
+            inner,
+            replacement,
+            swapped: AtomicBool::new(false),
+        });
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            Some("identity".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let destination = book_root.join("Identity/identity.pdf");
+        assert_eq!(details.title, "Replacement Identity");
+        assert_eq!(details.page_count, Some(2));
+        assert_eq!(details.checksum, expected_checksum);
+        assert_eq!(fs::read(&destination).unwrap(), replacement_bytes);
+        assert_eq!(
+            super::super::video_metadata::calculate_checksum(&destination)
+                .await
+                .unwrap(),
+            details.checksum
+        );
+        assert_eq!(repository.retrieve_book(details.checksum).await.unwrap().title, details.title);
+    }
+
+    #[tokio::test]
+    async fn ingestion_publishes_private_snapshot_when_staged_path_is_replaced_at_commit() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("immutable.pdf");
+        let replacement = source_dir.join("replacement.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! { "Title" => text_string("Snapshot Identity") }),
+            1,
+        );
+        write_pdf(
+            &replacement,
+            Some(dictionary! { "Title" => text_string("Late Replacement") }),
+            2,
+        );
+        let target_len = fs::metadata(&source)
+            .unwrap()
+            .len()
+            .max(fs::metadata(&replacement).unwrap().len());
+        for path in [&source, &replacement] {
+            let padding = target_len - fs::metadata(path).unwrap().len();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(&vec![b' '; padding as usize])
+                .unwrap();
+        }
+        let original_bytes = fs::read(&source).unwrap();
+        let expected_checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(MutatingSnapshotStore {
+            inner,
+            replacement,
+            phase: SnapshotMutationPhase::Publication,
+            staged_path: StdMutex::new(None),
+            mutated: AtomicBool::new(false),
+            snapshot_calls: AtomicUsize::new(0),
+        });
+        let storer: FileStorer = store.clone();
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            Some("immutable".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let destination = book_root.join("Immutable/immutable.pdf");
+        assert_eq!(store.snapshot_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(details.title, "Snapshot Identity");
+        assert_eq!(details.page_count, Some(1));
+        assert_eq!(details.checksum, expected_checksum);
+        assert_eq!(fs::read(&destination).unwrap(), original_bytes);
+        assert_eq!(repository.retrieve_book(details.checksum).await.unwrap().title, details.title);
+    }
+
+    #[tokio::test]
+    async fn ingestion_retries_staged_replacement_at_snapshot_copy_boundary_and_cleans_snapshot() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("copy-boundary.epub");
+        let replacement = source_dir.join("replacement.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:title>Discarded Snapshot</dc:title></metadata><manifest/></package>"#,
+            &[],
+        );
+        write_epub(
+            &replacement,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:title>Stable Replacement</dc:title></metadata><manifest/></package>"#,
+            &[],
+        );
+        let replacement_bytes = fs::read(&replacement).unwrap();
+        let expected_checksum = super::super::video_metadata::calculate_checksum(&replacement)
+            .await
+            .unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(MutatingSnapshotStore {
+            inner,
+            replacement,
+            phase: SnapshotMutationPhase::AfterSnapshotCopy,
+            staged_path: StdMutex::new(None),
+            mutated: AtomicBool::new(false),
+            snapshot_calls: AtomicUsize::new(0),
+        });
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            store.clone(),
+            repository,
+            Some("copy boundary".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(store.snapshot_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(details.title, "Stable Replacement");
+        assert_eq!(details.checksum, expected_checksum);
+        assert_eq!(
+            fs::read(book_root.join("Copy Boundary/copy-boundary.epub")).unwrap(),
+            replacement_bytes
+        );
+        let snapshot_dir = book_root.join(".tvserver-book-snapshots");
+        assert!(fs::read_dir(snapshot_dir).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn ingestion_rejects_snapshot_mutated_after_post_extraction_seal() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("mutated.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let original_source = fs::read(&source).unwrap();
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(PostSealMutationStore {
+            inner,
+            seal_calls: AtomicUsize::new(0),
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            Some("sealed".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("integrity"), "{error}");
+        assert_eq!(store.seal_calls.load(Ordering::SeqCst), 1);
+        assert!(!book_root.join("Sealed/mutated.epub").exists());
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert!(!thumbnail_root.join(format!("{checksum}.jpg")).exists());
+        let snapshot_dir = book_root.join(".tvserver-book-snapshots");
+        assert!(fs::read_dir(snapshot_dir).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ingestion_rejects_replaced_snapshot_path_and_cleans_original_capability() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("replaced.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let original_source = fs::read(&source).unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(SnapshotDirectoryReplacementStore {
+            inner,
+            book_root: book_root.clone(),
+            replaced: AtomicBool::new(false),
+            decoy_path: StdMutex::new(None),
+            original_snapshot_path: StdMutex::new(None),
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            Some("replacement".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert!(!book_root.join("Replacement/replaced.epub").exists());
+        let original = store.original_snapshot_path.lock().unwrap().clone().unwrap();
+        let decoy = store.decoy_path.lock().unwrap().clone().unwrap();
+        assert!(!original.exists());
+        assert_eq!(fs::read(decoy).unwrap(), b"decoy must never be ingested or removed");
+    }
+
+    #[tokio::test]
+    async fn snapshot_copy_cleanup_failure_attempts_snapshot_cleanup_and_source_restore_once() {
+        let temp = TestDir::new();
+        let source = temp.path().join("copy-cleanup-failure.epub");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(CleanupAuditStore {
+            inner,
+            mutate_staged_after_copy: true,
+            fail_thumbnail_cleanup: false,
+            mutated: AtomicBool::new(false),
+            staged_path: StdMutex::new(None),
+            snapshot_path: StdMutex::new(None),
+            snapshot_calls: AtomicUsize::new(0),
+            thumbnail_cleanup_calls: AtomicUsize::new(0),
+            snapshot_cleanup_calls: AtomicUsize::new(0),
+            restore_calls: AtomicUsize::new(0),
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            None,
+            book_root,
+            thumbnail_root,
+        )
+        .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("changed during private snapshot copy"), "{error}");
+        assert!(error.contains("forced snapshot cleanup failure"), "{error}");
+        assert_eq!(store.snapshot_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.thumbnail_cleanup_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.snapshot_cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.restore_calls.load(Ordering::SeqCst), 1);
+        assert!(source.exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ingestion_retries_one_transient_size_change_and_then_succeeds() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("growing.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! { "Title" => text_string("Eventually Stable") }),
+            1,
+        );
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&source).unwrap();
+        let mutation = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            writer.write_all(b" ").unwrap();
+            writer.flush().unwrap();
+        });
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository,
+            Some("retry".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .expect("a transiently changing source must be retried, not silently completed");
+        mutation.await.unwrap();
+
+        let destination = book_root.join("Retry/growing.pdf");
+        assert_eq!(details.title, "Eventually Stable");
+        assert!(destination.exists());
+        assert_eq!(
+            super::super::video_metadata::calculate_checksum(&destination)
+                .await
+                .unwrap(),
+            details.checksum
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ingestion_rejects_symlink_replacement_before_any_stability_or_extraction_read() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("swapped.epub");
+        let target = source_dir.join("secret-target.epub");
+        let replacement_link = source_dir.join("replacement-link.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        write_epub(
+            &target,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:title>Secret Target</dc:title></metadata><manifest/></package>"#,
+            &[],
+        );
+        let target_bytes = fs::read(&target).unwrap();
+        symlink(&target, &replacement_link).unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let storer: FileStorer = Arc::new(SourceSwapStore {
+            inner,
+            replacement: replacement_link,
+            swapped: AtomicBool::new(false),
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(400),
+            generate_book_metadata_with_roots(
+                source.clone(),
+                storer,
+                repository.clone(),
+                Some("security".to_string()),
+                book_root.clone(),
+                thumbnail_root,
+            ),
+        )
+        .await
+        .expect("source staging must happen before the 500 ms stability wait");
+
+        assert!(result.is_err());
+        assert!(source.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), target_bytes);
+        assert!(!book_root.join("Security/swapped.epub").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn generated_epub_thumbnail_is_removed_when_move_fails() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("covered.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let storer: FileStorer = Arc::new(FailingRenameStore { inner });
+
+        let result = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository,
+            Some("cleanup".to_string()),
+            book_root,
+            thumbnail_root.clone(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!thumbnail_root.join(format!("{checksum}.jpg")).exists());
+    }
+
+    #[tokio::test]
+    async fn generated_epub_thumbnail_is_removed_when_save_fails_but_preexisting_is_preserved() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("covered.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        fs::create_dir_all(&thumbnail_root).unwrap();
+        let preexisting = thumbnail_root.join(format!("{checksum}.jpg"));
+        fs::write(&preexisting, b"preexisting thumbnail").unwrap();
+        let (storer, inner) = ingestion_dependencies(&book_root).await;
+        let repository: Repository = Arc::new(FailingSaveRepository {
+            inner,
+            barrier: None,
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository,
+            Some("cleanup".to_string()),
+            book_root,
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&preexisting).unwrap(), b"preexisting thumbnail");
+    }
+
+    #[tokio::test]
+    async fn generated_epub_thumbnail_is_removed_when_save_fails() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("covered.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (storer, inner) = ingestion_dependencies(&book_root).await;
+        let repository: Repository = Arc::new(FailingSaveRepository {
+            inner,
+            barrier: None,
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository,
+            Some("cleanup".to_string()),
+            book_root,
+            thumbnail_root.clone(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!thumbnail_root.join(format!("{checksum}.jpg")).exists());
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_checksum_failure_never_deletes_successful_cover() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let failing_source = source_dir.join("failing.epub");
+        let successful_source = source_dir.join("successful.epub");
+        write_epub(
+            &failing_source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        fs::copy(&failing_source, &successful_source).unwrap();
+        let checksum = super::super::video_metadata::calculate_checksum(&failing_source)
+            .await
+            .unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let barrier = Arc::new(SaveFailureBarrier {
+            started: tokio::sync::Notify::new(),
+            releases: tokio::sync::Semaphore::new(0),
+        });
+        let failing_repository: Repository = Arc::new(FailingSaveRepository {
+            inner: repository.clone(),
+            barrier: Some(barrier.clone()),
+        });
+        let failing_started = barrier.started.notified();
+        let failing = tokio::spawn(generate_book_metadata_with_roots(
+            failing_source,
+            storer.clone(),
+            failing_repository,
+            Some("failed".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), failing_started)
+            .await
+            .unwrap();
+
+        let mut successful = tokio::spawn(generate_book_metadata_with_roots(
+            successful_source,
+            storer,
+            repository.clone(),
+            Some("successful".to_string()),
+            book_root,
+            thumbnail_root.clone(),
+        ));
+        let early_success = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            &mut successful,
+        )
+        .await
+        .ok()
+        .map(|joined| joined.unwrap().unwrap().unwrap());
+
+        barrier.releases.add_permits(1);
+        assert!(failing.await.unwrap().is_err());
+        let details = match early_success {
+            Some(details) => details,
+            None => successful.await.unwrap().unwrap().unwrap(),
+        };
+
+        assert_eq!(details.checksum, checksum);
+        assert_eq!(details.thumbnail, format!("{checksum}.jpg"));
+        assert!(thumbnail_root.join(&details.thumbnail).exists());
+        assert_eq!(repository.retrieve_book(checksum).await.unwrap().thumbnail, details.thumbnail);
+    }
+
+    #[test]
+    fn ingestion_parentless_relative_source_targets_book_root() {
+        let book_root = Path::new("configured-books");
+        let source = Path::new("book.pdf");
+
+        let collection = collection_from_source(source, book_root).unwrap();
+        let destination = book_root
+            .join(&collection)
+            .join(source.file_name().unwrap());
+
+        assert_eq!(collection, "");
+        assert_eq!(destination, book_root.join("book.pdf"));
+    }
+
+    #[tokio::test]
+    async fn ingestion_zero_byte_input_creates_no_row_or_event() {
+        let temp = TestDir::new();
+        let source = temp.path().join("empty.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::write(&source, []).unwrap();
+        let inner_storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
+        let (repository, mut receiver) = repository_with_book_listener().await;
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            inner_storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.unwrap_err().to_string().contains("zero-byte"));
+        assert!(source.exists());
+        assert!(!book_root.join("empty.pdf").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert_no_book_event(&mut receiver).await;
+    }
+
+    #[tokio::test]
+    async fn ingestion_cancelled_before_staging_leaves_source_and_repository_untouched() {
+        let temp = TestDir::new();
+        let source = temp.path().join("cancelled.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(&source, None, 1);
+        let original = fs::read(&source).unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        let result = generate_book_metadata_with_roots_and_cancellation(
+            source.clone(),
+            storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root,
+            cancellation,
+        )
+        .await;
+
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(!book_root.join("cancelled.pdf").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_blocked_stage_waits_then_restores_without_persistence() {
+        let temp = TestDir::new();
+        let source = temp.path().join("stage-blocked.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(&source, None, 1);
+        let original = fs::read(&source).unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(BlockingPhaseStore {
+            inner,
+            phase: BlockingFilePhase::Stage,
+            started: tokio::sync::Notify::new(),
+            releases: tokio::sync::Semaphore::new(0),
+        });
+        let cancellation = CancellationToken::new();
+        let started = store.started.notified();
+        let mut ingestion = tokio::spawn(generate_book_metadata_with_roots_and_cancellation(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root,
+            cancellation.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), started)
+            .await
+            .unwrap();
+
+        cancellation.cancel();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut ingestion)
+            .await
+            .is_err());
+        store.releases.add_permits(1);
+        let error = ingestion.await.unwrap().unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(fs::read(&source).unwrap(), original);
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        let snapshot_dir = book_root.join(".tvserver-book-snapshots");
+        assert!(!snapshot_dir.exists() || fs::read_dir(snapshot_dir).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_blocked_extraction_waits_then_cleans_before_returning() {
+        let temp = TestDir::new();
+        let source = temp.path().join("extraction-blocked.epub");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let barrier = install_extraction_test_barrier(&thumbnail_root);
+        let started = barrier.started.notified();
+        let cancellation = CancellationToken::new();
+        let mut ingestion = tokio::spawn(generate_book_metadata_with_roots_and_cancellation(
+            source.clone(),
+            storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root.clone(),
+            cancellation.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), started)
+            .await
+            .unwrap();
+
+        cancellation.cancel();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut ingestion)
+            .await
+            .is_err());
+        barrier.release();
+        let error = ingestion.await.unwrap().unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
+        assert!(source.exists());
+        assert!(!thumbnail_root.join(format!("{checksum}.jpg")).exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        let snapshot_dir = book_root.join(".tvserver-book-snapshots");
+        assert!(!snapshot_dir.exists() || fs::read_dir(snapshot_dir).unwrap().next().is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_downloader_fd_write_during_extraction_cannot_change_snapshot_or_final_bytes() {
+        use std::io::{Seek, SeekFrom};
+
+        let temp = TestDir::new();
+        let source = temp.path().join("retained-fd.epub");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:title>Immutable Snapshot</dc:title></metadata><manifest/></package>"#,
+            &[],
+        );
+        let original = fs::read(&source).unwrap();
+        let expected_checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let mut retained_fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let barrier = install_extraction_test_barrier(&thumbnail_root);
+        let started = barrier.started.notified();
+        let ingestion = tokio::spawn(generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository,
+            Some("immutable".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), started)
+            .await
+            .unwrap();
+
+        retained_fd.seek(SeekFrom::Start(0)).unwrap();
+        retained_fd.write_all(b"MUTATED!").unwrap();
+        retained_fd.flush().unwrap();
+        barrier.release();
+        let details = ingestion.await.unwrap().unwrap().unwrap();
+
+        let destination = book_root.join("Immutable/retained-fd.epub");
+        assert_eq!(details.title, "Immutable Snapshot");
+        assert_eq!(details.checksum, expected_checksum);
+        assert_eq!(fs::read(destination).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn post_extraction_cleanup_failures_are_aggregated_and_source_is_restored() {
+        let temp = TestDir::new();
+        let source = temp.path().join("verification-cleanup-failure.epub");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                 <metadata/><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest>
+               </package>"#,
+            &[("OPS/cover.png", png_bytes().as_slice())],
+        );
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(CleanupAuditStore {
+            inner,
+            mutate_staged_after_copy: false,
+            fail_thumbnail_cleanup: true,
+            mutated: AtomicBool::new(false),
+            staged_path: StdMutex::new(None),
+            snapshot_path: StdMutex::new(None),
+            snapshot_calls: AtomicUsize::new(0),
+            thumbnail_cleanup_calls: AtomicUsize::new(0),
+            snapshot_cleanup_calls: AtomicUsize::new(0),
+            restore_calls: AtomicUsize::new(0),
+        });
+        let barrier = install_post_extraction_test_barrier(&thumbnail_root);
+        let started = barrier.started.notified();
+        let ingestion = tokio::spawn(generate_book_metadata_with_roots(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            None,
+            book_root,
+            thumbnail_root,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), started)
+            .await
+            .unwrap();
+        let snapshot_path = store.snapshot_path.lock().unwrap().clone().unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(snapshot_path)
+            .unwrap()
+            .write_all(b"mutation")
+            .unwrap();
+        barrier.release();
+
+        let error = ingestion.await.unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("changed during metadata extraction"),
+            "{error}"
+        );
+        assert!(error.contains("forced thumbnail cleanup failure"), "{error}");
+        assert!(error.contains("forced snapshot cleanup failure"), "{error}");
+        assert_eq!(store.snapshot_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.thumbnail_cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.snapshot_cleanup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.restore_calls.load(Ordering::SeqCst), 1);
+        assert!(source.exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_blocked_publication_finishes_publish_and_save() {
+        let temp = TestDir::new();
+        let source = temp.path().join("publication-blocked.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(
+            &source,
+            Some(dictionary! { "Title" => text_string("Committed During Shutdown") }),
+            1,
+        );
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(BlockingPhaseStore {
+            inner,
+            phase: BlockingFilePhase::Publication,
+            started: tokio::sync::Notify::new(),
+            releases: tokio::sync::Semaphore::new(0),
+        });
+        let cancellation = CancellationToken::new();
+        let started = store.started.notified();
+        let mut ingestion = tokio::spawn(generate_book_metadata_with_roots_and_cancellation(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            Some("committed".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+            cancellation.clone(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(3), started)
+            .await
+            .unwrap();
+
+        cancellation.cancel();
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut ingestion)
+            .await
+            .is_err());
+        store.releases.add_permits(1);
+        let details = ingestion.await.unwrap().unwrap().unwrap();
+
+        assert!(!source.exists());
+        assert!(book_root.join("Committed/publication-blocked.pdf").exists());
+        assert_eq!(
+            repository.retrieve_book(details.checksum).await.unwrap().title,
+            "Committed During Shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingestion_move_failure_propagates_without_row_or_event() {
+        let temp = TestDir::new();
+        let source = temp.path().join("move-failure.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(&source, None, 1);
+        let inner_storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
+        let storer: FileStorer = Arc::new(FailingRenameStore {
+            inner: inner_storer,
+        });
+        let (repository, mut receiver) = repository_with_book_listener().await;
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("failures".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forced book move failure"));
+        assert!(source.exists());
+        assert!(!book_root.join("Failures/move-failure.pdf").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert_no_book_event(&mut receiver).await;
+    }
+
+    #[tokio::test]
+    async fn ingestion_save_failure_leaves_moved_orphan_without_row_or_event() {
+        let temp = TestDir::new();
+        let source = temp.path().join("save-failure.pdf");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        write_pdf(&source, None, 1);
+        let storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
+        let (inner, mut receiver) = repository_with_book_listener().await;
+        let repository: Repository = Arc::new(FailingSaveRepository {
+            inner: inner.clone(),
+            barrier: None,
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository,
+            Some("failures".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forced book save failure"));
+        assert!(!source.exists());
+        assert!(book_root.join("Failures/save-failure.pdf").exists());
+        assert!(thumbnail_root.join(DEFAULT_BOOK_THUMBNAIL).exists());
+        assert!(inner.list_all_books().await.unwrap().is_empty());
+        assert_no_book_event(&mut receiver).await;
+    }
+
+    #[tokio::test]
+    async fn ingests_epub_metadata_moves_file_and_saves_record() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("practical.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata>
+                   <dc:title>Practical EPUB</dc:title>
+                   <dc:creator>Ada Author</dc:creator>
+                   <dc:language>en</dc:language>
+                 </metadata>
+                 <manifest/>
+               </package>"#,
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("science fiction".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("stable EPUB should be ingested");
+
+        assert_eq!(details.title, "Practical EPUB");
+        assert_eq!(details.authors, ["Ada Author"]);
+        assert_eq!(details.language.as_deref(), Some("en"));
+        assert_eq!(details.format, BookFormat::Epub);
+        assert_eq!(details.collection, "Science Fiction");
+        assert_eq!(details.state, BookState::Ready);
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(!source.exists());
+        assert!(book_root.join("Science Fiction/practical.epub").exists());
+        assert!(thumbnail_root.join(DEFAULT_BOOK_THUMBNAIL).exists());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.file_name, details.file_name);
+        assert_eq!(saved.collection, details.collection);
+        assert_eq!(saved.title, details.title);
+        assert_eq!(saved.authors, details.authors);
+        assert_eq!(saved.state, details.state);
+    }
+
+    #[tokio::test]
+    async fn identical_second_ingestion_keeps_first_file_and_row_canonical() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let first_source = source_dir.join("first.epub");
+        let second_source = source_dir.join("second.epub");
+        write_epub(
+            &first_source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata><dc:title>First Canonical Copy</dc:title></metadata><manifest/>
+               </package>"#,
+            &[],
+        );
+        fs::copy(&first_source, &second_source).unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let first = generate_book_metadata_with_roots(
+            first_source,
+            storer.clone(),
+            repository.clone(),
+            Some("originals".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let canonical = repository.retrieve_book(first.checksum).await.unwrap();
+        let second = generate_book_metadata_with_roots(
+            second_source.clone(),
+            storer,
+            repository.clone(),
+            Some("reprints".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(second, canonical);
+        assert!(book_root.join("Originals/first.epub").exists());
+        assert!(!book_root.join("Reprints/second.epub").exists());
+        assert!(!second_source.exists());
+        let saved = repository.retrieve_book(first.checksum).await.unwrap();
+        assert_eq!(saved.collection, "Originals");
+        assert_eq!(saved.file_name, "first.epub");
+    }
+
+    #[tokio::test]
+    async fn identical_ingestion_repairs_checksum_row_when_canonical_file_is_missing() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("repair.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata><dc:title>Repaired Copy</dc:title></metadata><manifest/>
+               </package>"#,
+            &[],
+        );
+        let checksum = super::super::video_metadata::calculate_checksum(&source)
+            .await
+            .unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let mut stale = BookDetails::new(
+            "missing.epub".to_string(),
+            "Originals".to_string(),
+            &book_root.join("Originals/missing.epub"),
+            BookFormat::Epub,
+        );
+        stale.checksum = checksum;
+        repository.save_book(&stale).await.unwrap();
+
+        let repaired = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("reprints".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(repaired.checksum, checksum);
+        assert!(!source.exists());
+        assert!(!book_root.join("Originals/missing.epub").exists());
+        assert!(book_root.join("Reprints/repair.epub").exists());
+        let saved = repository.retrieve_book(checksum).await.unwrap();
+        assert_eq!(saved.collection, "Reprints");
+        assert_eq!(saved.file_name, "repair.epub");
+    }
+
+    #[tokio::test]
+    async fn ingests_pdf_metadata_moves_file_and_saves_record() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("manual.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! {
+                "Title" => text_string("PDF Manual"),
+                "Author" => text_string("Pat Writer"),
+            }),
+            3,
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("stable PDF should be ingested");
+
+        assert_eq!(details.title, "PDF Manual");
+        assert_eq!(details.authors, ["Pat Writer"]);
+        assert_eq!(details.page_count, Some(3));
+        assert_eq!(details.format, BookFormat::Pdf);
+        assert_eq!(details.collection, "downloads");
+        assert_eq!(details.state, BookState::Ready);
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(!source.exists());
+        assert!(book_root.join("downloads/manual.pdf").exists());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.file_name, details.file_name);
+        assert_eq!(saved.collection, details.collection);
+        assert_eq!(saved.title, details.title);
+        assert_eq!(saved.authors, details.authors);
+        assert_eq!(saved.page_count, details.page_count);
+        assert_eq!(saved.state, details.state);
+    }
+
+    #[tokio::test]
+    async fn corrupt_epub_uses_weak_metadata_default_thumbnail_and_still_saves() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("fallback_title.epub");
+        fs::write(&source, b"not an epub").unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            Some("fallbacks".to_string()),
+            book_root,
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .expect("stable corrupt EPUB should still be recorded");
+
+        assert_eq!(details.title, "fallback title");
+        assert!(details.authors.is_empty());
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(details.state, BookState::MetadataError);
+        assert!(details.metadata.extraction_error.is_some());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.title, details.title);
+        assert_eq!(saved.thumbnail, details.thumbnail);
+        assert_eq!(saved.state, details.state);
+        assert_eq!(saved.metadata, details.metadata);
     }
 }

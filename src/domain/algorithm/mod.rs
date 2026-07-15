@@ -3,6 +3,7 @@ mod media_kind;
 mod video_utils;
 mod series;
 mod html;
+pub mod file_integrity;
 
 pub use naming::{
     generate_display_name, 
