@@ -389,7 +389,17 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             continue;
         }
 
-        let checksum = match super::video_metadata::calculate_checksum(&snapshot.path).await {
+        let checksum_result = async {
+            let before = private_snapshot_fingerprint(&snapshot).await?;
+            let checksum = super::video_metadata::calculate_checksum(&snapshot.path).await?;
+            let after = private_snapshot_fingerprint(&snapshot).await?;
+            if before != after {
+                anyhow::bail!("private snapshot identity changed during checksum calculation");
+            }
+            anyhow::Result::<_>::Ok(checksum)
+        }
+        .await;
+        let checksum = match checksum_result {
             Ok(checksum) => checksum,
             Err(error) => {
                 let cleanup = cleanup_prepublication(
@@ -506,6 +516,21 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             generated_thumbnail_path,
             thumbnail_preexisted,
         );
+        let snapshot_before_extraction = match private_snapshot_fingerprint(&snapshot).await {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let cleanup = cleanup_prepublication(
+                    &storer,
+                    &staged,
+                    Some(&snapshot),
+                    Some(&mut thumbnail_guard),
+                    CleanupMode::Restore,
+                )
+                .await;
+                staged_guard.disarm();
+                return Err(with_cleanup_error(error, cleanup));
+            }
+        };
         let extraction_path = snapshot.path.clone();
         let extraction_thumbnail_root = thumbnail_root.clone();
         let extraction = match tokio::task::spawn_blocking(move || {
@@ -561,8 +586,11 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             ));
         }
 
-        let snapshot_before_verification = staged_fingerprint(&snapshot.path).await;
-        let verified_checksum = super::video_metadata::calculate_checksum(&snapshot.path).await;
+        let snapshot_before_verification = private_snapshot_fingerprint(&snapshot).await;
+        let verified_checksum = match &snapshot_before_verification {
+            Ok(_) => super::video_metadata::calculate_checksum(&snapshot.path).await,
+            Err(error) => Err(std::io::Error::other(format!("{error:#}"))),
+        };
         let snapshot_seal = match storer.seal_private_snapshot(&snapshot).await {
             Ok(seal) => seal,
             Err(error) => {
@@ -578,11 +606,17 @@ async fn generate_book_metadata_with_roots_and_cancellation(
                 return Err(with_cleanup_error(error, cleanup));
             }
         };
-        let snapshot_after_verification = staged_fingerprint(&snapshot.path).await;
+        let snapshot_after_verification = private_snapshot_fingerprint(&snapshot).await;
         let snapshot_is_verified = matches!(
-            (&snapshot_before_verification, &verified_checksum, &snapshot_after_verification),
+            (
+                &snapshot_before_verification,
+                &verified_checksum,
+                &snapshot_after_verification,
+            ),
             (Ok(before), Ok(verified_checksum), Ok(after))
-                if before == after && checksum == *verified_checksum
+                if snapshot_before_extraction == *before
+                    && before == after
+                    && checksum == *verified_checksum
         );
         if !snapshot_is_verified {
             let primary = anyhow::anyhow!(
@@ -758,6 +792,18 @@ async fn staged_fingerprint(path: &Path) -> anyhow::Result<StagedFingerprint> {
         #[cfg(unix)]
         inode: metadata.ino(),
     })
+}
+
+async fn private_snapshot_fingerprint(
+    snapshot: &PrivateSnapshot,
+) -> anyhow::Result<StagedFingerprint> {
+    if !snapshot.path_has_creation_identity()? {
+        anyhow::bail!(
+            "private snapshot path no longer names its creation-time file identity: {}",
+            snapshot.path.display()
+        );
+    }
+    staged_fingerprint(&snapshot.path).await
 }
 
 struct StagedSourceGuard {
@@ -1139,9 +1185,16 @@ fn render_pdf_thumbnail<R: PdfThumbnailRenderer + ?Sized>(
     fs::create_dir_all(thumbnail_dir)
         .map_err(|error| format!("could not create PDF thumbnail directory: {error}"))?;
     let thumbnail_path = thumbnail_dir.join(&thumbnail);
-    renderer
-        .render_thumbnail(pdf_path, &thumbnail_path)
-        .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
+    let (temp_path, temp_file) = create_thumbnail_temp_file(&thumbnail_path)?;
+    drop(temp_file);
+    let result = (|| {
+        renderer
+            .render_thumbnail(pdf_path, &temp_path)
+            .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
+        publish_thumbnail_temp_no_replace(&temp_path, &thumbnail_path)
+    })();
+    let _ = fs::remove_file(&temp_path);
+    result?;
     Ok(thumbnail)
 }
 
@@ -1949,14 +2002,40 @@ fn write_jpeg_atomically(path: &Path, image: &image::DynamicImage) -> Result<(),
         file.sync_all()
             .map_err(|error| format!("could not sync temporary thumbnail: {error}"))?;
         drop(file);
-        fs::rename(&temp_path, path)
-            .map_err(|error| format!("could not rename temporary thumbnail: {error}"))?;
+        publish_thumbnail_temp_no_replace(&temp_path, path)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
+    let _ = fs::remove_file(&temp_path);
     result
+}
+
+fn publish_thumbnail_temp_no_replace(temp_path: &Path, final_path: &Path) -> Result<(), String> {
+    let temp_metadata = temp_path
+        .symlink_metadata()
+        .map_err(|error| format!("could not inspect temporary thumbnail: {error}"))?;
+    if temp_metadata.file_type().is_symlink() || !temp_metadata.is_file() {
+        return Err("temporary thumbnail must be a regular file and not a symlink".to_string());
+    }
+
+    match fs::hard_link(temp_path, final_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = final_path
+                .symlink_metadata()
+                .map_err(|inspect_error| {
+                    format!("could not inspect existing thumbnail after collision: {inspect_error}")
+                })?;
+            if existing.file_type().is_symlink() || !existing.is_file() {
+                return Err(
+                    "existing thumbnail must be a regular file and not a symlink".to_string(),
+                );
+            }
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "could not publish temporary thumbnail without replacing the final path: {error}"
+        )),
+    }
 }
 
 fn create_thumbnail_temp_file(path: &Path) -> Result<(PathBuf, File), String> {
@@ -2182,6 +2261,14 @@ mod tests {
         }
     }
 
+    struct WritingPdfRenderer;
+
+    impl PdfThumbnailRenderer for WritingPdfRenderer {
+        fn render_thumbnail(&self, _pdf_path: &Path, thumbnail_path: &Path) -> Result<(), String> {
+            fs::write(thumbnail_path, b"rendered thumbnail").map_err(|error| error.to_string())
+        }
+    }
+
     fn write_pdf(path: &Path, info: Option<lopdf::Dictionary>, page_count: usize) {
         let mut document = Document::with_version("1.7");
         let pages_id = document.new_object_id();
@@ -2296,6 +2383,74 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("test renderer unavailable")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pdf_thumbnail_generation_does_not_follow_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("book.pdf");
+        let covers = temp.path().join("covers");
+        let target = temp.path().join("target.jpg");
+        fs::create_dir_all(&covers).unwrap();
+        fs::write(&target, b"preserve target bytes").unwrap();
+        symlink(&target, covers.join("pdf-symlink.jpg")).unwrap();
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &covers,
+            "pdf-symlink",
+            &WritingPdfRenderer,
+        )
+        .unwrap();
+
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(fs::read(&target).unwrap(), b"preserve target bytes");
+        assert!(covers
+            .join("pdf-symlink.jpg")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(fs::read_dir(&covers).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn pdf_thumbnail_generation_preserves_preexisting_regular_file_bytes() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("book.pdf");
+        let covers = temp.path().join("covers");
+        fs::create_dir_all(&covers).unwrap();
+        let existing = covers.join("pdf-existing.jpg");
+        fs::write(&existing, b"preexisting PDF thumbnail").unwrap();
+        write_pdf(&pdf_path, None, 1);
+
+        let result = extract_pdf_metadata_with_renderer(
+            &pdf_path,
+            &covers,
+            "pdf-existing",
+            &WritingPdfRenderer,
+        )
+        .unwrap();
+
+        assert_eq!(result.thumbnail, "pdf-existing.jpg");
+        assert_eq!(fs::read(existing).unwrap(), b"preexisting PDF thumbnail");
+        assert!(fs::read_dir(&covers).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
@@ -2794,7 +2949,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_thumbnail_write_preserves_final_and_cleans_temp_on_rename_failure() {
+    fn no_replace_thumbnail_write_preserves_nonregular_final_and_cleans_temp() {
         let temp = TestDir::new();
         let final_path = temp.path().join("existing.jpg");
         fs::create_dir(&final_path).unwrap();
@@ -2807,7 +2962,7 @@ mod tests {
 
         let error = write_jpeg_atomically(&final_path, &image).unwrap_err();
 
-        assert!(error.contains("rename"));
+        assert!(error.contains("regular file"));
         assert_eq!(fs::read(final_path.join("marker")).unwrap(), b"preserve me");
         let entries: Vec<_> = fs::read_dir(temp.path())
             .unwrap()
@@ -3019,6 +3174,15 @@ mod tests {
         seal_calls: AtomicUsize,
     }
 
+    #[cfg(unix)]
+    struct SnapshotDirectoryReplacementStore {
+        inner: FileStorer,
+        book_root: PathBuf,
+        replaced: AtomicBool,
+        decoy_path: StdMutex<Option<PathBuf>>,
+        original_snapshot_path: StdMutex<Option<PathBuf>>,
+    }
+
     struct DestinationRaceStore {
         inner: FileStorer,
     }
@@ -3152,6 +3316,117 @@ mod tests {
             destination: &str,
         ) -> anyhow::Result<()> {
             self.inner.publish_staged_no_replace(staged, destination).await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl FileStore for SnapshotDirectoryReplacementStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(
+            &self,
+            staged: &StagedFile,
+        ) -> anyhow::Result<PrivateSnapshot> {
+            let snapshot = self.inner.create_private_snapshot(staged).await?;
+            if !self.replaced.swap(true, Ordering::SeqCst) {
+                let snapshot_directory = self.book_root.join(".tvserver-book-snapshots");
+                let original_directory = self.book_root.join("original-private-snapshots");
+                fs::rename(&snapshot_directory, &original_directory)?;
+                fs::create_dir(&snapshot_directory)?;
+                let name = snapshot.path.file_name().unwrap();
+                let decoy = snapshot_directory.join(name);
+                fs::write(&decoy, b"decoy must never be ingested or removed")?;
+                *self.decoy_path.lock().unwrap() = Some(decoy);
+                *self.original_snapshot_path.lock().unwrap() = Some(original_directory.join(name));
+            }
+            Ok(snapshot)
+        }
+
+        async fn seal_private_snapshot(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(
+            &self,
+            snapshot: &PrivateSnapshot,
+            destination: &str,
+            expected_seal: &FileSeal,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
+                .await
+        }
+
+        async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_staged_no_replace(staged, destination)
+                .await
         }
 
         async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
@@ -4254,6 +4529,50 @@ mod tests {
         assert!(fs::read_dir(snapshot_dir).unwrap().next().is_none());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ingestion_rejects_replaced_snapshot_path_and_cleans_original_capability() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("replaced.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let original_source = fs::read(&source).unwrap();
+        let (inner, repository) = ingestion_dependencies(&book_root).await;
+        let store = Arc::new(SnapshotDirectoryReplacementStore {
+            inner,
+            book_root: book_root.clone(),
+            replaced: AtomicBool::new(false),
+            decoy_path: StdMutex::new(None),
+            original_snapshot_path: StdMutex::new(None),
+        });
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            store.clone(),
+            repository.clone(),
+            Some("replacement".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&source).unwrap(), original_source);
+        assert!(repository.list_all_books().await.unwrap().is_empty());
+        assert!(!book_root.join("Replacement/replaced.epub").exists());
+        let original = store.original_snapshot_path.lock().unwrap().clone().unwrap();
+        let decoy = store.decoy_path.lock().unwrap().clone().unwrap();
+        assert!(!original.exists());
+        assert_eq!(fs::read(decoy).unwrap(), b"decoy must never be ingested or removed");
+    }
+
     #[tokio::test]
     async fn snapshot_copy_cleanup_failure_attempts_snapshot_cleanup_and_source_restore_once() {
         let temp = TestDir::new();
@@ -4471,7 +4790,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(preexisting.exists());
+        assert_eq!(fs::read(&preexisting).unwrap(), b"preexisting thumbnail");
     }
 
     #[tokio::test]

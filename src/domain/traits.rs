@@ -124,6 +124,30 @@ pub struct StagedFile {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateSnapshot {
     pub path: PathBuf,
+    pub(crate) id: u128,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+impl PrivateSnapshot {
+    pub(crate) fn new(path: PathBuf, id: u128, device: u64, inode: u64) -> Self {
+        Self {
+            path,
+            id,
+            device,
+            inode,
+        }
+    }
+
+    pub(crate) fn path_has_creation_identity(&self) -> anyhow::Result<bool> {
+        use cap_fs_ext::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(&self.path)?;
+        Ok(metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode)
+    }
 }
 
 /// An interface to a collection of files.

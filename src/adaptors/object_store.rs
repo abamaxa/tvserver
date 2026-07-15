@@ -13,11 +13,11 @@ use cap_std::{
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::{fs, io::AsyncWriteExt};
 
 use crate::domain::traits::{FileStore, Filer, PrivateSnapshot, StagedFile, StoreObject};
@@ -53,6 +53,15 @@ pub struct FileSystemStore {
     root: String,
     root_dir: Arc<OnceLock<Dir>>,
     move_filesystem: Arc<dyn MoveFileSystem>,
+    private_snapshots: Arc<Mutex<HashMap<u128, PrivateSnapshotAuthority>>>,
+}
+
+#[derive(Clone)]
+struct PrivateSnapshotAuthority {
+    directory: Arc<Dir>,
+    name: PathBuf,
+    device: u64,
+    inode: u64,
 }
 
 impl FileSystemStore {
@@ -65,6 +74,7 @@ impl FileSystemStore {
             root: root.to_string(),
             root_dir: Arc::new(OnceLock::new()),
             move_filesystem,
+            private_snapshots: Arc::new(Mutex::new(HashMap::new())),
         };
         let _ = store.open_root();
         store
@@ -246,10 +256,45 @@ impl FileSystemStore {
         }
     }
 
-    fn open_private_snapshot_directory(&self) -> Result<Dir> {
-        Ok(self
+    fn private_snapshot_authority(
+        &self,
+        snapshot: &PrivateSnapshot,
+    ) -> Result<PrivateSnapshotAuthority> {
+        match self
             .open_root()?
-            .open_dir_nofollow(PRIVATE_SNAPSHOT_DIRECTORY)?)
+            .symlink_metadata(PRIVATE_SNAPSHOT_DIRECTORY)
+        {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(anyhow!(
+                    "private book snapshot directory must be a directory and not a symlink"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let token_name = self.private_snapshot_name(snapshot)?;
+        let snapshots = self
+            .private_snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let authority = snapshots
+            .get(&snapshot.id)
+            .ok_or_else(|| anyhow!("private snapshot token is no longer active"))?;
+        if authority.name != token_name
+            || authority.device != snapshot.device
+            || authority.inode != snapshot.inode
+        {
+            return Err(anyhow!("private snapshot token identity does not match its authority"));
+        }
+        Ok(authority.clone())
+    }
+
+    fn forget_private_snapshot(&self, snapshot: &PrivateSnapshot) {
+        self.private_snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&snapshot.id);
     }
 }
 
@@ -291,6 +336,19 @@ fn ensure_cap_regular_file(dir: &Dir, path: &Path, description: &str) -> Result<
         return Err(anyhow!(
             "{description} must be a regular file and not a symlink: {}",
             path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_snapshot_identity(
+    metadata: &cap_std::fs::Metadata,
+    device: u64,
+    inode: u64,
+) -> Result<()> {
+    if !metadata.is_file() || metadata.dev() != device || metadata.ino() != inode {
+        return Err(anyhow!(
+            "private snapshot identity changed after it was created"
         ));
     }
     Ok(())
@@ -459,6 +517,8 @@ fn copy_and_seal<R: Read, W: Write>(source: &mut R, destination: &mut W) -> io::
 fn copy_private_snapshot_no_replace_verified(
     snapshot_dir: &Dir,
     snapshot_name: &Path,
+    snapshot_device: u64,
+    snapshot_inode: u64,
     root_dir: &Dir,
     destination: &Path,
     expected_seal: &FileSeal,
@@ -467,9 +527,7 @@ fn copy_private_snapshot_no_replace_verified(
     source_options.read(true).follow(FollowSymlinks::No);
     let mut source = snapshot_dir.open_with(snapshot_name, &source_options)?;
     let source_metadata = source.metadata()?;
-    if !source_metadata.is_file() {
-        return Err(anyhow!("private snapshot must be a regular file"));
-    }
+    ensure_snapshot_identity(&source_metadata, snapshot_device, snapshot_inode)?;
 
     let destination_parent = destination.parent().unwrap_or_else(|| Path::new(""));
     let temporary = destination_parent.join(unique_staging_name("tvserver-verified-copy"));
@@ -484,6 +542,7 @@ fn copy_private_snapshot_no_replace_verified(
         let actual_seal = copy_and_seal(&mut source, &mut copied)?;
         root_dir.set_permissions(&temporary, source_metadata.permissions())?;
         copied.sync_all()?;
+        let copied_metadata = copied.metadata()?;
         if actual_seal != *expected_seal {
             return Err(anyhow!(
                 "private snapshot integrity check failed: expected {expected_seal:?}, copied {actual_seal:?}"
@@ -503,6 +562,25 @@ fn copy_private_snapshot_no_replace_verified(
             let _ = root_dir.remove_file(destination);
             return Err(error);
         }
+        let published_metadata = root_dir.symlink_metadata(destination)?;
+        if published_metadata.dev() != copied_metadata.dev()
+            || published_metadata.ino() != copied_metadata.ino()
+        {
+            return Err(anyhow!(
+                "published destination identity changed before snapshot cleanup"
+            ));
+        }
+        if let Err(error) = snapshot_dir.remove_file(snapshot_name) {
+            let rollback = root_dir.remove_file(destination);
+            return Err(match rollback {
+                Ok(()) => anyhow!(
+                    "failed to remove the original private snapshot after publication: {error}"
+                ),
+                Err(rollback_error) => anyhow!(
+                    "failed to remove the original private snapshot after publication: {error}; additionally failed to roll back destination: {rollback_error}"
+                ),
+            });
+        }
         if let Err(error) = root_dir.remove_file(&temporary) {
             tracing::warn!(
                 "Published verified copy at {} but could not remove temporary file {}: {}",
@@ -511,7 +589,6 @@ fn copy_private_snapshot_no_replace_verified(
                 error
             );
         }
-        remove_staged_source_after_publication(snapshot_dir, snapshot_name, destination);
         Ok(())
     })();
     if result.is_err() {
@@ -803,8 +880,18 @@ impl FileStore for FileSystemStore {
                 ));
             }
 
-            let snapshot_relative = snapshot_directory.join(unique_staging_name("snapshot"));
-            let copy_result = (|| -> Result<()> {
+            let snapshot_dir = root_dir.open_dir_nofollow(snapshot_directory)?;
+            let opened_directory_metadata = snapshot_dir.dir_metadata()?;
+            if opened_directory_metadata.dev() != directory_metadata.dev()
+                || opened_directory_metadata.ino() != directory_metadata.ino()
+            {
+                return Err(anyhow!(
+                    "private book snapshot directory changed while it was opened"
+                ));
+            }
+
+            let snapshot_name = PathBuf::from(unique_staging_name("snapshot"));
+            let copy_result = (|| -> Result<(u64, u64)> {
                 let mut source_options = OpenOptions::new();
                 source_options.read(true).follow(FollowSymlinks::No);
                 let mut source = source_dir.open_with(&staged_source, &source_options)?;
@@ -817,22 +904,50 @@ impl FileStore for FileSystemStore {
                     .write(true)
                     .create_new(true)
                     .follow(FollowSymlinks::No);
-                let mut snapshot = root_dir.open_with(&snapshot_relative, &destination_options)?;
+                let mut snapshot = snapshot_dir.open_with(&snapshot_name, &destination_options)?;
                 io::copy(&mut source, &mut snapshot)?;
                 snapshot.flush()?;
                 snapshot.sync_all()?;
-                drop(snapshot);
-                ensure_cap_regular_file(root_dir, &snapshot_relative, "private snapshot")?;
-                Ok(())
+                let metadata = snapshot.metadata()?;
+                if !metadata.is_file() {
+                    return Err(anyhow!("private snapshot must be a regular file"));
+                }
+                Ok((metadata.dev(), metadata.ino()))
             })();
-            if let Err(error) = copy_result {
-                let _ = root_dir.remove_file(&snapshot_relative);
-                return Err(error);
-            }
+            let (device, inode) = match copy_result {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let _ = snapshot_dir.remove_file(&snapshot_name);
+                    return Err(error);
+                }
+            };
 
-            Ok(PrivateSnapshot {
-                path: root_path.join(snapshot_relative),
-            })
+            let mut snapshots = store
+                .private_snapshots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let id = loop {
+                let id = rand::random::<u128>();
+                if !snapshots.contains_key(&id) {
+                    break id;
+                }
+            };
+            snapshots.insert(
+                id,
+                PrivateSnapshotAuthority {
+                    directory: Arc::new(snapshot_dir),
+                    name: snapshot_name.clone(),
+                    device,
+                    inode,
+                },
+            );
+
+            Ok(PrivateSnapshot::new(
+                root_path.join(snapshot_directory).join(snapshot_name),
+                id,
+                device,
+                inode,
+            ))
         })
         .await?
     }
@@ -841,16 +956,11 @@ impl FileStore for FileSystemStore {
         let store = self.clone();
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
-            let snapshot_name = store.private_snapshot_name(&snapshot)?;
-            let snapshot_dir = store.open_private_snapshot_directory()?;
+            let authority = store.private_snapshot_authority(&snapshot)?;
             let mut source_options = OpenOptions::new();
             source_options.read(true).follow(FollowSymlinks::No);
-            let mut source = snapshot_dir.open_with(&snapshot_name, &source_options)?;
-            if !source.metadata()?.is_file() {
-                return Err(anyhow!(
-                    "private snapshot must be a regular file and not a symlink"
-                ));
-            }
+            let mut source = authority.directory.open_with(&authority.name, &source_options)?;
+            ensure_snapshot_identity(&source.metadata()?, authority.device, authority.inode)?;
             Ok(seal_reader(&mut source)?)
         })
         .await?
@@ -867,17 +977,22 @@ impl FileStore for FileSystemStore {
         let destination = PathBuf::from(destination);
         let expected_seal = expected_seal.clone();
         tokio::task::spawn_blocking(move || {
-            let snapshot_name = store.private_snapshot_name(&snapshot)?;
-            let snapshot_dir = store.open_private_snapshot_directory()?;
+            let authority = store.private_snapshot_authority(&snapshot)?;
             let destination = store.rooted_relative_path(&destination)?;
             let root_dir = store.open_root()?;
-            copy_private_snapshot_no_replace_verified(
-                &snapshot_dir,
-                &snapshot_name,
+            let result = copy_private_snapshot_no_replace_verified(
+                &authority.directory,
+                &authority.name,
+                authority.device,
+                authority.inode,
                 root_dir,
                 &destination,
                 &expected_seal,
-            )
+            );
+            if result.is_ok() {
+                store.forget_private_snapshot(&snapshot);
+            }
+            result
         })
         .await?
     }
@@ -886,16 +1001,19 @@ impl FileStore for FileSystemStore {
         let store = self.clone();
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
-            let snapshot_name = store.private_snapshot_name(&snapshot)?;
-            let snapshot_dir = store.open_private_snapshot_directory()?;
-            match snapshot_dir.symlink_metadata(&snapshot_name) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
-                    anyhow!("private snapshot must be a regular file and not a symlink"),
-                ),
-                Ok(_) => Ok(snapshot_dir.remove_file(&snapshot_name)?),
+            let authority = store.private_snapshot_authority(&snapshot)?;
+            let result = match authority.directory.symlink_metadata(&authority.name) {
+                Ok(metadata) => {
+                    ensure_snapshot_identity(&metadata, authority.device, authority.inode)?;
+                    Ok(authority.directory.remove_file(&authority.name)?)
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error.into()),
+            };
+            if result.is_ok() {
+                store.forget_private_snapshot(&snapshot);
             }
+            result
         })
         .await?
     }
@@ -1224,6 +1342,96 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn replaced_private_snapshot_directory(
+        test_name: &str,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        FileSystemStore,
+        PrivateSnapshot,
+        FileSeal,
+        PathBuf,
+        PathBuf,
+    ) {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-{test_name}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("Dune.epub");
+        std::fs::write(&source, b"legitimate snapshot bytes").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        let seal = store.seal_private_snapshot(&snapshot).await.unwrap();
+        let snapshot_name = snapshot.path.file_name().unwrap().to_owned();
+        let snapshot_directory = root.join(PRIVATE_SNAPSHOT_DIRECTORY);
+        let original_directory = root.join("original-private-snapshots");
+        std::fs::rename(&snapshot_directory, &original_directory).unwrap();
+        std::fs::create_dir(&snapshot_directory).unwrap();
+        let decoy = snapshot_directory.join(&snapshot_name);
+        std::fs::write(&decoy, b"decoy bytes must be preserved").unwrap();
+        let original = original_directory.join(snapshot_name);
+
+        (base, root, store, snapshot, seal, original, decoy)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_sealing_uses_creation_directory_after_real_directory_replacement() {
+        let (base, _root, store, snapshot, expected, original, decoy) =
+            replaced_private_snapshot_directory("snapshot-dir-seal-real").await;
+
+        let actual = store.seal_private_snapshot(&snapshot).await.unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(std::fs::read(&original).unwrap(), b"legitimate snapshot bytes");
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy bytes must be preserved");
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_publication_uses_and_cleans_original_after_real_directory_replacement() {
+        let (base, root, store, snapshot, seal, original, decoy) =
+            replaced_private_snapshot_directory("snapshot-dir-publish-real").await;
+        let destination = root.join("Dune.epub");
+
+        store
+            .publish_private_snapshot_no_replace(
+                &snapshot,
+                destination.to_str().unwrap(),
+                &seal,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"legitimate snapshot bytes");
+        assert!(!original.exists());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy bytes must be preserved");
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_removal_cleans_original_after_real_directory_replacement() {
+        let (base, _root, store, snapshot, _seal, original, decoy) =
+            replaced_private_snapshot_directory("snapshot-dir-remove-real").await;
+
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+
+        assert!(!original.exists());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy bytes must be preserved");
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn private_snapshot_directory_symlink_rejects_sealing_and_preserves_decoy() {
         let (base, _root, store, snapshot, _seal, decoy) =
@@ -1404,6 +1612,7 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"must never be copied");
         let snapshot_dir = root.join(".tvserver-book-snapshots");
         assert!(!snapshot_dir.exists() || std::fs::read_dir(snapshot_dir).unwrap().next().is_none());
+        assert!(store.private_snapshots.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 
