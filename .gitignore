@@ -18,3 +18,4 @@ docs/.lock
 .vscode
 .claude
 /.worktrees/
+/.superpowers/
