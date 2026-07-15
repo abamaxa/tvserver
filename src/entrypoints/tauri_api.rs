@@ -9,7 +9,10 @@ use crate::domain::messages::{
     ClientLogMessage, Command, ConversionRequest, CopyFromServerRequest, DownloadRequest, MediaItem, PlayRequest, PlayerList, Response
 };
 #[cfg(not(feature = "webserver"))]
-use crate::domain::models::{Conversion, DownloadableItem, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS};
+use crate::domain::models::{
+    BookCollectionDetails, BookDetails, Conversion, DownloadableItem, SearchResults,
+    TaskListResults, AVAILABLE_CONVERSIONS,
+};
 #[cfg(not(feature = "webserver"))]
 use crate::domain::traits::MediaSharer;
 #[cfg(not(feature = "webserver"))]
@@ -112,6 +115,71 @@ async fn list_media(state: &SharedState, collection: &str) -> Result<MediaItem, 
         Ok(result) => Ok(result),
         Err(e) => Err(e.to_string()),
     }
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
+pub async fn list_root_books(
+    state: tauri::State<'_, SharedState>,
+) -> Result<BookCollectionDetails, String> {
+    list_book_collection(&state, "").await
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
+pub async fn list_books(
+    state: tauri::State<'_, SharedState>,
+    collection: String,
+) -> Result<BookCollectionDetails, String> {
+    list_book_collection(&state, &collection).await
+}
+
+#[cfg(not(feature = "webserver"))]
+async fn list_book_collection(
+    state: &SharedState,
+    collection: &str,
+) -> Result<BookCollectionDetails, String> {
+    state
+        .get_book_store()
+        .list(collection)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "webserver"))]
+fn parse_book_checksum(checksum: &str) -> Result<i64, String> {
+    checksum
+        .parse::<i64>()
+        .map_err(|error| format!("Invalid book checksum '{checksum}': {error}"))
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
+pub async fn get_book(
+    state: tauri::State<'_, SharedState>,
+    checksum: String,
+) -> Result<BookDetails, String> {
+    let checksum = parse_book_checksum(&checksum)?;
+    state
+        .get_repository()
+        .retrieve_book(checksum)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
+pub async fn delete_book(
+    state: tauri::State<'_, SharedState>,
+    checksum: String,
+) -> Result<Response, String> {
+    let checksum = parse_book_checksum(&checksum)?;
+    state
+        .get_book_store()
+        .delete(checksum)
+        .await
+        .map(|()| Response::success("success".to_string()))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -255,6 +323,10 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         youtube_search,
         list_root_collection,
         list_collection,
+        list_root_books,
+        list_books,
+        get_book,
+        delete_book,
         log_client_message,
         remote_play,
         remote_command,
@@ -266,4 +338,24 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         channel_connect,
         download_videos
     ]
+}
+
+#[cfg(all(test, not(feature = "webserver")))]
+mod tests {
+    use super::{delete_book, get_book, list_books, list_root_books, parse_book_checksum};
+
+    #[test]
+    fn rejects_malformed_book_checksum() {
+        let error = parse_book_checksum("not-a-checksum").unwrap_err();
+
+        assert!(error.starts_with("Invalid book checksum 'not-a-checksum':"));
+    }
+
+    #[test]
+    fn exposes_book_command_handlers() {
+        let _ = list_root_books;
+        let _ = list_books;
+        let _ = get_book;
+        let _ = delete_book;
+    }
 }
