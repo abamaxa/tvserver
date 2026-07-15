@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    algorithm::{get_book_thumbnail_url, title_case},
+    algorithm::{get_book_thumbnail_url, path_to_collection_id, title_case},
     config::{get_book_dir, get_book_thumbnail_dir},
     models::{
         is_default_book_thumbnail, BookCollectionDetails, BookCollectionItem,
@@ -115,20 +115,20 @@ impl BookStore {
         let comparable_root = absolute_path(&self.book_root, "configured book root")?;
 
         match comparable_parent.strip_prefix(comparable_root) {
-            Ok(relative) => relative
-                .to_str()
-                .map(str::to_string)
+            Ok(relative) => path_to_collection_id(relative)
                 .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
-            Err(_) => comparable_parent
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| {
+            Err(_) => {
+                let fallback = comparable_parent
+                    .file_name()
+                    .map(Path::new)
+                    .unwrap_or_else(|| Path::new(""));
+                path_to_collection_id(fallback).ok_or_else(|| {
                     anyhow::anyhow!(
                         "book source parent is not valid UTF-8: {}",
                         comparable_parent.display()
                     )
-                }),
+                })
+            }
         }
     }
 
@@ -548,6 +548,18 @@ mod tests {
         assert_eq!(destination, layout.book_root.join("Classics/Emma.epub"));
         assert!(destination.exists());
         assert!(!source.exists());
+    }
+
+    #[tokio::test]
+    async fn collection_from_nested_book_root_uses_portable_identifier() {
+        let layout = TestLayout::new("nested-portable-collection");
+        let source = layout.book_root.join("Fiction").join("Classics").join("Emma.epub");
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        assert_eq!(
+            store.collection_from_source(&source).unwrap(),
+            "Fiction/Classics"
+        );
     }
 
     #[tokio::test]

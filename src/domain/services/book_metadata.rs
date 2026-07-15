@@ -1,5 +1,5 @@
 use crate::domain::{
-    algorithm::title_case,
+    algorithm::{path_to_collection_id, title_case},
     config::{get_book_dir, get_book_thumbnail_dir},
     models::{
         ensure_default_book_thumbnail, BookDetails, BookFormat, BookMetadata, BookState,
@@ -987,15 +987,13 @@ fn collection_from_source(path: &Path, book_root: &Path) -> anyhow::Result<Strin
     let parent = absolute_path(parent)?;
     let book_root = absolute_path(book_root)?;
     match parent.strip_prefix(&book_root) {
-        Ok(relative) => relative
-            .to_str()
-            .map(str::to_string)
+        Ok(relative) => path_to_collection_id(relative)
             .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
-        Err(_) => Ok(parent
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string()),
+        Err(_) => {
+            let fallback = parent.file_name().map(Path::new).unwrap_or_else(|| Path::new(""));
+            path_to_collection_id(fallback)
+                .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8"))
+        }
     }
 }
 
@@ -4950,6 +4948,40 @@ mod tests {
         assert_eq!(details.thumbnail, format!("{checksum}.jpg"));
         assert!(thumbnail_root.join(&details.thumbnail).exists());
         assert_eq!(repository.retrieve_book(checksum).await.unwrap().thumbnail, details.thumbnail);
+    }
+
+    #[tokio::test]
+    async fn ingestion_persists_nested_collection_as_portable_identifier() {
+        let temp = TestDir::new();
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        let source = book_root.join("Fiction").join("Classics").join("Emma.epub");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(details.collection, "Fiction/Classics");
+        assert_eq!(
+            repository.retrieve_book(details.checksum).await.unwrap().collection,
+            "Fiction/Classics"
+        );
+        assert!(book_root.join("Fiction").join("Classics").join("Emma.epub").exists());
     }
 
     #[test]
