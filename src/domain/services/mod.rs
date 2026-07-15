@@ -10,6 +10,7 @@ pub mod copy_server;
 pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum, get_video_metadata};
 pub use book_metadata::{
     extract_epub_metadata, extract_pdf_metadata, extract_pdf_metadata_with_renderer,
+    generate_book_metadata,
     BookMetadataExtraction, BookMetadataExtractionError, DefaultPdfThumbnailRenderer,
     PdfThumbnailRenderer,
 };

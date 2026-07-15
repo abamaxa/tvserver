@@ -1,4 +1,12 @@
-use crate::domain::models::{ensure_default_book_thumbnail, BookMetadata, DEFAULT_BOOK_THUMBNAIL};
+use crate::domain::{
+    algorithm::title_case,
+    config::{get_book_dir, get_book_thumbnail_dir},
+    models::{
+        ensure_default_book_thumbnail, BookDetails, BookFormat, BookMetadata, BookState,
+        DEFAULT_BOOK_THUMBNAIL,
+    },
+    traits::{FileStorer, Repository},
+};
 use lopdf::{decode_text_string, Dictionary, Document};
 use quick_xml::{
     events::{BytesStart, Event},
@@ -56,6 +64,195 @@ pub enum BookMetadataExtractionError {
     InvalidPackage(String),
     #[error("could not read PDF: {0}")]
     Pdf(String),
+}
+
+pub async fn generate_book_metadata(
+    path: PathBuf,
+    storer: FileStorer,
+    repository: Repository,
+    suggested_collection: Option<String>,
+) -> anyhow::Result<Option<BookDetails>> {
+    let book_dir = get_book_dir();
+    let book_root = PathBuf::from(&book_dir);
+    let thumbnail_root = get_book_thumbnail_dir(&book_dir);
+    generate_book_metadata_with_roots(
+        path,
+        storer,
+        repository,
+        suggested_collection,
+        book_root,
+        thumbnail_root,
+    )
+    .await
+}
+
+async fn generate_book_metadata_with_roots(
+    path: PathBuf,
+    storer: FileStorer,
+    repository: Repository,
+    suggested_collection: Option<String>,
+    book_root: PathBuf,
+    thumbnail_root: PathBuf,
+) -> anyhow::Result<Option<BookDetails>> {
+    let format = book_format(&path)?;
+    let metadata = tokio::fs::symlink_metadata(&path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "book source must be a regular file and not a symlink: {}",
+            path.display()
+        );
+    }
+    if is_book_file_being_written(&path).await? {
+        tracing::info!(book = %path.display(), "Skipping book file that is still being written");
+        return Ok(None);
+    }
+    if metadata.len() == 0 {
+        anyhow::bail!("cannot ingest zero-byte book: {}", path.display());
+    }
+
+    let checksum = super::video_metadata::calculate_checksum(&path).await?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("book path has no UTF-8 file name: {}", path.display()))?
+        .to_string();
+    let collection = match suggested_collection.as_deref() {
+        Some(collection) => title_case(collection),
+        None => collection_from_source(&path, &book_root)?,
+    };
+    validate_collection(&collection)?;
+
+    let mut details = BookDetails::new(file_name.clone(), collection.clone(), &path, format);
+    details.checksum = checksum;
+    details.search_phrase = suggested_collection.clone();
+
+    let extraction_path = path.clone();
+    let extraction_thumbnail_root = thumbnail_root.clone();
+    let thumbnail_key = checksum.to_string();
+    let extraction = tokio::task::spawn_blocking(move || match format {
+        BookFormat::Pdf => {
+            extract_pdf_metadata(&extraction_path, &extraction_thumbnail_root, &thumbnail_key)
+        }
+        BookFormat::Epub => {
+            extract_epub_metadata(&extraction_path, &extraction_thumbnail_root, &thumbnail_key)
+        }
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("book metadata worker failed: {error}"))?;
+
+    match extraction {
+        Ok(extraction) => apply_extraction(&mut details, extraction),
+        Err(error) => {
+            tracing::warn!(book = %path.display(), "book metadata extraction failed: {error}");
+            if let Err(thumbnail_error) = ensure_default_book_thumbnail(&thumbnail_root) {
+                tracing::warn!(
+                    book = %path.display(),
+                    "could not prepare default book thumbnail: {thumbnail_error}"
+                );
+            }
+            details.thumbnail = DEFAULT_BOOK_THUMBNAIL.to_string();
+            details.metadata.extraction_error = Some(error.to_string());
+            details.state = BookState::MetadataError;
+        }
+    }
+
+    let destination_directory = book_root.join(&collection);
+    let destination = destination_directory.join(&file_name);
+    storer.create_folder(&destination_directory).await?;
+    if absolute_path(&path)? != absolute_path(&destination)? {
+        let source = path.to_str().ok_or_else(|| {
+            anyhow::anyhow!("book source path is not valid UTF-8: {}", path.display())
+        })?;
+        let destination_path = destination.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "book destination path is not valid UTF-8: {}",
+                destination.display()
+            )
+        })?;
+        storer.rename(source, destination_path).await?;
+    }
+
+    details.collection = collection;
+    details.file_name = file_name;
+    details.dir_path = None;
+    repository.save_book(&details).await?;
+    Ok(Some(details))
+}
+
+fn apply_extraction(details: &mut BookDetails, extraction: BookMetadataExtraction) {
+    if let Some(title) = extraction.title {
+        details.title = title;
+    }
+    details.authors = extraction.authors;
+    details.description = extraction.description;
+    details.publisher = extraction.publisher;
+    details.published_date = extraction.published_date;
+    details.language = extraction.language;
+    details.isbn = extraction.isbn;
+    details.page_count = extraction.page_count;
+    details.thumbnail = extraction.thumbnail;
+    details.metadata = extraction.metadata;
+    details.state = if details.metadata.extraction_error.is_some() {
+        BookState::MetadataError
+    } else {
+        BookState::Ready
+    };
+}
+
+fn book_format(path: &Path) -> anyhow::Result<BookFormat> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("pdf") => Ok(BookFormat::Pdf),
+        Some("epub") => Ok(BookFormat::Epub),
+        _ => anyhow::bail!("unsupported book file: {}", path.display()),
+    }
+}
+
+fn collection_from_source(path: &Path, book_root: &Path) -> anyhow::Result<String> {
+    let Some(parent) = path.parent() else {
+        return Ok(String::new());
+    };
+    let parent = absolute_path(parent)?;
+    let book_root = absolute_path(book_root)?;
+    match parent.strip_prefix(&book_root) {
+        Ok(relative) => relative
+            .to_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
+        Err(_) => Ok(parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string()),
+    }
+}
+
+fn validate_collection(collection: &str) -> anyhow::Result<()> {
+    if Path::new(collection)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || collection.is_empty()
+    {
+        Ok(())
+    } else {
+        anyhow::bail!("book collection must be a relative path without traversal: {collection}")
+    }
+}
+
+fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
+    std::path::absolute(path).map_err(|error| {
+        anyhow::anyhow!("could not make path absolute ({}): {error}", path.display())
+    })
+}
+
+async fn is_book_file_being_written(path: &Path) -> std::io::Result<bool> {
+    let initial_size = tokio::fs::metadata(path).await?.len();
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    Ok(tokio::fs::metadata(path).await?.len() != initial_size)
 }
 
 pub trait PdfThumbnailRenderer {
@@ -1157,9 +1354,20 @@ mod tests {
         fs::{self, File},
         io::Write,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
     };
     use zip::{write::SimpleFileOptions, ZipWriter};
+
+    use crate::{
+        adaptors::{FileSystemStore, SqlRepository},
+        domain::{
+            models::{BookFormat, BookState},
+            traits::{FileStorer, Repository},
+        },
+    };
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -2046,5 +2254,148 @@ mod tests {
         assert!(error
             .to_string()
             .contains("archive entry count 4097 exceeds limit 4096"));
+    }
+
+    async fn ingestion_dependencies(book_root: &Path) -> (FileStorer, Repository) {
+        let storer: FileStorer = Arc::new(FileSystemStore::new(
+            book_root.to_str().expect("test path should be UTF-8"),
+        ));
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        (storer, repository)
+    }
+
+    #[tokio::test]
+    async fn ingests_epub_metadata_moves_file_and_saves_record() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("practical.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+                 <metadata>
+                   <dc:title>Practical EPUB</dc:title>
+                   <dc:creator>Ada Author</dc:creator>
+                   <dc:language>en</dc:language>
+                 </metadata>
+                 <manifest/>
+               </package>"#,
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("science fiction".to_string()),
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("stable EPUB should be ingested");
+
+        assert_eq!(details.title, "Practical EPUB");
+        assert_eq!(details.authors, ["Ada Author"]);
+        assert_eq!(details.language.as_deref(), Some("en"));
+        assert_eq!(details.format, BookFormat::Epub);
+        assert_eq!(details.collection, "Science Fiction");
+        assert_eq!(details.state, BookState::Ready);
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(!source.exists());
+        assert!(book_root.join("Science Fiction/practical.epub").exists());
+        assert!(thumbnail_root.join(DEFAULT_BOOK_THUMBNAIL).exists());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.file_name, details.file_name);
+        assert_eq!(saved.collection, details.collection);
+        assert_eq!(saved.title, details.title);
+        assert_eq!(saved.authors, details.authors);
+        assert_eq!(saved.state, details.state);
+    }
+
+    #[tokio::test]
+    async fn ingests_pdf_metadata_moves_file_and_saves_record() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("manual.pdf");
+        write_pdf(
+            &source,
+            Some(dictionary! {
+                "Title" => text_string("PDF Manual"),
+                "Author" => text_string("Pat Writer"),
+            }),
+            3,
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("stable PDF should be ingested");
+
+        assert_eq!(details.title, "PDF Manual");
+        assert_eq!(details.authors, ["Pat Writer"]);
+        assert_eq!(details.page_count, Some(3));
+        assert_eq!(details.format, BookFormat::Pdf);
+        assert_eq!(details.collection, "downloads");
+        assert_eq!(details.state, BookState::Ready);
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert!(!source.exists());
+        assert!(book_root.join("downloads/manual.pdf").exists());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.file_name, details.file_name);
+        assert_eq!(saved.collection, details.collection);
+        assert_eq!(saved.title, details.title);
+        assert_eq!(saved.authors, details.authors);
+        assert_eq!(saved.page_count, details.page_count);
+        assert_eq!(saved.state, details.state);
+    }
+
+    #[tokio::test]
+    async fn corrupt_epub_uses_weak_metadata_default_thumbnail_and_still_saves() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("fallback_title.epub");
+        fs::write(&source, b"not an epub").unwrap();
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            Some("fallbacks".to_string()),
+            book_root,
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .expect("stable corrupt EPUB should still be recorded");
+
+        assert_eq!(details.title, "fallback title");
+        assert!(details.authors.is_empty());
+        assert_eq!(details.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(details.state, BookState::MetadataError);
+        assert!(details.metadata.extraction_error.is_some());
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.title, details.title);
+        assert_eq!(saved.thumbnail, details.thumbnail);
+        assert_eq!(saved.state, details.state);
+        assert_eq!(saved.metadata, details.metadata);
     }
 }

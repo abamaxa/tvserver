@@ -3,11 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 // Assuming these are defined in your codebase:
 use super::media_kind::is_video_extension;
-use crate::domain::traits::Repository;
 use crate::domain::models::VideoDetails;
+use crate::domain::traits::Repository;
 
 /// Asynchronously retrieves videos for a series or a given id.
-/// 
+///
 /// If `series_or_id` can be parsed as an integer, it attempts to retrieve a single video
 /// using that checksum. If that call fails or is not parseable as an integer, it splits
 /// the input into series and season parts and calls `list_series_details`.
@@ -33,7 +33,9 @@ pub async fn get_videos_for_series_or_id(
 
     // Call the async method to list series details.
     // We pass the season as an Option<&str> (using as_deref() to convert Option<String> to Option<&str>)
-    repo.list_series_details(&series, season.as_deref()).await.map_err(|e| anyhow::anyhow!("Error listing series details: {}", e))
+    repo.list_series_details(&series, season.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("Error listing series details: {}", e))
 }
 
 pub fn skip_file(name: &str) -> bool {
@@ -63,7 +65,10 @@ pub fn skip_file(name: &str) -> bool {
     };
 
     // If the file extension is one of the accepted ones, don't skip the file.
-    if file_ext.is_empty() || is_video_extension(&file_ext) {
+    if file_ext.is_empty()
+        || is_video_extension(&file_ext)
+        || matches!(file_ext.as_str(), "pdf" | "epub")
+    {
         return false;
     }
 
@@ -85,7 +90,6 @@ fn split_at_last_slash(s: &str) -> (String, Option<String>) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +101,10 @@ mod tests {
             ("TV2", false),
             ("file.py", true),
             ("file.mp4", false),
+            ("book.pdf", false),
+            ("BOOK.PDF", false),
+            ("book.epub", false),
+            ("BOOK.EPUB", false),
             ("file.jpg", true),
             ("file.png", true),
         ];
