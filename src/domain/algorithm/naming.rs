@@ -108,11 +108,19 @@ pub fn get_book_collection_from_path(path: &Path) -> String {
 pub fn path_to_collection_id(path: &Path) -> Option<String> {
     path.components()
         .map(|component| match component {
-            Component::Normal(part) => part.to_str(),
+            Component::Normal(part) => part.to_str().filter(|segment| is_portable_segment(segment)),
             _ => None,
         })
         .collect::<Option<Vec<_>>>()
         .map(|components| components.join("/"))
+}
+
+fn is_portable_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('\\')
+        && !segment.contains(':')
 }
 
 pub fn collection_id_to_path(collection: &str) -> Option<PathBuf> {
@@ -122,12 +130,7 @@ pub fn collection_id_to_path(collection: &str) -> Option<PathBuf> {
 
     let mut path = PathBuf::new();
     for segment in collection.split('/') {
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains(':')
-        {
+        if !is_portable_segment(segment) {
             return None;
         }
         path.push(segment);
@@ -362,6 +365,25 @@ mod test {
                 "expected {collection:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn path_to_collection_id_rejects_nonportable_normal_segments() {
+        for path in [Path::new(r"Fiction\Classics"), Path::new("Fiction:Classics")] {
+            assert_eq!(
+                path_to_collection_id(path),
+                None,
+                "expected {path:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn every_produced_collection_id_round_trips() {
+        let path = Path::new("Fiction").join("Classics").join("British");
+        let collection = path_to_collection_id(&path).expect("portable path should convert");
+
+        assert_eq!(collection_id_to_path(&collection), Some(path));
     }
 
     #[cfg(windows)]

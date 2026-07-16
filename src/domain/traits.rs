@@ -47,6 +47,15 @@ pub trait MediaChecker: Send + Sync {
 
 pub type Checker = Arc<dyn MediaChecker>;
 
+/// Provides a separate boundary for checking book files and metadata state.
+#[automock]
+#[async_trait]
+pub trait BookChecker: Send + Sync {
+    async fn check_book_information(&self) -> anyhow::Result<()>;
+}
+
+pub type BookCheckerHandle = Arc<dyn BookChecker>;
+
 
 /// Provides an interface to observe the progress of a download
 #[automock]
@@ -159,6 +168,12 @@ impl PrivateSnapshot {
 pub trait FileStore: Sync + Send {
     async fn create_folder(&self, path: &Path) -> anyhow::Result<()>;
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
+    async fn list_folder_no_follow(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        self.list_folder(path).await
+    }
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
     async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
@@ -238,6 +253,12 @@ pub trait Databaser: Sync + Send {
     async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error>;
     async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error>;
     async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error>;
+    async fn delete_book_if_path_matches(
+        &self,
+        checksum: i64,
+        collection: &str,
+        file_name: &str,
+    ) -> Result<u64, sqlx::Error>;
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
     async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;

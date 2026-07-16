@@ -347,6 +347,34 @@ impl Databaser for SqlRepository {
         Ok(rows_affected)
     }
 
+    async fn delete_book_if_path_matches(
+        &self,
+        checksum: i64,
+        collection: &str,
+        file_name: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let rows_affected = sqlx::query(
+            "DELETE FROM books WHERE checksum = ? AND collection = ? AND file_name = ?",
+        )
+        .bind(checksum)
+        .bind(collection)
+        .bind(file_name)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if rows_affected > 0 {
+            if let Some(sender) = &self.sender {
+                let message = LocalMessage::Book(BookEvent::new_book_deleted_event(checksum));
+                if let Err(error) = sender.send(message).await {
+                    tracing::error!("Error sending book deleted event {} {}", checksum, error);
+                }
+            }
+        }
+
+        Ok(rows_affected)
+    }
+
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
         // Use a transaction so the existence check and upsert are atomic
         let mut tx = self.pool.begin().await?;
@@ -1207,6 +1235,48 @@ mod tests {
         assert!(deleted.book.is_none());
 
         assert_eq!(db.delete_book(book.checksum).await.unwrap(), 0);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn conditional_book_delete_preserves_relocated_checksum_and_emits_only_on_match() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let db = SqlRepository::new(MEMORY_DB_URL, Some(sender))
+            .await
+            .unwrap();
+        let original = sample_book(802, "Old", "Dune.epub", "Dune");
+        db.save_book(&original).await.unwrap();
+        receiver.try_recv().unwrap();
+
+        let relocated = sample_book(802, "New", "Dune.epub", "Dune");
+        db.save_book(&relocated).await.unwrap();
+        receiver.try_recv().unwrap();
+
+        assert_eq!(
+            db.delete_book_if_path_matches(802, "Old", "Dune.epub")
+                .await
+                .unwrap(),
+            0
+        );
+        let current = db.retrieve_book(802).await.unwrap();
+        assert_eq!(current.collection, "New");
+        assert!(receiver.try_recv().is_err());
+
+        assert_eq!(
+            db.delete_book_if_path_matches(802, "New", "Dune.epub")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(matches!(
+            db.retrieve_book(802).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+        let LocalMessage::Book(deleted) = receiver.try_recv().unwrap() else {
+            panic!("expected a book event");
+        };
+        assert_eq!(deleted.event_type, BookEventType::BookEventDeleted);
+        assert_eq!(deleted.checksum, "802");
         assert!(receiver.try_recv().is_err());
     }
 

@@ -4126,6 +4126,17 @@ mod tests {
             self.inner.delete_book(checksum).await
         }
 
+        async fn delete_book_if_path_matches(
+            &self,
+            checksum: i64,
+            collection: &str,
+            file_name: &str,
+        ) -> Result<u64, sqlx::Error> {
+            self.inner
+                .delete_book_if_path_matches(checksum, collection, file_name)
+                .await
+        }
+
         async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
             self.inner.save_video(details).await
         }

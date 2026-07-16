@@ -1025,6 +1025,11 @@ impl Filer for FileStoreObject {
     }
 }
 
+fn directory_entry_name(name: OsString) -> Result<String> {
+    name.into_string()
+        .map_err(|name| anyhow!("directory entry name is not valid UTF-8: {name:?}"))
+}
+
 #[async_trait]
 impl FileStore for FileSystemStore {
     async fn create_folder(&self, path: &Path) -> Result<()> {
@@ -1052,9 +1057,6 @@ impl FileStore for FileSystemStore {
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             if let Ok(name) = entry.file_name().into_string() {
                 if entry.path().is_dir() {
-                    /*if !_path.is_empty() {
-                        name = format!("{}/{}", _path, name);
-                    }*/
                     directories.push(name);
                 } else {
                     files.push(name);
@@ -1066,6 +1068,50 @@ impl FileStore for FileSystemStore {
         files.sort();
 
         Ok((directories, files))
+    }
+
+    async fn list_folder_no_follow(&self, path: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let store = self.clone();
+        let requested = PathBuf::from(path);
+        tokio::task::spawn_blocking(move || {
+            let mut components = Vec::new();
+            for component in requested.components() {
+                match component {
+                    Component::Normal(component) => components.push(component.to_os_string()),
+                    Component::CurDir
+                    | Component::ParentDir
+                    | Component::Prefix(_)
+                    | Component::RootDir => {
+                        return Err(anyhow!(
+                            "strict directory listing requires a relative path of normal components: {}",
+                            requested.display()
+                        ));
+                    }
+                }
+            }
+
+            let mut directory = store.open_root()?.try_clone()?;
+            for component in components {
+                directory = directory.open_dir_nofollow(Path::new(&component))?;
+            }
+
+            let mut directories = Vec::new();
+            let mut files = Vec::new();
+            for entry in directory.entries()? {
+                let entry = entry?;
+                let name = directory_entry_name(entry.file_name())?;
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    directories.push(name);
+                } else if file_type.is_file() {
+                    files.push(name);
+                }
+            }
+            directories.sort();
+            files.sort();
+            Ok((directories, files))
+        })
+        .await?
     }
 
     async fn ensure_path_exists(&self, _path: &str) -> Result<()> {
@@ -2461,6 +2507,70 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_entry_name_rejects_non_utf8_names() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let result = directory_entry_name(OsString::from_vec(vec![b'b', 0xff]));
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn strict_list_folder_skips_symlinks_to_files_and_directories() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-list-symlinks-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("real.pdf"), b"book").unwrap();
+        std::fs::create_dir(root.join("real-directory")).unwrap();
+        std::fs::write(outside.join("outside.pdf"), b"outside").unwrap();
+        symlink(&outside, root.join("linked-directory")).unwrap();
+        symlink(outside.join("outside.pdf"), root.join("linked-file.pdf")).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let listing = store.list_folder_no_follow("").await.unwrap();
+
+        assert_eq!(listing.0, vec!["real-directory"]);
+        assert_eq!(listing.1, vec!["real.pdf"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_list_folder_preserves_symlink_behavior_for_video_callers() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-legacy-list-symlinks-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside.mp4"), b"outside").unwrap();
+        symlink(&outside, root.join("linked-directory")).unwrap();
+        symlink(outside.join("outside.mp4"), root.join("linked-file.mp4")).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let listing = store.list_folder("").await.unwrap();
+
+        assert_eq!(listing.0, vec!["linked-directory"]);
+        assert_eq!(listing.1, vec!["linked-file.mp4"]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
