@@ -78,7 +78,7 @@ impl BookCheck {
         let (directories, files) = self.store.list_folder(&collection).await?;
 
         for directory in directories {
-            if directory.starts_with('.') {
+            if relative_collection.as_os_str().is_empty() && directory == ".thumbnails" {
                 continue;
             }
             self.process_collection(relative_collection.join(directory), known_books, disk_books)
@@ -132,9 +132,13 @@ mod tests {
     use crate::{
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
+            algorithm::file_integrity::FileSeal,
             messages::{LocalMessage, MediaEvent},
             models::{BookDetails, BookFormat, BookState},
-            traits::{BookChecker, FileStorer, Repository},
+            traits::{
+                BookChecker, FileStore, FileStorer, PrivateSnapshot, Repository, StagedFile,
+                StoreObject,
+            },
         },
     };
     use tokio::{
@@ -147,6 +151,115 @@ mod tests {
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
     struct TestDir(PathBuf);
+
+    struct FailingNestedListStore {
+        inner: FileStorer,
+        failing_collection: String,
+    }
+
+    #[async_trait::async_trait]
+    impl FileStore for FailingNestedListStore {
+        async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.create_folder(path).await
+        }
+
+        async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            if path == self.failing_collection {
+                anyhow::bail!("forced nested list failure for {path}");
+            }
+            self.inner.list_folder(path).await
+        }
+
+        async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_path_exists(path).await
+        }
+
+        async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename(old_path, new_path).await
+        }
+
+        async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()> {
+            self.inner.rename_no_replace(old_path, new_path).await
+        }
+
+        async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile> {
+            self.inner.stage_no_follow(source).await
+        }
+
+        async fn create_private_snapshot(
+            &self,
+            staged: &StagedFile,
+        ) -> anyhow::Result<PrivateSnapshot> {
+            self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn seal_private_snapshot(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<FileSeal> {
+            self.inner.seal_private_snapshot(snapshot).await
+        }
+
+        async fn publish_private_snapshot_no_replace(
+            &self,
+            snapshot: &PrivateSnapshot,
+            destination: &str,
+            expected_seal: &FileSeal,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_private_snapshot_no_replace(snapshot, destination, expected_seal)
+                .await
+        }
+
+        async fn remove_private_snapshot(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<()> {
+            self.inner.remove_private_snapshot(snapshot).await
+        }
+
+        async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            self.inner.regular_file_exists_no_follow(path).await
+        }
+
+        async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_regular_no_follow(path).await
+        }
+
+        async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.discard_staged(staged).await
+        }
+
+        async fn publish_staged_no_replace(
+            &self,
+            staged: &StagedFile,
+            destination: &str,
+        ) -> anyhow::Result<()> {
+            self.inner
+                .publish_staged_no_replace(staged, destination)
+                .await
+        }
+
+        async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()> {
+            self.inner.restore_staged(staged).await
+        }
+
+        async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()> {
+            self.inner.restore(staged_path, original_path).await
+        }
+
+        async fn get(&self, path: &str) -> anyhow::Result<StoreObject> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()> {
+            self.inner.remove_empty_dir(path).await
+        }
+    }
 
     impl TestDir {
         fn new(name: &str) -> Self {
@@ -191,6 +304,36 @@ mod tests {
             .expect("new book should be queued")
             .expect("scanner sender should stay open");
         let LocalMessage::Media(MediaEvent::MediaAvailable(event)) = message else {
+            panic!("expected MediaAvailable event");
+        };
+        assert_eq!(event.full_path, book_path);
+        assert_eq!(event.search, None);
+    }
+
+    #[tokio::test]
+    async fn queues_book_from_non_thumbnail_hidden_collection() {
+        let root = TestDir::new("hidden-collection");
+        let book_path = root
+            .path()
+            .join(".archive")
+            .join(".thumbnails")
+            .join("History.pdf");
+        tokio::fs::create_dir_all(book_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&book_path, b"pdf").await.unwrap();
+
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let (sender, mut receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository, sender, root.path());
+
+        checker.check_book_information().await.unwrap();
+
+        let LocalMessage::Media(MediaEvent::MediaAvailable(event)) = receiver
+            .try_recv()
+            .expect("book in a non-thumbnail hidden collection should be queued")
+        else {
             panic!("expected MediaAvailable event");
         };
         assert_eq!(event.full_path, book_path);
@@ -315,5 +458,37 @@ mod tests {
         let books = repository.list_all_books().await.unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].checksum, 201);
+    }
+
+    #[tokio::test]
+    async fn nested_list_failure_does_not_delete_orphan_rows() {
+        let root = TestDir::new("nested-list-failure");
+        let collection_dir = root.path().join("broken");
+        tokio::fs::create_dir_all(&collection_dir).await.unwrap();
+
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let missing_path = collection_dir.join("missing.pdf");
+        let mut orphan = BookDetails::new(
+            "missing.pdf".to_string(),
+            "broken".to_string(),
+            &missing_path,
+            BookFormat::Pdf,
+        );
+        orphan.checksum = 301;
+        orphan.state = BookState::Ready;
+        repository.save_book(&orphan).await.unwrap();
+
+        let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let storer: FileStorer = Arc::new(FailingNestedListStore {
+            inner,
+            failing_collection: "broken".to_string(),
+        });
+        let (sender, _receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
+
+        let error = checker.check_book_information().await.unwrap_err();
+
+        assert!(error.to_string().contains("forced nested list failure"));
+        assert_eq!(repository.retrieve_book(301).await.unwrap().file_name, "missing.pdf");
     }
 }
