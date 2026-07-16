@@ -110,6 +110,9 @@ impl BookCheck {
                 );
                 continue;
             };
+            if self.store.regular_file_exists_no_follow(&full_path).await? {
+                continue;
+            }
             if let Err(error) = self
                 .repo
                 .delete_book_if_path_matches(
@@ -216,7 +219,7 @@ mod tests {
         },
     };
     use tokio::{
-        sync::mpsc,
+        sync::{mpsc, Notify},
         time::{timeout, Duration},
     };
 
@@ -232,8 +235,16 @@ mod tests {
         failing_collection: Option<String>,
         relocation: Mutex<Option<(Repository, BookDetails)>>,
         directory_swap: Mutex<Option<(String, PathBuf, PathBuf)>>,
+        traversal_hook: Option<Arc<TraversalHook>>,
+        inspection_error: bool,
         legacy_calls: AtomicU64,
         strict_calls: AtomicU64,
+    }
+
+    struct TraversalHook {
+        collection: String,
+        listed: Notify,
+        proceed: Notify,
     }
 
     #[async_trait::async_trait]
@@ -279,7 +290,14 @@ mod tests {
             if let Some((repository, book)) = relocation {
                 repository.save_book(&book).await?;
             }
-            self.inner.list_folder_no_follow(path).await
+            let listing = self.inner.list_folder_no_follow(path).await?;
+            if let Some(hook) = &self.traversal_hook {
+                if path == hook.collection {
+                    hook.listed.notify_one();
+                    hook.proceed.notified().await;
+                }
+            }
+            Ok(listing)
         }
 
         async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
@@ -331,6 +349,9 @@ mod tests {
         }
 
         async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
+            if self.inspection_error {
+                anyhow::bail!("forced exact-path inspection failure");
+            }
             self.inner.regular_file_exists_no_follow(path).await
         }
 
@@ -630,6 +651,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restored_original_after_traversal_is_not_deleted_during_reconciliation() {
+        let root = TestDir::new("restored-after-traversal");
+        let collection_dir = root.path().join("Reference");
+        tokio::fs::create_dir_all(&collection_dir).await.unwrap();
+        let original_path = collection_dir.join("retry.epub");
+        let staged_path = collection_dir.join(".tvserver-ingest-test");
+        tokio::fs::write(&original_path, b"book").await.unwrap();
+
+        let (sender, mut receiver) = mpsc::channel(8);
+        let repository: Repository = Arc::new(
+            SqlRepository::new(":memory:", Some(sender.clone()))
+                .await
+                .unwrap(),
+        );
+        let mut book = BookDetails::new(
+            "retry.epub".to_string(),
+            "Reference".to_string(),
+            &original_path,
+            BookFormat::Epub,
+        );
+        book.checksum = 204;
+        book.state = BookState::MetadataError;
+        repository.save_book(&book).await.unwrap();
+        receiver.try_recv().unwrap();
+
+        let leases = BookPathLeaseCoordinator::new();
+        let processing = leases.acquire_processing(&original_path).await;
+        tokio::fs::rename(&original_path, &staged_path)
+            .await
+            .unwrap();
+        let hook = Arc::new(TraversalHook {
+            collection: "Reference".to_string(),
+            listed: Notify::new(),
+            proceed: Notify::new(),
+        });
+        let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let storer: FileStorer = Arc::new(ControlledListStore {
+            inner,
+            failing_collection: None,
+            relocation: Mutex::new(None),
+            directory_swap: Mutex::new(None),
+            traversal_hook: Some(hook.clone()),
+            inspection_error: false,
+            legacy_calls: AtomicU64::new(0),
+            strict_calls: AtomicU64::new(0),
+        });
+        let checker = BookCheck::new_with_root_and_leases(
+            storer,
+            repository.clone(),
+            sender,
+            root.path(),
+            leases,
+        );
+
+        let scan = tokio::spawn(async move { checker.check_book_information().await });
+        hook.listed.notified().await;
+        tokio::fs::rename(&staged_path, &original_path)
+            .await
+            .unwrap();
+        drop(processing);
+        hook.proceed.notify_one();
+        scan.await.unwrap().unwrap();
+
+        assert_eq!(
+            repository.retrieve_book(204).await.unwrap().file_name,
+            "retry.epub"
+        );
+        assert!(receiver.try_recv().is_err(), "scanner must emit no delete event");
+    }
+
+    #[tokio::test]
+    async fn exact_path_inspection_error_preserves_row_and_pending_events() {
+        let root = TestDir::new("inspection-error");
+        let new_path = root.path().join("new.pdf");
+        tokio::fs::write(&new_path, b"book").await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(8);
+        let repository: Repository = Arc::new(
+            SqlRepository::new(":memory:", Some(sender.clone()))
+                .await
+                .unwrap(),
+        );
+        let mut orphan = BookDetails::new(
+            "missing.epub".to_string(),
+            "Missing".to_string(),
+            &root.path().join("Missing/missing.epub"),
+            BookFormat::Epub,
+        );
+        orphan.checksum = 205;
+        orphan.state = BookState::Ready;
+        repository.save_book(&orphan).await.unwrap();
+        receiver.try_recv().unwrap();
+        let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let storer: FileStorer = Arc::new(ControlledListStore {
+            inner,
+            failing_collection: None,
+            relocation: Mutex::new(None),
+            directory_swap: Mutex::new(None),
+            traversal_hook: None,
+            inspection_error: true,
+            legacy_calls: AtomicU64::new(0),
+            strict_calls: AtomicU64::new(0),
+        });
+        let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
+
+        let error = checker.check_book_information().await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("forced exact-path inspection failure"));
+        assert_eq!(
+            repository.retrieve_book(205).await.unwrap().file_name,
+            "missing.epub"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "pending scanner event must not be published"
+        );
+    }
+
+    #[tokio::test]
     async fn nested_list_failure_does_not_delete_orphan_rows() {
         let root = TestDir::new("nested-list-failure");
         let collection_dir = root.path().join("broken");
@@ -653,6 +794,8 @@ mod tests {
             failing_collection: Some("broken".to_string()),
             relocation: Mutex::new(None),
             directory_swap: Mutex::new(None),
+            traversal_hook: None,
+            inspection_error: false,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
@@ -688,6 +831,8 @@ mod tests {
             failing_collection: None,
             relocation: Mutex::new(Some((repository.clone(), relocated))),
             directory_swap: Mutex::new(None),
+            traversal_hook: None,
+            inspection_error: false,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
@@ -768,6 +913,8 @@ mod tests {
                 child.clone(),
                 outside.path().to_path_buf(),
             ))),
+            traversal_hook: None,
+            inspection_error: false,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
