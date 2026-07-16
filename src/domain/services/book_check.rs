@@ -96,7 +96,7 @@ impl BookCheck {
     ) -> anyhow::Result<()> {
         let collection = path_to_collection_id(&relative_collection)
             .ok_or_else(|| anyhow::anyhow!("book collection is not a portable path"))?;
-        let (directories, files) = self.store.list_folder(&collection).await?;
+        let (directories, files) = self.store.list_folder_no_follow(&collection).await?;
 
         for directory in directories {
             if relative_collection.as_os_str().is_empty() && directory == ".thumbnails" {
@@ -180,6 +180,9 @@ mod tests {
         inner: FileStorer,
         failing_collection: Option<String>,
         relocation: Mutex<Option<(Repository, BookDetails)>>,
+        directory_swap: Mutex<Option<(String, PathBuf, PathBuf)>>,
+        legacy_calls: AtomicU64,
+        strict_calls: AtomicU64,
     }
 
     #[async_trait::async_trait]
@@ -189,14 +192,43 @@ mod tests {
         }
 
         async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.legacy_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.list_folder(path).await
+        }
+
+        async fn list_folder_no_follow(
+            &self,
+            path: &str,
+        ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            self.strict_calls.fetch_add(1, Ordering::Relaxed);
             if self.failing_collection.as_deref() == Some(path) {
                 anyhow::bail!("forced nested list failure for {path}");
             }
+            let swap = {
+                let mut swap = self.directory_swap.lock().unwrap();
+                if swap
+                    .as_ref()
+                    .is_some_and(|(collection, _, _)| collection == path)
+                {
+                    swap.take()
+                } else {
+                    None
+                }
+            };
+            #[cfg(unix)]
+            if let Some((_, original, replacement)) = swap {
+                use std::os::unix::fs::symlink;
+
+                std::fs::remove_dir(&original)?;
+                symlink(replacement, original)?;
+            }
+            #[cfg(not(unix))]
+            let _ = swap;
             let relocation = self.relocation.lock().unwrap().take();
             if let Some((repository, book)) = relocation {
                 repository.save_book(&book).await?;
             }
-            self.inner.list_folder(path).await
+            self.inner.list_folder_no_follow(path).await
         }
 
         async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()> {
@@ -512,6 +544,9 @@ mod tests {
             inner,
             failing_collection: Some("broken".to_string()),
             relocation: Mutex::new(None),
+            directory_swap: Mutex::new(None),
+            legacy_calls: AtomicU64::new(0),
+            strict_calls: AtomicU64::new(0),
         });
         let (sender, _receiver) = mpsc::channel(8);
         let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
@@ -544,6 +579,9 @@ mod tests {
             inner,
             failing_collection: None,
             relocation: Mutex::new(Some((repository.clone(), relocated))),
+            directory_swap: Mutex::new(None),
+            legacy_calls: AtomicU64::new(0),
+            strict_calls: AtomicU64::new(0),
         });
         let (sender, _receiver) = mpsc::channel(8);
         let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
@@ -588,6 +626,63 @@ mod tests {
             panic!("expected scanner media event after reconciliation");
         };
         assert_eq!(available.full_path, new_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_swapped_to_external_symlink_before_recursive_open_fails_closed() {
+        let root = TestDir::new("directory-swap-root");
+        let outside = TestDir::new("directory-swap-outside");
+        let child = root.path().join("swapped");
+        std::fs::create_dir(&child).unwrap();
+        let external_book = outside.path().join("external.pdf");
+        std::fs::write(&external_book, b"external").unwrap();
+
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let orphan_path = root.path().join("missing/missing.epub");
+        let mut orphan = BookDetails::new(
+            "missing.epub".to_string(),
+            "missing".to_string(),
+            &orphan_path,
+            BookFormat::Epub,
+        );
+        orphan.checksum = 404;
+        orphan.state = BookState::Ready;
+        repository.save_book(&orphan).await.unwrap();
+
+        let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let controlled = Arc::new(ControlledListStore {
+            inner,
+            failing_collection: None,
+            relocation: Mutex::new(None),
+            directory_swap: Mutex::new(Some((
+                "swapped".to_string(),
+                child.clone(),
+                outside.path().to_path_buf(),
+            ))),
+            legacy_calls: AtomicU64::new(0),
+            strict_calls: AtomicU64::new(0),
+        });
+        let storer: FileStorer = controlled.clone();
+        let (sender, mut receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
+
+        let result = timeout(Duration::from_secs(1), checker.check_book_information())
+            .await
+            .expect("scanner must not hang after the directory swap");
+
+        assert!(result.is_err(), "the swapped recursive open must fail closed");
+        assert!(std::fs::symlink_metadata(&child)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(controlled.strict_calls.load(Ordering::Relaxed) >= 2);
+        assert_eq!(controlled.legacy_calls.load(Ordering::Relaxed), 0);
+        assert!(receiver.try_recv().is_err(), "external book must not be queued");
+        assert_eq!(
+            repository.retrieve_book(404).await.unwrap().file_name,
+            "missing.epub"
+        );
     }
 
     #[cfg(unix)]

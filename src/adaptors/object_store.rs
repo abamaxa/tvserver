@@ -1054,13 +1054,13 @@ impl FileStore for FileSystemStore {
         }
 
         let mut read_dir = fs::read_dir(path).await?;
-        while let Some(entry) = read_dir.next_entry().await? {
-            let name = directory_entry_name(entry.file_name())?;
-            let file_type = entry.file_type().await?;
-            if file_type.is_dir() {
-                directories.push(name);
-            } else if file_type.is_file() {
-                files.push(name);
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            if let Ok(name) = entry.file_name().into_string() {
+                if entry.path().is_dir() {
+                    directories.push(name);
+                } else {
+                    files.push(name);
+                }
             }
         }
 
@@ -1068,6 +1068,50 @@ impl FileStore for FileSystemStore {
         files.sort();
 
         Ok((directories, files))
+    }
+
+    async fn list_folder_no_follow(&self, path: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let store = self.clone();
+        let requested = PathBuf::from(path);
+        tokio::task::spawn_blocking(move || {
+            let mut components = Vec::new();
+            for component in requested.components() {
+                match component {
+                    Component::Normal(component) => components.push(component.to_os_string()),
+                    Component::CurDir
+                    | Component::ParentDir
+                    | Component::Prefix(_)
+                    | Component::RootDir => {
+                        return Err(anyhow!(
+                            "strict directory listing requires a relative path of normal components: {}",
+                            requested.display()
+                        ));
+                    }
+                }
+            }
+
+            let mut directory = store.open_root()?.try_clone()?;
+            for component in components {
+                directory = directory.open_dir_nofollow(Path::new(&component))?;
+            }
+
+            let mut directories = Vec::new();
+            let mut files = Vec::new();
+            for entry in directory.entries()? {
+                let entry = entry?;
+                let name = directory_entry_name(entry.file_name())?;
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    directories.push(name);
+                } else if file_type.is_file() {
+                    files.push(name);
+                }
+            }
+            directories.sort();
+            files.sort();
+            Ok((directories, files))
+        })
+        .await?
     }
 
     async fn ensure_path_exists(&self, _path: &str) -> Result<()> {
@@ -2477,7 +2521,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn list_folder_skips_symlinks_to_files_and_directories() {
+    async fn strict_list_folder_skips_symlinks_to_files_and_directories() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!(
@@ -2496,10 +2540,36 @@ mod tests {
         symlink(outside.join("outside.pdf"), root.join("linked-file.pdf")).unwrap();
         let store = FileSystemStore::new(root.to_str().unwrap());
 
-        let listing = store.list_folder("").await.unwrap();
+        let listing = store.list_folder_no_follow("").await.unwrap();
 
         assert_eq!(listing.0, vec!["real-directory"]);
         assert_eq!(listing.1, vec!["real.pdf"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_list_folder_preserves_symlink_behavior_for_video_callers() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-legacy-list-symlinks-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside.mp4"), b"outside").unwrap();
+        symlink(&outside, root.join("linked-directory")).unwrap();
+        symlink(outside.join("outside.mp4"), root.join("linked-file.mp4")).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let listing = store.list_folder("").await.unwrap();
+
+        assert_eq!(listing.0, vec!["linked-directory"]);
+        assert_eq!(listing.1, vec!["linked-file.mp4"]);
         let _ = std::fs::remove_dir_all(&base);
     }
 

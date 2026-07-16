@@ -168,6 +168,12 @@ impl PrivateSnapshot {
 pub trait FileStore: Sync + Send {
     async fn create_folder(&self, path: &Path) -> anyhow::Result<()>;
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
+    async fn list_folder_no_follow(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        self.list_folder(path).await
+    }
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
     async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
