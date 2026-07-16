@@ -3,7 +3,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Result;
 
 use crate::domain::{
-    algorithm::title_case,
+    algorithm::{
+        collection_id_to_path, get_book_thumbnail_url, path_to_collection_id, title_case,
+    },
     config::{get_book_dir, get_book_thumbnail_dir},
     models::{
         is_default_book_thumbnail, BookCollectionDetails, BookCollectionItem,
@@ -53,7 +55,7 @@ impl BookStore {
             .into_iter()
             .map(|collection| BookCollectionItem {
                 collection,
-                thumbnail: DEFAULT_BOOK_THUMBNAIL.to_string(),
+                thumbnail: get_book_thumbnail_url(DEFAULT_BOOK_THUMBNAIL),
             })
             .collect();
         let books = self.repo.list_books(collection).await?;
@@ -115,20 +117,20 @@ impl BookStore {
         let comparable_root = absolute_path(&self.book_root, "configured book root")?;
 
         match comparable_parent.strip_prefix(comparable_root) {
-            Ok(relative) => relative
-                .to_str()
-                .map(str::to_string)
+            Ok(relative) => path_to_collection_id(relative)
                 .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
-            Err(_) => comparable_parent
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| {
+            Err(_) => {
+                let fallback = comparable_parent
+                    .file_name()
+                    .map(Path::new)
+                    .unwrap_or_else(|| Path::new(""));
+                path_to_collection_id(fallback).ok_or_else(|| {
                     anyhow::anyhow!(
                         "book source parent is not valid UTF-8: {}",
                         comparable_parent.display()
                     )
-                }),
+                })
+            }
         }
     }
 
@@ -361,25 +363,11 @@ fn safe_file_name(file_name: &str, description: &str) -> Result<PathBuf> {
 }
 
 fn safe_relative_collection(collection: &str) -> Result<PathBuf> {
-    let original = Path::new(collection);
-    let mut relative = PathBuf::new();
-    for component in original.components() {
-        match component {
-            Component::Normal(part) => relative.push(part),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "book collection must be a relative path without traversal: {collection}"
-                ));
-            }
-        }
-    }
-    if original.as_os_str() == relative.as_os_str() {
-        Ok(relative)
-    } else {
-        Err(anyhow::anyhow!(
-            "book collection must already be canonical: {collection}"
-        ))
-    }
+    collection_id_to_path(collection).ok_or_else(|| {
+        anyhow::anyhow!(
+            "book collection must be a relative path without traversal: {collection}"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -485,6 +473,14 @@ mod tests {
     async fn list_returns_child_collections_and_books() {
         let book_root = Path::new("/tmp/tvserver-book-store-list-books");
         let thumbnail_root = Path::new("/tmp/tvserver-book-store-list-thumbnails");
+        #[cfg(not(feature = "webserver"))]
+        {
+            std::env::set_var(crate::domain::config::BOOK_DIR, book_root);
+            std::env::set_var(
+                crate::domain::config::BOOK_THUMBNAIL_DIR,
+                thumbnail_root,
+            );
+        }
         let (store, repository) = store_for_roots(book_root, thumbnail_root).await;
         repository
             .save_book(&sample_book(1, "Fiction", "Dune.epub"))
@@ -502,7 +498,10 @@ mod tests {
         assert_eq!(result.books[0].file_name, "Dune.epub");
         assert_eq!(result.child_collections.len(), 1);
         assert_eq!(result.child_collections[0].collection, "Classics");
-        assert_eq!(result.child_collections[0].thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(
+            result.child_collections[0].thumbnail,
+            crate::domain::algorithm::get_book_thumbnail_url(DEFAULT_BOOK_THUMBNAIL)
+        );
     }
 
     #[tokio::test]
@@ -524,6 +523,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_file_uses_nested_suggested_collection_as_native_components() {
+        let layout = TestLayout::new("nested-suggested-collection");
+        let source = layout.source_root.join("Emma.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let destination = store
+            .add_file(&source, Some("Fiction/Classics".to_string()))
+            .await
+            .unwrap();
+
+        let expected = layout
+            .book_root
+            .join("Fiction")
+            .join("Classics")
+            .join("Emma.epub");
+        assert_eq!(destination, expected);
+        assert!(expected.exists());
+        assert!(!source.exists());
+    }
+
+    #[tokio::test]
+    async fn add_file_rejects_backslash_suggested_collection_before_creating_destination() {
+        let layout = TestLayout::new("backslash-suggested-collection");
+        let source = layout.source_root.join("Emma.epub");
+        tokio::fs::write(&source, b"book").await.unwrap();
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        let result = store
+            .add_file(&source, Some(r"Fiction\Classics".to_string()))
+            .await;
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!layout.book_root.join(r"Fiction\Classics").exists());
+        assert!(!layout.book_root.join("Fiction").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn safe_relative_collection_accepts_portable_nested_id_on_windows() {
+        assert_eq!(
+            super::safe_relative_collection("Fiction/Classics").unwrap(),
+            PathBuf::from("Fiction").join("Classics")
+        );
+    }
+
+    #[tokio::test]
     async fn add_file_derives_collection_from_source_parent() {
         let layout = TestLayout::new("derived-collection");
         let source_directory = layout.source_root.join("Classics");
@@ -537,6 +584,18 @@ mod tests {
         assert_eq!(destination, layout.book_root.join("Classics/Emma.epub"));
         assert!(destination.exists());
         assert!(!source.exists());
+    }
+
+    #[tokio::test]
+    async fn collection_from_nested_book_root_uses_portable_identifier() {
+        let layout = TestLayout::new("nested-portable-collection");
+        let source = layout.book_root.join("Fiction").join("Classics").join("Emma.epub");
+        let (store, _) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+
+        assert_eq!(
+            store.collection_from_source(&source).unwrap(),
+            "Fiction/Classics"
+        );
     }
 
     #[tokio::test]
@@ -681,6 +740,31 @@ mod tests {
 
         assert!(!book_path.exists());
         assert!(!thumbnail_path.exists());
+        assert!(matches!(
+            repository.retrieve_book(book.checksum).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_resolves_nested_collection_as_native_components() {
+        let layout = TestLayout::new("delete-nested-collection");
+        let book_path = layout
+            .book_root
+            .join("Fiction")
+            .join("Classics")
+            .join("Emma.epub");
+        tokio::fs::create_dir_all(book_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&book_path, b"book").await.unwrap();
+        let (store, repository) = store_for_roots(&layout.book_root, &layout.thumbnail_root).await;
+        let book = sample_book(13, "Fiction/Classics", "Emma.epub");
+        repository.save_book(&book).await.unwrap();
+
+        store.delete(book.checksum).await.unwrap();
+
+        assert!(!book_path.exists());
         assert!(matches!(
             repository.retrieve_book(book.checksum).await,
             Err(sqlx::Error::RowNotFound)

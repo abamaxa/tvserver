@@ -6,7 +6,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
 };
 
 use crate::domain::algorithm::{
@@ -15,6 +18,7 @@ use crate::domain::algorithm::{
 
 pub const DEFAULT_BOOK_THUMBNAIL: &str = "default-book.jpg";
 static NEXT_DEFAULT_THUMBNAIL_TEMP: AtomicU64 = AtomicU64::new(0);
+static DEFAULT_BOOK_THUMBNAIL_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn default_book_thumbnail_bytes() -> &'static [u8] {
     include_bytes!(concat!(
@@ -25,6 +29,9 @@ pub fn default_book_thumbnail_bytes() -> &'static [u8] {
 
 pub fn ensure_default_book_thumbnail<P: AsRef<Path>>(thumbnail_dir: P) -> io::Result<PathBuf> {
     fs::create_dir_all(&thumbnail_dir)?;
+    let _guard = DEFAULT_BOOK_THUMBNAIL_LOCK.lock().map_err(|_| {
+        io::Error::other("default book thumbnail materialization lock is poisoned")
+    })?;
     let thumbnail_path = thumbnail_dir.as_ref().join(DEFAULT_BOOK_THUMBNAIL);
     if fs::symlink_metadata(&thumbnail_path).is_ok_and(|metadata| metadata.file_type().is_file())
         && fs::read(&thumbnail_path).is_ok_and(|bytes| bytes == default_book_thumbnail_bytes())
@@ -46,6 +53,11 @@ pub fn ensure_default_book_thumbnail<P: AsRef<Path>>(thumbnail_dir: P) -> io::Re
         temp.write_all(default_book_thumbnail_bytes())?;
         temp.sync_all()?;
         drop(temp);
+        match fs::symlink_metadata(&thumbnail_path) {
+            Ok(_) => fs::remove_file(&thumbnail_path)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         fs::rename(&temp_path, &thumbnail_path)?;
         #[cfg(unix)]
         File::open(thumbnail_dir.as_ref())?.sync_all()?;
@@ -388,7 +400,7 @@ mod test {
         #[cfg(feature = "webserver")]
         assert_eq!(
             value["url"],
-            json!("/api/books/download/Programming/Clean Code.epub")
+            json!("/api/books/download/Programming/Clean%20Code.epub")
         );
         #[cfg(not(feature = "webserver"))]
         assert_eq!(
@@ -545,14 +557,28 @@ mod test {
             std::fs::read(&thumbnail_path).unwrap(),
             default_book_thumbnail_bytes()
         );
+        std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+    }
 
+    #[test]
+    fn stale_default_thumbnail_is_replaced_with_embedded_jpeg() {
+        let thumbnail_dir = std::env::temp_dir().join(format!(
+            "tvserver-book-thumbnail-stale-test-{}",
+            std::process::id()
+        ));
+        if thumbnail_dir.exists() {
+            std::fs::remove_dir_all(&thumbnail_dir).unwrap();
+        }
+        std::fs::create_dir_all(&thumbnail_dir).unwrap();
+        let thumbnail_path = thumbnail_dir.join(DEFAULT_BOOK_THUMBNAIL);
         std::fs::write(&thumbnail_path, b"stale").unwrap();
+
         ensure_default_book_thumbnail(&thumbnail_dir).unwrap();
+
         assert_eq!(
             std::fs::read(&thumbnail_path).unwrap(),
             default_book_thumbnail_bytes()
         );
-
         std::fs::remove_dir_all(&thumbnail_dir).unwrap();
     }
 
@@ -623,7 +649,7 @@ mod test {
         #[cfg(feature = "webserver")]
         assert_eq!(
             get_book_url("Programming", "Clean Code.epub"),
-            "/api/books/download/Programming/Clean Code.epub"
+            "/api/books/download/Programming/Clean%20Code.epub"
         );
         #[cfg(feature = "webserver")]
         assert_eq!(get_book_url("", "Dune.pdf"), "/api/books/download/Dune.pdf");

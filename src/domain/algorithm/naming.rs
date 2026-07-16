@@ -105,20 +105,49 @@ pub fn get_book_collection_from_path(path: &Path) -> String {
     get_collection_from_rooted_path(path, &get_book_dir())
 }
 
+pub fn path_to_collection_id(path: &Path) -> Option<String> {
+    path.components()
+        .map(|component| match component {
+            Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
+}
+
+pub fn collection_id_to_path(collection: &str) -> Option<PathBuf> {
+    if collection.is_empty() {
+        return Some(PathBuf::new());
+    }
+
+    let mut path = PathBuf::new();
+    for segment in collection.split('/') {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.contains('\\')
+            || segment.contains(':')
+        {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
+}
+
 pub fn get_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> String {
     let short_path = match path.strip_prefix(root.as_ref()) {
         Ok(p) => PathBuf::from(p),
         _ => PathBuf::from(path),
     };
 
-    if path.is_dir() {
-        return short_path.to_str().unwrap_or_default().to_string();
-    }
+    let collection_path = if path.is_dir() {
+        short_path.as_path()
+    } else {
+        short_path.parent().unwrap_or_else(|| Path::new(""))
+    };
 
-    match short_path.parent() {
-        Some(parent) => parent.to_str().unwrap_or_default().to_string(),
-        _ => String::new(),
-    }
+    path_to_collection_id(collection_path).unwrap_or_default()
 }
 
 pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
@@ -138,10 +167,10 @@ pub fn get_collection_and_file_from_rooted_path(
         _ => PathBuf::from(path),
     };
 
-    let parent = match short_path.parent() {
-        Some(parent) => parent.to_str().unwrap_or_default().to_string(),
-        _ => String::new(),
-    };
+    let parent = short_path
+        .parent()
+        .and_then(path_to_collection_id)
+        .unwrap_or_default();
 
     (
         parent,
@@ -230,8 +259,17 @@ pub fn get_thumbnails_url(thumbnails: &Vec<String>) -> Vec<String> {
 
 #[cfg(feature = "webserver")]
 pub fn get_book_url(collection: &str, file_name: &str) -> String {
-    let download_path = get_book_download_path(collection, file_name);
-    format!("/api/books/download/{}", download_path)
+    let mut segments = Path::new(collection)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => part
+                .to_str()
+                .map(|part| urlencoding::encode(part).into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    segments.push(urlencoding::encode(&get_book_thumbnail_file_name(file_name)).into_owned());
+    format!("/api/books/download/{}", segments.join("/"))
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -276,6 +314,64 @@ pub fn get_book_thumbnail_file_name(thumbnail: &str) -> String {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn collection_ids_join_native_path_components_with_forward_slashes() {
+        let path = ["Fiction", "Classics", "British"].iter().collect::<PathBuf>();
+        assert_eq!(
+            path_to_collection_id(&path),
+            Some("Fiction/Classics/British".to_string())
+        );
+        assert_eq!(path_to_collection_id(Path::new("")), Some(String::new()));
+        assert_eq!(path_to_collection_id(Path::new("../Fiction")), None);
+    }
+
+    #[test]
+    fn collection_id_to_path_accepts_empty_and_nested_canonical_ids() {
+        assert_eq!(collection_id_to_path(""), Some(PathBuf::new()));
+        assert_eq!(
+            collection_id_to_path("Fiction/Classics"),
+            Some(PathBuf::from("Fiction").join("Classics"))
+        );
+    }
+
+    #[test]
+    fn collection_id_to_path_rejects_noncanonical_and_host_dependent_ids() {
+        for collection in [
+            "../Fiction",
+            "Fiction/./Classics",
+            "Fiction//Classics",
+            "/Fiction",
+            "Fiction/",
+            r"Fiction\Classics",
+        ] {
+            assert_eq!(
+                collection_id_to_path(collection),
+                None,
+                "expected {collection:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_id_to_path_rejects_windows_prefix_segments_on_every_host() {
+        for collection in ["C:", "C:Books", "Fiction/C:", "Fiction/Class:ics"] {
+            assert_eq!(
+                collection_id_to_path(collection),
+                None,
+                "expected {collection:?} to be rejected"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collection_ids_normalize_native_windows_separators() {
+        assert_eq!(
+            path_to_collection_id(Path::new(r"Fiction\Classics\British")),
+            Some("Fiction/Classics/British".to_string())
+        );
+    }
 
     #[test]
     fn test_title_case() {
@@ -370,6 +466,15 @@ mod test {
         assert_eq!(
             get_collection_and_file_from_rooted_path(book_path, "/library/books"),
             ("Fiction/Classics".to_string(), "novel.epub".to_string())
+        );
+    }
+
+    #[cfg(feature = "webserver")]
+    #[test]
+    fn get_book_url_percent_encodes_each_path_segment() {
+        assert_eq!(
+            get_book_url("Programming/C# & Rust", "100%? Complete.epub"),
+            "/api/books/download/Programming/C%23%20%26%20Rust/100%25%3F%20Complete.epub"
         );
     }
 }

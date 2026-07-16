@@ -14,6 +14,8 @@ pub use naming::{
     get_collection_from_path,
     get_book_collection_from_path,
     get_collection_from_rooted_path,
+    collection_id_to_path,
+    path_to_collection_id,
     title_case,
     replace_extension,
     get_video_url,

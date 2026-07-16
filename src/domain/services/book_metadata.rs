@@ -1,5 +1,5 @@
 use crate::domain::{
-    algorithm::title_case,
+    algorithm::{collection_id_to_path, path_to_collection_id, title_case},
     config::{get_book_dir, get_book_thumbnail_dir},
     models::{
         ensure_default_book_thumbnail, BookDetails, BookFormat, BookMetadata, BookState,
@@ -236,8 +236,8 @@ async fn generate_book_metadata_with_roots_and_cancellation(
         Some(collection) => title_case(collection),
         None => collection_from_source(&path, &book_root)?,
     };
-    validate_collection(&collection)?;
-    let destination_directory = book_root.join(&collection);
+    let collection_path = validate_collection(&collection)?;
+    let destination_directory = book_root.join(collection_path);
     let destination = destination_directory.join(&file_name);
     let source_absolute = absolute_path(&path)?;
     let destination_absolute = absolute_path(&destination)?;
@@ -467,7 +467,7 @@ async fn generate_book_metadata_with_roots_and_cancellation(
         };
         if let Some(existing) = existing {
             let canonical_relative = (|| -> anyhow::Result<PathBuf> {
-                validate_collection(&existing.collection)?;
+                let mut canonical_relative = validate_collection(&existing.collection)?;
                 let existing_file = Path::new(&existing.file_name);
                 if existing_file.components().count() != 1
                     || !matches!(
@@ -477,12 +477,8 @@ async fn generate_book_metadata_with_roots_and_cancellation(
                 {
                     anyhow::bail!("stored book file name is not a safe path component");
                 }
-                Ok(PathBuf::from(
-                    crate::domain::algorithm::get_book_download_path(
-                        &existing.collection,
-                        &existing.file_name,
-                    ),
-                ))
+                canonical_relative.push(existing_file);
+                Ok(canonical_relative)
             })();
             let canonical_exists = match canonical_relative {
                 Ok(relative) => storer.regular_file_exists_no_follow(&relative).await,
@@ -987,28 +983,22 @@ fn collection_from_source(path: &Path, book_root: &Path) -> anyhow::Result<Strin
     let parent = absolute_path(parent)?;
     let book_root = absolute_path(book_root)?;
     match parent.strip_prefix(&book_root) {
-        Ok(relative) => relative
-            .to_str()
-            .map(str::to_string)
+        Ok(relative) => path_to_collection_id(relative)
             .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8")),
-        Err(_) => Ok(parent
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string()),
+        Err(_) => {
+            let fallback = parent.file_name().map(Path::new).unwrap_or_else(|| Path::new(""));
+            path_to_collection_id(fallback)
+                .ok_or_else(|| anyhow::anyhow!("book collection path is not valid UTF-8"))
+        }
     }
 }
 
-fn validate_collection(collection: &str) -> anyhow::Result<()> {
-    if Path::new(collection)
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
-        || collection.is_empty()
-    {
-        Ok(())
-    } else {
-        anyhow::bail!("book collection must be a relative path without traversal: {collection}")
-    }
+fn validate_collection(collection: &str) -> anyhow::Result<PathBuf> {
+    collection_id_to_path(collection).ok_or_else(|| {
+        anyhow::anyhow!(
+            "book collection must be a relative path without traversal: {collection}"
+        )
+    })
 }
 
 fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
@@ -4950,6 +4940,112 @@ mod tests {
         assert_eq!(details.thumbnail, format!("{checksum}.jpg"));
         assert!(thumbnail_root.join(&details.thumbnail).exists());
         assert_eq!(repository.retrieve_book(checksum).await.unwrap().thumbnail, details.thumbnail);
+    }
+
+    #[tokio::test]
+    async fn ingestion_persists_nested_collection_as_portable_identifier() {
+        let temp = TestDir::new();
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        let source = book_root.join("Fiction").join("Classics").join("Emma.epub");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            None,
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(details.collection, "Fiction/Classics");
+        assert_eq!(
+            repository.retrieve_book(details.checksum).await.unwrap().collection,
+            "Fiction/Classics"
+        );
+        assert!(book_root.join("Fiction").join("Classics").join("Emma.epub").exists());
+    }
+
+    #[tokio::test]
+    async fn ingestion_persists_nested_suggested_collection_and_publishes_native_path() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("Emma.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("Fiction/Classics".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let destination = book_root
+            .join("Fiction")
+            .join("Classics")
+            .join("Emma.epub");
+        assert_eq!(details.collection, "Fiction/Classics");
+        assert_eq!(
+            repository.retrieve_book(details.checksum).await.unwrap().collection,
+            "Fiction/Classics"
+        );
+        assert!(destination.exists());
+        assert!(!source.exists());
+    }
+
+    #[tokio::test]
+    async fn ingestion_rejects_backslash_suggested_collection_before_publication_or_persistence() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("Emma.epub");
+        write_epub(
+            &source,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/></package>"#,
+            &[],
+        );
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let result = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some(r"Fiction\Classics".to_string()),
+            book_root.clone(),
+            thumbnail_root,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!book_root.join(r"Fiction\Classics").exists());
+        assert!(!book_root.join("Fiction").exists());
+        assert!(repository.list_all_books().await.unwrap().is_empty());
     }
 
     #[test]
