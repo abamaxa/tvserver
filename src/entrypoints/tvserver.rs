@@ -19,6 +19,7 @@ impl TVServer {
 
         let monitor_handle = Monitor::start(
             context.get_checker(),
+            context.get_book_checker(),
             context.get_task_manager(),
             context.get_store(),
             context.get_local_sender(),

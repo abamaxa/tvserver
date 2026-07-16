@@ -12,9 +12,9 @@ use crate::domain::messagebus::{
     LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter,
 };
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
-use crate::domain::services::MediaCheck;
+use crate::domain::services::{BookCheck, MediaCheck};
 use crate::domain::traits::FileStorer;
-use crate::domain::traits::{Checker, ProcessSpawner, Repository, Storer};
+use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Repository, Storer};
 use crate::domain::SearchEngineType;
 use crate::services::{
     BookStore, MediaStore, PirateClient, SearchEngine, SearchService, SharingService, TaskManager,
@@ -25,6 +25,7 @@ use crate::services::{
 pub struct Context {
     store: Storer,
     checker: Checker,
+    book_checker: BookCheckerHandle,
     search: SearchService,
     messenger: MessageExchange,
     task_manager: Arc<TaskManager>,
@@ -43,6 +44,7 @@ impl Context {
         task_manager: Arc<TaskManager>,
         repository: Repository,
         checker: Checker,
+        book_checker: BookCheckerHandle,
         local_message_exchange: LocalMessageExchange,
         book_store: Arc<BookStore>,
         book_file_storer: FileStorer,
@@ -51,6 +53,7 @@ impl Context {
         Context {
             store,
             checker,
+            book_checker,
             search,
             messenger,
             task_manager,
@@ -93,6 +96,10 @@ impl Context {
 
     pub fn get_checker(&self) -> Checker {
         self.checker.clone()
+    }
+
+    pub fn get_book_checker(&self) -> BookCheckerHandle {
+        self.book_checker.clone()
     }
 
     pub fn get_storer(&self) -> Storer {
@@ -192,6 +199,11 @@ pub async fn create_context() -> anyhow::Result<Context> {
         repository.clone(),
         local_message_exchange.new_sender(),
     ));
+    let book_checker = Arc::new(BookCheck::new(
+        book_file_storer.clone(),
+        repository.clone(),
+        local_message_exchange.new_sender(),
+    ));
 
     let sharing = Arc::new(SharingService::new(
         Arc::new(TelegramBot::new(&get_telegram_chat_id(), &get_telegram_token())),
@@ -206,6 +218,7 @@ pub async fn create_context() -> anyhow::Result<Context> {
         task_manager,
         repository,
         checker,
+        book_checker,
         local_message_exchange,
         book_store,
         book_file_storer,
@@ -221,7 +234,10 @@ mod tests {
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
             messagebus::{LocalMessageExchange, MessageExchange, MessageFilter},
-            traits::{FileStorer, MockMediaChecker, MockMediaStorer, Repository, Storer},
+            traits::{
+                BookCheckerHandle, FileStorer, MockBookChecker, MockMediaChecker, MockMediaStorer,
+                Repository, Storer,
+            },
             NoSpawner,
         },
         services::{BookStore, SearchService, TaskManager},
@@ -244,6 +260,7 @@ mod tests {
         );
         let media_store: Storer = Arc::new(MockMediaStorer::new());
         let checker = Arc::new(MockMediaChecker::new());
+        let book_checker: BookCheckerHandle = Arc::new(MockBookChecker::new());
         let book_files: FileStorer = Arc::new(FileSystemStore::new("/tmp/context-books"));
         let thumbnail_files: FileStorer =
             Arc::new(FileSystemStore::new("/tmp/context-book-thumbnails"));
@@ -262,6 +279,7 @@ mod tests {
             task_manager,
             repository,
             checker,
+            book_checker.clone(),
             local_message_exchange,
             book_store.clone(),
             book_files.clone(),
@@ -270,5 +288,6 @@ mod tests {
 
         assert!(Arc::ptr_eq(&context.get_book_store(), &book_store));
         assert!(Arc::ptr_eq(&context.get_book_file_storer(), &book_files));
+        assert!(Arc::ptr_eq(&context.get_book_checker(), &book_checker));
     }
 }

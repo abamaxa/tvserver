@@ -1,7 +1,7 @@
 use anyhow::Result;
 use app_lib::adaptors::FileSystemStore;
 use app_lib::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
-use app_lib::domain::traits::{Checker, FileStorer, Repository, Storer};
+use app_lib::domain::traits::{Checker, FileStorer, MockBookChecker, Repository, Storer};
 use app_lib::entrypoints::Context;
 use app_lib::services::{BookStore, SearchService, TaskManager};
 use std::{path::Path, sync::Arc};
@@ -52,6 +52,7 @@ pub async fn get_context_with_book_services(
         task_manager,
         repository,
         checker,
+        Arc::new(MockBookChecker::new()),
         local_message_exchange,
         book_store,
         book_file_storer,

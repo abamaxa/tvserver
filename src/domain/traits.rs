@@ -47,6 +47,15 @@ pub trait MediaChecker: Send + Sync {
 
 pub type Checker = Arc<dyn MediaChecker>;
 
+/// Provides a separate boundary for checking book files and metadata state.
+#[automock]
+#[async_trait]
+pub trait BookChecker: Send + Sync {
+    async fn check_book_information(&self) -> anyhow::Result<()>;
+}
+
+pub type BookCheckerHandle = Arc<dyn BookChecker>;
+
 
 /// Provides an interface to observe the progress of a download
 #[automock]
