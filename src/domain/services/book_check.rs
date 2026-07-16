@@ -5,8 +5,9 @@ use std::{
 
 use async_recursion::async_recursion;
 
+use crate::domain::services::BookPathLeaseCoordinator;
 use crate::domain::{
-    algorithm::{classify_media_kind, path_to_collection_id, MediaKind},
+    algorithm::{classify_media_kind, collection_id_to_path, path_to_collection_id, MediaKind},
     config::get_book_dir,
     messages::{LocalMessage, LocalMessageSender, MediaEvent},
     models::BookState,
@@ -19,11 +20,27 @@ pub struct BookCheck {
     repo: Repository,
     sender: LocalMessageSender,
     book_root: PathBuf,
+    leases: BookPathLeaseCoordinator,
 }
 
 impl BookCheck {
     pub fn new(store: FileStorer, repo: Repository, sender: LocalMessageSender) -> Self {
-        Self::new_with_root(store, repo, sender, get_book_dir())
+        Self::new_with_root_and_leases(
+            store,
+            repo,
+            sender,
+            get_book_dir(),
+            BookPathLeaseCoordinator::new(),
+        )
+    }
+
+    pub fn new_with_leases(
+        store: FileStorer,
+        repo: Repository,
+        sender: LocalMessageSender,
+        leases: BookPathLeaseCoordinator,
+    ) -> Self {
+        Self::new_with_root_and_leases(store, repo, sender, get_book_dir(), leases)
     }
 
     pub fn new_with_root(
@@ -32,11 +49,28 @@ impl BookCheck {
         sender: LocalMessageSender,
         book_root: impl AsRef<Path>,
     ) -> Self {
+        Self::new_with_root_and_leases(
+            store,
+            repo,
+            sender,
+            book_root,
+            BookPathLeaseCoordinator::new(),
+        )
+    }
+
+    pub fn new_with_root_and_leases(
+        store: FileStorer,
+        repo: Repository,
+        sender: LocalMessageSender,
+        book_root: impl AsRef<Path>,
+        leases: BookPathLeaseCoordinator,
+    ) -> Self {
         Self {
             store,
             repo,
             sender,
             book_root: book_root.as_ref().to_path_buf(),
+            leases,
         }
     }
 
@@ -60,6 +94,22 @@ impl BookCheck {
             if disk_books.contains(&(book.collection.clone(), book.file_name.clone())) {
                 continue;
             }
+            let Some(collection_path) = collection_id_to_path(&book.collection) else {
+                tracing::error!(
+                    "cannot reconcile book {} ({}): collection is not a portable path",
+                    book.file_name,
+                    book.checksum
+                );
+                continue;
+            };
+            let full_path = self.book_root.join(collection_path).join(&book.file_name);
+            let Some(_reconciling) = self.leases.try_acquire_reconciling(&full_path) else {
+                tracing::debug!(
+                    path = %full_path.display(),
+                    "Skipping orphan reconciliation while book ingestion is active"
+                );
+                continue;
+            };
             if let Err(error) = self
                 .repo
                 .delete_book_if_path_matches(
@@ -171,6 +221,7 @@ mod tests {
     };
 
     use super::BookCheck;
+    use crate::domain::services::BookPathLeaseCoordinator;
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -519,6 +570,63 @@ mod tests {
         let books = repository.list_all_books().await.unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].checksum, 201);
+    }
+
+    #[tokio::test]
+    async fn active_ingestion_staging_does_not_delete_retry_row() {
+        let root = TestDir::new("active-ingestion-staging");
+        let collection_dir = root.path().join("Reference");
+        tokio::fs::create_dir_all(&collection_dir).await.unwrap();
+        let original_path = collection_dir.join("retry.epub");
+        let staged_path = collection_dir.join(".tvserver-ingest-test");
+        tokio::fs::write(&original_path, b"book").await.unwrap();
+
+        let (sender, mut receiver) = mpsc::channel(8);
+        let repository: Repository = Arc::new(
+            SqlRepository::new(":memory:", Some(sender.clone()))
+                .await
+                .unwrap(),
+        );
+        let mut book = BookDetails::new(
+            "retry.epub".to_string(),
+            "Reference".to_string(),
+            &original_path,
+            BookFormat::Epub,
+        );
+        book.checksum = 203;
+        book.state = BookState::MetadataError;
+        repository.save_book(&book).await.unwrap();
+        receiver.try_recv().unwrap();
+
+        let leases = BookPathLeaseCoordinator::new();
+        let processing = leases.acquire_processing(&original_path).await;
+        tokio::fs::rename(&original_path, &staged_path)
+            .await
+            .unwrap();
+        let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let checker = BookCheck::new_with_root_and_leases(
+            storer,
+            repository.clone(),
+            sender,
+            root.path(),
+            leases,
+        );
+
+        checker.check_book_information().await.unwrap();
+
+        assert!(receiver.try_recv().is_err(), "scanner must emit no delete event");
+        assert_eq!(
+            repository.retrieve_book(203).await.unwrap().state,
+            BookState::MetadataError
+        );
+        tokio::fs::rename(&staged_path, &original_path)
+            .await
+            .unwrap();
+        drop(processing);
+        assert_eq!(
+            repository.retrieve_book(203).await.unwrap().file_name,
+            "retry.epub"
+        );
     }
 
     #[tokio::test]

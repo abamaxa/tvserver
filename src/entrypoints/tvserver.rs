@@ -25,7 +25,7 @@ impl TVServer {
             context.get_local_sender(),
         );
 
-        let metadata_manager = MetaDataManager::consume(
+        let metadata_manager = MetaDataManager::consume_with_leases(
             context.get_repository(),
             context.get_store(),
             context.get_book_file_storer(),
@@ -35,6 +35,7 @@ impl TVServer {
                 .map_err(|e| anyhow::anyhow!("failed to listen for messages: {}", e))?,
             context.get_local_sender(),
             context.get_spawner(),
+            context.get_book_path_leases(),
         );
 
         let hs = HistoryService::new(context.get_repository(), context.get_local_sender());

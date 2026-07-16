@@ -12,7 +12,7 @@ use crate::domain::messagebus::{
     LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter,
 };
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
-use crate::domain::services::{BookCheck, MediaCheck};
+use crate::domain::services::{BookCheck, BookPathLeaseCoordinator, MediaCheck};
 use crate::domain::traits::FileStorer;
 use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Repository, Storer};
 use crate::domain::SearchEngineType;
@@ -33,6 +33,7 @@ pub struct Context {
     local_message_exchange: LocalMessageExchange,
     book_store: Arc<BookStore>,
     book_file_storer: FileStorer,
+    book_path_leases: BookPathLeaseCoordinator,
     sharing: Option<Arc<SharingService>>,
 }
 
@@ -50,6 +51,36 @@ impl Context {
         book_file_storer: FileStorer,
         sharing: Option<Arc<SharingService>>,
     ) -> Context {
+        Self::new_with_book_path_leases(
+            store,
+            search,
+            messenger,
+            task_manager,
+            repository,
+            checker,
+            book_checker,
+            local_message_exchange,
+            book_store,
+            book_file_storer,
+            sharing,
+            BookPathLeaseCoordinator::new(),
+        )
+    }
+
+    pub fn new_with_book_path_leases(
+        store: Storer,
+        search: SearchService,
+        messenger: MessageExchange,
+        task_manager: Arc<TaskManager>,
+        repository: Repository,
+        checker: Checker,
+        book_checker: BookCheckerHandle,
+        local_message_exchange: LocalMessageExchange,
+        book_store: Arc<BookStore>,
+        book_file_storer: FileStorer,
+        sharing: Option<Arc<SharingService>>,
+        book_path_leases: BookPathLeaseCoordinator,
+    ) -> Context {
         Context {
             store,
             checker,
@@ -61,6 +92,7 @@ impl Context {
             local_message_exchange,
             book_store,
             book_file_storer,
+            book_path_leases,
             sharing,
         }
     }
@@ -128,6 +160,10 @@ impl Context {
 
     pub fn get_book_file_storer(&self) -> FileStorer {
         self.book_file_storer.clone()
+    }
+
+    pub fn get_book_path_leases(&self) -> BookPathLeaseCoordinator {
+        self.book_path_leases.clone()
     }
 }
 
@@ -199,10 +235,12 @@ pub async fn create_context() -> anyhow::Result<Context> {
         repository.clone(),
         local_message_exchange.new_sender(),
     ));
-    let book_checker = Arc::new(BookCheck::new(
+    let book_path_leases = BookPathLeaseCoordinator::new();
+    let book_checker = Arc::new(BookCheck::new_with_leases(
         book_file_storer.clone(),
         repository.clone(),
         local_message_exchange.new_sender(),
+        book_path_leases.clone(),
     ));
 
     let sharing = Arc::new(SharingService::new(
@@ -211,7 +249,7 @@ pub async fn create_context() -> anyhow::Result<Context> {
         spawner.clone(),
     ));
 
-    Ok(Context::new(
+    Ok(Context::new_with_book_path_leases(
         Arc::new(MediaStore::new(file_storer, repository.clone())),
         search_service,
         messenger,
@@ -223,6 +261,7 @@ pub async fn create_context() -> anyhow::Result<Context> {
         book_store,
         book_file_storer,
         Some(sharing),
+        book_path_leases,
     ))
 }
 
@@ -234,6 +273,7 @@ mod tests {
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
             messagebus::{LocalMessageExchange, MessageExchange, MessageFilter},
+            services::BookPathLeaseCoordinator,
             traits::{
                 BookCheckerHandle, FileStorer, MockBookChecker, MockMediaChecker, MockMediaStorer,
                 Repository, Storer,
@@ -271,8 +311,9 @@ mod tests {
             Path::new("/tmp/context-books"),
             Path::new("/tmp/context-book-thumbnails"),
         ));
+        let book_path_leases = BookPathLeaseCoordinator::new();
 
-        let context = Context::new(
+        let context = Context::new_with_book_path_leases(
             media_store,
             search,
             messenger,
@@ -284,10 +325,17 @@ mod tests {
             book_store.clone(),
             book_files.clone(),
             None,
+            book_path_leases.clone(),
         );
 
         assert!(Arc::ptr_eq(&context.get_book_store(), &book_store));
         assert!(Arc::ptr_eq(&context.get_book_file_storer(), &book_files));
         assert!(Arc::ptr_eq(&context.get_book_checker(), &book_checker));
+        let leased_path = Path::new("/tmp/context-books/leased.epub");
+        let _processing = book_path_leases.acquire_processing(leased_path).await;
+        assert!(context
+            .get_book_path_leases()
+            .try_acquire_reconciling(leased_path)
+            .is_none());
     }
 }
