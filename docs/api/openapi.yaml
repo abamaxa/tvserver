@@ -1,0 +1,1587 @@
+openapi: 3.1.0
+info:
+  title: TVServer REST API
+  version: 0.8.1
+  description: |
+    Canonical contract for the TVServer webserver API. Book resources are exposed
+    only through the dedicated book routes; the existing media routes remain
+    video-only. Protected routes allow credential-free requests only when the
+    peer address is localhost, IPv6 loopback, or 192.168.* and any X-Real-IP or
+    first X-Forwarded-For value is also in that trusted set. Other callers must
+    use HTTP Basic authentication or the base64 query credential documented below.
+servers:
+  - url: /
+    description: Current TVServer host
+tags:
+  - name: Tasks
+  - name: Media
+  - name: Books
+  - name: Search
+  - name: Remote
+  - name: Diagnostics
+security:
+  - HttpBasicAuth: []
+  - QueryAuth: []
+paths:
+  /api/tasks:
+    get:
+      tags: [Tasks]
+      operationId: listTasks
+      summary: List current download and conversion tasks
+      responses:
+        '200':
+          description: Current task state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskListResults'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+    post:
+      tags: [Tasks]
+      operationId: addTask
+      summary: Queue a download
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DownloadRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/tasks/{type}/{path}:
+    delete:
+      tags: [Tasks]
+      operationId: deleteTask
+      summary: Remove a task
+      parameters:
+        - name: type
+          in: path
+          required: true
+          description: Serde task type name.
+          schema:
+            $ref: '#/components/schemas/TaskType'
+        - name: path
+          in: path
+          required: true
+          description: Greedy nested path suffix used as the task key; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/log:
+    post:
+      tags: [Diagnostics]
+      operationId: logClientMessage
+      summary: Write frontend messages to the server log
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientLogMessage'
+      responses:
+        '200':
+          description: Messages were logged; the response has no body.
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/media:
+    get:
+      tags: [Media]
+      operationId: listRootMediaCollection
+      summary: List the root video collection
+      description: Returns only video collections or video records, never books.
+      responses:
+        '200':
+          description: Root video collection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaItem'
+        '404':
+          description: Video collection error encoded as a MediaItem Error variant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaItem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/media/{media}:
+    get:
+      tags: [Media]
+      operationId: listMediaCollection
+      summary: List a nested video collection
+      description: Returns only video collections or video records, never books.
+      parameters:
+        - name: media
+          in: path
+          required: true
+          description: Greedy nested path suffix for the video collection; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Video collection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaItem'
+        '404':
+          description: Video collection error encoded as a MediaItem Error variant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaItem'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+    delete:
+      tags: [Media]
+      operationId: deleteVideo
+      summary: Delete a video
+      parameters:
+        - name: media
+          in: path
+          required: true
+          description: Greedy nested path suffix passed to the video store; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+    post:
+      tags: [Media]
+      operationId: convertVideo
+      summary: Queue a conversion for a video checksum
+      parameters:
+        - name: media
+          in: path
+          required: true
+          description: Decimal video checksum carried in the greedy nested path wildcard; clients send the value URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+            pattern: '^-?[0-9]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversionRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '400':
+          description: The wildcard value is not a valid integer checksum.
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+    patch:
+      tags: [Media]
+      operationId: shareVideo
+      summary: Share a video through the configured media sharer
+      parameters:
+        - name: media
+          in: path
+          required: true
+          description: Greedy nested path suffix passed to the media sharer; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/books:
+    get:
+      tags: [Books]
+      operationId: listRootBooks
+      summary: List root book collections and books
+      responses:
+        '200':
+          description: Root book collection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookCollectionDetails'
+        '500':
+          description: Collection-shaped error response with errors populated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookCollectionDetails'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/books/{collection}:
+    get:
+      tags: [Books]
+      operationId: listBooks
+      summary: List a nested book collection
+      parameters:
+        - name: collection
+          in: path
+          required: true
+          description: Greedy nested path suffix for the collection; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Requested book collection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookCollectionDetails'
+        '500':
+          description: Collection-shaped error response with errors populated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookCollectionDetails'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/book/{checksum}:
+    get:
+      tags: [Books]
+      operationId: getBook
+      summary: Retrieve one book
+      parameters:
+        - $ref: '#/components/parameters/BookChecksum'
+      responses:
+        '200':
+          description: Book details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookDetails'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+    delete:
+      tags: [Books]
+      operationId: deleteBook
+      summary: Delete one book and its stored files
+      parameters:
+        - $ref: '#/components/parameters/BookChecksum'
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/books/download/{path}:
+    get:
+      tags: [Books]
+      operationId: downloadBook
+      summary: Download a stored PDF or EPUB
+      parameters:
+        - name: path
+          in: path
+          required: true
+          description: Greedy nested path suffix relative to BOOK_DIR; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Book file
+          headers:
+            Content-Length:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/pdf:
+              schema:
+                type: string
+                contentEncoding: binary
+            application/epub+zip:
+              schema:
+                type: string
+                contentEncoding: binary
+        '404':
+          description: Missing, unsupported, or rejected path; the response has no body.
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          description: Static file serving failed; the response has no body.
+  /api/book-thumbnails/{file}:
+    get:
+      tags: [Books]
+      operationId: getBookThumbnail
+      summary: Fetch a generated or default book thumbnail
+      security: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          description: Single URL-encoded JPEG filename; nested paths are rejected.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: JPEG thumbnail
+          headers:
+            Content-Length:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                contentEncoding: binary
+        '404':
+          description: Missing, unsupported, or rejected filename; the response has no body.
+        '500':
+          description: Static file serving failed; the response has no body.
+  /api/remote:
+    get:
+      tags: [Remote]
+      operationId: listRemotePlayers
+      summary: List connected remote players
+      responses:
+        '200':
+          description: Connected player state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerList'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/remote/control:
+    post:
+      tags: [Remote]
+      operationId: sendRemoteCommand
+      summary: Send a serialized remote message to a player
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Command'
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/remote/play:
+    post:
+      tags: [Remote]
+      operationId: playRemoteVideo
+      summary: Ask a remote player to play a video
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlayRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/remote/ws:
+    get:
+      tags: [Remote]
+      operationId: upgradeRemotePlayerWebSocket
+      summary: Upgrade a remote player connection to WebSocket
+      responses:
+        '101':
+          description: Switching Protocols
+        '400':
+          description: Invalid WebSocket upgrade request
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/control/ws:
+    get:
+      tags: [Remote]
+      operationId: upgradeRemoteControlWebSocket
+      summary: Upgrade a remote control connection to WebSocket
+      responses:
+        '101':
+          description: Switching Protocols
+        '400':
+          description: Invalid WebSocket upgrade request
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/search/pirate:
+    get:
+      tags: [Search]
+      operationId: searchPirateBay
+      summary: Search the configured torrent provider
+      parameters:
+        - $ref: '#/components/parameters/SearchQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/SearchResponse'
+        '400':
+          $ref: '#/components/responses/SearchResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/SearchResponse'
+  /api/search/youtube:
+    get:
+      tags: [Search]
+      operationId: searchYouTube
+      summary: Search YouTube
+      parameters:
+        - $ref: '#/components/parameters/SearchQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/SearchResponse'
+        '400':
+          $ref: '#/components/responses/SearchResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/SearchResponse'
+  /api/conversion:
+    get:
+      tags: [Media]
+      operationId: listConversions
+      summary: List supported video conversions
+      responses:
+        '200':
+          description: Conversion definitions in the standard search-results wrapper
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversionResults'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+  /api/stream/{path}:
+    get:
+      tags: [Media]
+      operationId: streamVideo
+      summary: Stream a stored video through the static file service
+      security: []
+      parameters:
+        - name: path
+          in: path
+          required: true
+          description: Greedy nested path suffix relative to the movie directory; clients send each segment URL-encoded and the static service receives the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Complete video representation; media type depends on the stored file.
+          content:
+            video/*:
+              schema:
+                type: string
+                contentEncoding: binary
+            application/octet-stream:
+              schema:
+                type: string
+                contentEncoding: binary
+        '206':
+          description: Byte range selected by the static file service.
+          content:
+            video/*:
+              schema:
+                type: string
+                contentEncoding: binary
+            application/octet-stream:
+              schema:
+                type: string
+                contentEncoding: binary
+        '404':
+          description: File not found
+  /api/stream-audio/{audio_index}/{path}:
+    get:
+      tags: [Media]
+      operationId: streamVideoAudioTrack
+      summary: Remux a selected audio track with the first video track
+      security: []
+      parameters:
+        - name: audio_index
+          in: path
+          required: true
+          description: Zero-based audio stream index passed to ffmpeg.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 4294967295
+        - name: path
+          in: path
+          required: true
+          description: Greedy nested path suffix relative to the movie directory; clients send each segment URL-encoded and Axum passes the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Remuxed Matroska stream
+          content:
+            video/x-matroska:
+              schema:
+                type: string
+                contentEncoding: binary
+        '403':
+          description: Resolved file is outside the movie directory
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: File not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          description: Movie directory or ffmpeg failure
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/thumbnails/{path}:
+    get:
+      tags: [Media]
+      operationId: getVideoThumbnail
+      summary: Fetch a video thumbnail through the static file service
+      security: []
+      parameters:
+        - name: path
+          in: path
+          required: true
+          description: Greedy nested path suffix relative to the video thumbnail directory; clients send each segment URL-encoded and the static service receives the decoded value.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Thumbnail bytes; media type depends on the stored image.
+          content:
+            image/*:
+              schema:
+                type: string
+                contentEncoding: binary
+        '404':
+          description: Thumbnail not found
+components:
+  securitySchemes:
+    HttpBasicAuth:
+      type: http
+      scheme: basic
+      description: |
+        For callers outside the trusted local networks, send the exact
+        AUTH_CREDENTIALS value as the HTTP Basic username/password credentials.
+    QueryAuth:
+      type: apiKey
+      in: query
+      name: auth
+      description: |
+        Base64-encoded AUTH_CREDENTIALS value. The middleware accepts this on all
+        protected routes; it exists primarily for browser WebSocket clients that
+        cannot set an Authorization header.
+  parameters:
+    BookChecksum:
+      name: checksum
+      in: path
+      required: true
+      description: Decimal book checksum. It is represented as a string at the HTTP boundary.
+      schema:
+        type: string
+        pattern: '^-?[0-9]+$'
+    SearchQuery:
+      name: q
+      in: query
+      required: true
+      description: Search text.
+      schema:
+        type: string
+  responses:
+    UnauthorizedResponse:
+      description: Caller is outside the trusted local networks and supplied no valid credentials.
+      headers:
+        WWW-Authenticate:
+          description: HTTP Basic authentication challenge emitted by restrict_access.
+          schema:
+            type: string
+          example: 'Basic realm="tvserver"'
+    SuccessResponse:
+      description: Successful operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Response'
+    ErrorResponse:
+      description: Error response with one or more messages in errors
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    SearchResponse:
+      description: Search results or an error in the same response wrapper
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SearchResults'
+  schemas:
+    Response:
+      type: object
+      additionalProperties: false
+      required: [message, errors]
+      properties:
+        message:
+          type: string
+        errors:
+          type: array
+          items:
+            type: string
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [message, errors]
+      properties:
+        message:
+          type: string
+        errors:
+          type: array
+          minItems: 1
+          items:
+            type: string
+    SearchEngineType:
+      type: string
+      enum: [YouTube, Torrent, CopyServer]
+    TaskType:
+      type: string
+      enum: [Transmission, AsyncProcess]
+    DownloadRequest:
+      type: object
+      additionalProperties: false
+      required: [name, link, engine]
+      properties:
+        name:
+          type: string
+        link:
+          type: string
+        engine:
+          $ref: '#/components/schemas/SearchEngineType'
+        series:
+          type: [string, 'null']
+    TaskState:
+      type: object
+      additionalProperties: false
+      required:
+        - key
+        - name
+        - displayName
+        - finished
+        - eta
+        - percentDone
+        - sizeDetails
+        - rateDetails
+        - processDetails
+        - errorString
+        - taskType
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        displayName:
+          type: string
+        finished:
+          type: boolean
+        eta:
+          type: integer
+          format: int64
+        percentDone:
+          type: number
+          format: float
+        sizeDetails:
+          type: string
+        rateDetails:
+          type: string
+        processDetails:
+          type: string
+        errorString:
+          type: string
+        taskType:
+          $ref: '#/components/schemas/TaskType'
+    TaskListResults:
+      type: object
+      additionalProperties: false
+      required: [results, error]
+      properties:
+        results:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/TaskState'
+        error:
+          type: [string, 'null']
+    SearchResults:
+      type: object
+      additionalProperties: false
+      required: [results, error]
+      properties:
+        results:
+          type: [array, 'null']
+          items:
+            type: object
+            additionalProperties: false
+            required: [title, description, link, engine]
+            properties:
+              title:
+                type: string
+              description:
+                type: string
+              link:
+                type: string
+              engine:
+                $ref: '#/components/schemas/SearchEngineType'
+        error:
+          type: [string, 'null']
+    ConversionResults:
+      type: object
+      additionalProperties: false
+      required: [results, error]
+      properties:
+        results:
+          type: [array, 'null']
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, description, exec, args, extension]
+            properties:
+              name:
+                type: string
+              description:
+                type: string
+              exec:
+                type: string
+              args:
+                type: string
+              extension:
+                type: [string, 'null']
+        error:
+          type: [string, 'null']
+    ConversionRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+    CollectionItem:
+      type: object
+      additionalProperties: false
+      required: [collection, thumbnail]
+      properties:
+        collection:
+          type: string
+        thumbnail:
+          type: array
+          items:
+            type: string
+    CollectionDetails:
+      type: object
+      additionalProperties: false
+      required: [collection, parent_collection, child_collections, series, videos, errors]
+      properties:
+        collection:
+          type: string
+        parent_collection:
+          type: string
+        child_collections:
+          type: array
+          items:
+            $ref: '#/components/schemas/CollectionItem'
+        series:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/VideoDetails'
+        videos:
+          type: array
+          items:
+            $ref: '#/components/schemas/MediaItem'
+        errors:
+          type: array
+          items:
+            type: string
+    MediaItem:
+      description: Externally tagged Serde enum containing only existing video-media variants.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [Collection]
+          properties:
+            Collection:
+              $ref: '#/components/schemas/CollectionDetails'
+        - type: object
+          additionalProperties: false
+          required: [Video]
+          properties:
+            Video:
+              $ref: '#/components/schemas/VideoDetails'
+        - type: object
+          additionalProperties: false
+          required: [Error]
+          properties:
+            Error:
+              type: string
+    AudioTrack:
+      type: object
+      additionalProperties: false
+      required: [id, language, title, codec]
+      properties:
+        id:
+          type: integer
+          format: int64
+        language:
+          type: string
+        title:
+          type: [string, 'null']
+        codec:
+          type: [string, 'null']
+    SubtitleTrack:
+      type: object
+      additionalProperties: false
+      required: [id, language, title, codec]
+      properties:
+        id:
+          type: integer
+          format: int64
+        language:
+          type: string
+        title:
+          type: [string, 'null']
+        codec:
+          type: [string, 'null']
+    VideoMetadata:
+      type: object
+      additionalProperties: false
+      required: [duration, width, height, aspectWidth, aspectHeight, audioTracks]
+      properties:
+        duration:
+          type: number
+          format: double
+        width:
+          type: integer
+          minimum: 0
+        height:
+          type: integer
+          minimum: 0
+        aspectWidth:
+          type: integer
+          minimum: 0
+        aspectHeight:
+          type: integer
+          minimum: 0
+        audioTracks:
+          type: integer
+          minimum: 0
+        audioTrackList:
+          type: array
+          items:
+            $ref: '#/components/schemas/AudioTrack'
+        subtitleTracks:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubtitleTrack'
+    SeriesDetails:
+      type: object
+      additionalProperties: false
+      required: [seriesTitle, season, episode, episodeTitle]
+      properties:
+        seriesTitle:
+          type: string
+        season:
+          type: string
+        episode:
+          type: string
+        episodeTitle:
+          type: string
+    VideoMetadataRequest:
+      type: object
+      additionalProperties: true
+      required: [duration, width, height, aspectWidth, aspectHeight, audioTracks]
+      description: Inbound video metadata shape; optional track lists may be omitted or null and unknown fields are ignored by Serde.
+      properties:
+        duration:
+          type: number
+          format: double
+        width:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        height:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        aspectWidth:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        aspectHeight:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        audioTracks:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        audioTrackList:
+          type: [array, 'null']
+          items:
+            type: object
+            additionalProperties: true
+            required: [id, language]
+            properties:
+              id:
+                type: integer
+                format: int64
+              language:
+                type: string
+              title:
+                type: [string, 'null']
+              codec:
+                type: [string, 'null']
+        subtitleTracks:
+          type: [array, 'null']
+          items:
+            type: object
+            additionalProperties: true
+            required: [id, language]
+            properties:
+              id:
+                type: integer
+                format: int64
+              language:
+                type: string
+              title:
+                type: [string, 'null']
+              codec:
+                type: [string, 'null']
+    SeriesDetailsRequest:
+      type: object
+      additionalProperties: true
+      required: [seriesTitle, season, episode, episodeTitle]
+      description: Inbound series shape; all fields are required when present and unknown fields are ignored by Serde.
+      properties:
+        seriesTitle:
+          type: string
+        season:
+          type: string
+        episode:
+          type: string
+        episodeTitle:
+          type: string
+    VideoState:
+      type: string
+      enum:
+        - Ready
+        - NewFile
+        - ZeroFileSize
+        - NoVideoSize
+        - NeedThumbnail
+        - NeedVideoMetaData
+        - NeedDescription
+        - Exception
+    VideoDetails:
+      type: object
+      additionalProperties: false
+      required:
+        - video
+        - collection
+        - description
+        - series
+        - thumbnail
+        - metadata
+        - checksum
+        - state
+        - createdOn
+        - updatedOn
+        - url
+      properties:
+        video:
+          type: string
+        collection:
+          type: string
+        description:
+          type: string
+        series:
+          $ref: '#/components/schemas/SeriesDetails'
+        thumbnail:
+          type: array
+          items:
+            type: string
+        metadata:
+          $ref: '#/components/schemas/VideoMetadata'
+        checksum:
+          type: string
+          pattern: '^-?[0-9]+$'
+        searchPhrase:
+          type: string
+        state:
+          $ref: '#/components/schemas/VideoState'
+        createdOn:
+          type: string
+          description: Naive local date-time serialized by chrono without a UTC offset.
+        updatedOn:
+          type: string
+          description: Naive local date-time serialized by chrono without a UTC offset.
+        playFrom:
+          type: number
+          format: float
+        lastViewed:
+          type: string
+          description: Naive local date-time serialized by chrono without a UTC offset.
+        url:
+          type: string
+          description: Webserver-relative URL below /api/stream/.
+    VideoDetailsRequest:
+      type: object
+      additionalProperties: true
+      description: |
+        Inbound VideoDetails shape. The runtime uses #[serde(default)], so every
+        field may be omitted and unknown fields are ignored.
+      properties:
+        video:
+          type: string
+        collection:
+          type: string
+        description:
+          type: string
+        series:
+          $ref: '#/components/schemas/SeriesDetailsRequest'
+        thumbnail:
+          type: array
+          items:
+            type: string
+        metadata:
+          $ref: '#/components/schemas/VideoMetadataRequest'
+        checksum:
+          type: string
+          pattern: '^-?[0-9]+$'
+        searchPhrase:
+          type: [string, 'null']
+        state:
+          $ref: '#/components/schemas/VideoState'
+        createdOn:
+          type: string
+        updatedOn:
+          type: string
+        playFrom:
+          type: [number, 'null']
+          format: float
+        lastViewed:
+          type: [string, 'null']
+    BookFormat:
+      type: string
+      enum: [pdf, epub]
+    BookState:
+      type: string
+      enum: [Ready, NewFile, NeedMetadata, NeedThumbnail, MetadataError, ZeroFileSize, Exception]
+    BookMetadata:
+      type: object
+      additionalProperties: false
+      description: Optional extractor output. Both fields are omitted when absent.
+      properties:
+        raw:
+          description: Raw or semi-structured extractor output.
+        extractionError:
+          type: string
+    BookCollectionItem:
+      type: object
+      additionalProperties: false
+      required: [collection, thumbnail]
+      properties:
+        collection:
+          type: string
+        thumbnail:
+          type: string
+          description: Webserver-relative URL below /api/book-thumbnails/.
+    BookCollectionDetails:
+      type: object
+      additionalProperties: false
+      required: [collection, parentCollection, childCollections, books, errors]
+      properties:
+        collection:
+          type: string
+        parentCollection:
+          type: string
+        childCollections:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookCollectionItem'
+        books:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookDetails'
+        errors:
+          type: array
+          items:
+            type: string
+    BookDetails:
+      type: object
+      additionalProperties: false
+      required:
+        - fileName
+        - collection
+        - title
+        - authors
+        - format
+        - thumbnail
+        - checksum
+        - state
+        - createdOn
+        - updatedOn
+        - url
+      properties:
+        fileName:
+          type: string
+        collection:
+          type: string
+        title:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        description:
+          type: string
+        publisher:
+          type: string
+        publishedDate:
+          type: string
+        language:
+          type: string
+        isbn:
+          type: string
+        format:
+          $ref: '#/components/schemas/BookFormat'
+        pageCount:
+          type: integer
+          format: int64
+        thumbnail:
+          type: string
+          description: Webserver-relative URL below /api/book-thumbnails/.
+        metadata:
+          $ref: '#/components/schemas/BookMetadata'
+        checksum:
+          type: string
+          pattern: '^-?[0-9]+$'
+        searchPhrase:
+          type: string
+        state:
+          $ref: '#/components/schemas/BookState'
+        createdOn:
+          type: string
+          description: Naive local date-time serialized by chrono without a UTC offset.
+        updatedOn:
+          type: string
+          description: Naive local date-time serialized by chrono without a UTC offset.
+        url:
+          type: string
+          description: Webserver-relative URL below /api/books/download/.
+    ClientLogMessage:
+      type: object
+      additionalProperties: false
+      required: [level, messages]
+      properties:
+        level:
+          type: string
+        messages:
+          type: array
+          items:
+            type: string
+    RemotePlayerState:
+      type: object
+      additionalProperties: false
+      required:
+        - currentTime
+        - duration
+        - collection
+        - video
+        - videoId
+        - paused
+        - playbackRate
+        - currentSubtitleTrack
+      properties:
+        currentTime:
+          type: number
+          format: double
+        duration:
+          type: number
+          format: double
+        collection:
+          type: string
+        video:
+          type: string
+        videoId:
+          type: string
+        paused:
+          type: boolean
+        playbackRate:
+          type: number
+          format: double
+        currentSubtitleTrack:
+          type: [integer, 'null']
+          format: int32
+    RemotePlayerStateRequest:
+      type: object
+      additionalProperties: false
+      required: [collection, video, videoId, paused]
+      properties:
+        currentTime:
+          type: [number, 'null']
+          format: double
+          description: Missing or null values deserialize to 0.
+        duration:
+          type: [number, 'null']
+          format: double
+          description: Missing or null values deserialize to 0.
+        collection:
+          type: string
+        video:
+          type: string
+        videoId:
+          type: string
+        paused:
+          type: boolean
+        playbackRate:
+          type: [number, 'null']
+          format: double
+          description: Missing or null values deserialize to 1.0.
+        currentSubtitleTrack:
+          type: [integer, 'null']
+          format: int32
+    BookEvent:
+      type: object
+      additionalProperties: false
+      required: [type, checksum]
+      properties:
+        type:
+          type: string
+          enum: [BookEventAdded, BookEventChanged, BookEventDeleted]
+        book:
+          $ref: '#/components/schemas/BookDetails'
+        checksum:
+          type: string
+    VideoEvent:
+      type: object
+      additionalProperties: false
+      required: [type, checksum]
+      properties:
+        type:
+          type: string
+          enum: [VideoEventAdded, VideoEventChanged, VideoEventDeleted]
+        video:
+          $ref: '#/components/schemas/VideoDetails'
+        checksum:
+          type: string
+    RemoteMessage:
+      description: Externally tagged Serde enum as serialized in player state responses.
+      oneOf:
+        - type: string
+          enum: [Stop, SendLastState]
+        - type: object
+          additionalProperties: false
+          required: [Command]
+          properties:
+            Command:
+              type: object
+              additionalProperties: false
+              required: [command]
+              properties:
+                command:
+                  type: string
+        - type: object
+          additionalProperties: false
+          required: [Play]
+          properties:
+            Play:
+              type: object
+              additionalProperties: false
+              required: [videoId, url, collection, video, width, height, aspectWidth, aspectHeight, metadata]
+              properties:
+                videoId:
+                  type: string
+                url:
+                  type: string
+                collection:
+                  type: string
+                video:
+                  type: string
+                width:
+                  type: integer
+                  format: int32
+                height:
+                  type: integer
+                  format: int32
+                aspectWidth:
+                  type: integer
+                  format: int32
+                aspectHeight:
+                  type: integer
+                  format: int32
+                metadata:
+                  oneOf:
+                    - $ref: '#/components/schemas/VideoMetadata'
+                    - type: 'null'
+        - type: object
+          additionalProperties: false
+          required: [Seek]
+          properties:
+            Seek:
+              type: object
+              additionalProperties: false
+              required: [interval]
+              properties:
+                interval:
+                  type: integer
+                  format: int32
+        - type: object
+          additionalProperties: false
+          required: [SetAudioTrack]
+          properties:
+            SetAudioTrack:
+              type: object
+              additionalProperties: false
+              required: [trackId]
+              properties:
+                trackId:
+                  type: integer
+                  format: int32
+        - type: object
+          additionalProperties: false
+          required: [SetPlaybackRate]
+          properties:
+            SetPlaybackRate:
+              type: object
+              additionalProperties: false
+              required: [rate]
+              properties:
+                rate:
+                  type: number
+                  format: double
+        - type: object
+          additionalProperties: false
+          required: [SetSubtitleTrack]
+          properties:
+            SetSubtitleTrack:
+              type: object
+              additionalProperties: false
+              required: [trackId]
+              properties:
+                trackId:
+                  type: [integer, 'null']
+                  format: int32
+        - type: object
+          additionalProperties: false
+          required: [TogglePause]
+          properties:
+            TogglePause:
+              type: string
+        - type: object
+          additionalProperties: false
+          required: [State]
+          properties:
+            State:
+              $ref: '#/components/schemas/RemotePlayerState'
+        - type: object
+          additionalProperties: false
+          required: [Error]
+          properties:
+            Error:
+              type: string
+        - type: object
+          additionalProperties: false
+          required: [Ping]
+          properties:
+            Ping:
+              type: integer
+              minimum: 0
+        - type: object
+          additionalProperties: false
+          required: [Pong]
+          properties:
+            Pong:
+              type: string
+              description: Socket address such as 192.0.2.1:8080 or [2001:db8::1]:8080.
+        - type: object
+          additionalProperties: false
+          required: [Close]
+          properties:
+            Close:
+              type: string
+        - type: object
+          additionalProperties: false
+          required: [LastState]
+          properties:
+            LastState:
+              $ref: '#/components/schemas/VideoDetails'
+        - type: object
+          additionalProperties: false
+          required: [CurrentTasks]
+          properties:
+            CurrentTasks:
+              type: array
+              items:
+                $ref: '#/components/schemas/TaskState'
+        - type: object
+          additionalProperties: false
+          required: [Book]
+          properties:
+            Book:
+              type: array
+              items:
+                $ref: '#/components/schemas/BookEvent'
+        - type: object
+          additionalProperties: false
+          required: [Video]
+          properties:
+            Video:
+              type: array
+              items:
+                $ref: '#/components/schemas/VideoEvent'
+    RemoteMessageRequest:
+      description: |
+        RemoteMessage input shape. It includes the serialized response shape plus
+        the looser forms accepted by custom/default Serde deserialization.
+      anyOf:
+        - $ref: '#/components/schemas/RemoteMessage'
+        - type: object
+          additionalProperties: false
+          required: [State]
+          properties:
+            State:
+              $ref: '#/components/schemas/RemotePlayerStateRequest'
+        - type: object
+          additionalProperties: false
+          required: [Play]
+          properties:
+            Play:
+              type: object
+              additionalProperties: false
+              required: [videoId, url, collection, video, width, height, aspectWidth, aspectHeight]
+              properties:
+                videoId:
+                  type: string
+                url:
+                  type: string
+                collection:
+                  type: string
+                video:
+                  type: string
+                width:
+                  type: integer
+                  format: int32
+                height:
+                  type: integer
+                  format: int32
+                aspectWidth:
+                  type: integer
+                  format: int32
+                aspectHeight:
+                  type: integer
+                  format: int32
+                metadata:
+                  oneOf:
+                    - $ref: '#/components/schemas/VideoMetadataRequest'
+                    - type: 'null'
+        - type: object
+          additionalProperties: false
+          required: [SetSubtitleTrack]
+          properties:
+            SetSubtitleTrack:
+              type: object
+              additionalProperties: false
+              properties:
+                trackId:
+                  type: [integer, 'null']
+                  format: int32
+        - type: object
+          additionalProperties: false
+          required: [LastState]
+          properties:
+            LastState:
+              $ref: '#/components/schemas/VideoDetailsRequest'
+    Command:
+      type: object
+      additionalProperties: true
+      required: [message]
+      properties:
+        remoteAddress:
+          type: [string, 'null']
+        message:
+          $ref: '#/components/schemas/RemoteMessageRequest'
+    PlayRequest:
+      type: object
+      additionalProperties: true
+      required: [collection, video, width, height, aspectWidth, aspectHeight, videoId]
+      properties:
+        collection:
+          type: string
+        video:
+          type: string
+        remoteAddress:
+          type: [string, 'null']
+        width:
+          type: integer
+          format: int32
+        height:
+          type: integer
+          format: int32
+        aspectWidth:
+          type: integer
+          format: int32
+        aspectHeight:
+          type: integer
+          format: int32
+        videoId:
+          type: string
+        metadata:
+          oneOf:
+            - $ref: '#/components/schemas/VideoMetadataRequest'
+            - type: 'null'
+    PlayerListItem:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        last_message:
+          $ref: '#/components/schemas/RemoteMessage'
+    PlayerList:
+      type: object
+      additionalProperties: false
+      required: [players]
+      properties:
+        players:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerListItem'

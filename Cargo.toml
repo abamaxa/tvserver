@@ -65,6 +65,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [], optional = true }
 
+[dev-dependencies]
+oas3 = { version = "0.22", features = ["yaml-spec"] }
+roas = { version = "=0.17.2", default-features = false, features = ["v3_1"] }
+serde_yaml = "0.9"
+
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.
 lto = true # Enables link-time-optimizations.
