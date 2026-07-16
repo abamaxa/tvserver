@@ -247,6 +247,12 @@ pub trait Databaser: Sync + Send {
     async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error>;
     async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error>;
     async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error>;
+    async fn delete_book_if_path_matches(
+        &self,
+        checksum: i64,
+        collection: &str,
+        file_name: &str,
+    ) -> Result<u64, sqlx::Error>;
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
     async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;

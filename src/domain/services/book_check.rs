@@ -47,19 +47,39 @@ impl BookCheck {
             .map(|book| ((book.collection.clone(), book.file_name.clone()), book.state))
             .collect();
         let mut disk_books = HashSet::new();
-        self.process_collection(PathBuf::new(), &known_books, &mut disk_books)
-            .await?;
+        let mut pending_events = Vec::new();
+        self.process_collection(
+            PathBuf::new(),
+            &known_books,
+            &mut disk_books,
+            &mut pending_events,
+        )
+        .await?;
 
         for book in books {
             if disk_books.contains(&(book.collection.clone(), book.file_name.clone())) {
                 continue;
             }
-            if let Err(error) = self.repo.delete_book(book.checksum).await {
+            if let Err(error) = self
+                .repo
+                .delete_book_if_path_matches(
+                    book.checksum,
+                    &book.collection,
+                    &book.file_name,
+                )
+                .await
+            {
                 tracing::error!(
                     "error deleting orphaned book {} ({}): {error}",
                     book.file_name,
                     book.checksum
                 );
+            }
+        }
+
+        for event in pending_events {
+            if let Err(error) = self.sender.send(LocalMessage::Media(event)).await {
+                tracing::error!("could not queue book Media event: {error}");
             }
         }
 
@@ -72,6 +92,7 @@ impl BookCheck {
         relative_collection: PathBuf,
         known_books: &HashMap<(String, String), BookState>,
         disk_books: &mut HashSet<(String, String)>,
+        pending_events: &mut Vec<MediaEvent>,
     ) -> anyhow::Result<()> {
         let collection = path_to_collection_id(&relative_collection)
             .ok_or_else(|| anyhow::anyhow!("book collection is not a portable path"))?;
@@ -81,8 +102,13 @@ impl BookCheck {
             if relative_collection.as_os_str().is_empty() && directory == ".thumbnails" {
                 continue;
             }
-            self.process_collection(relative_collection.join(directory), known_books, disk_books)
-                .await?;
+            self.process_collection(
+                relative_collection.join(directory),
+                known_books,
+                disk_books,
+                pending_events,
+            )
+            .await?;
         }
 
         for file_name in files {
@@ -103,9 +129,7 @@ impl BookCheck {
 
             let path = self.book_root.join(&relative_collection).join(file_name);
             let event = MediaEvent::new_media(&path, None);
-            if let Err(error) = self.sender.send(LocalMessage::Media(event)).await {
-                tracing::error!("could not queue book Media event: {error}");
-            }
+            pending_events.push(event);
         }
 
         Ok(())
@@ -125,7 +149,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{
             atomic::{AtomicU64, Ordering},
-            Arc,
+            Arc, Mutex,
         },
     };
 
@@ -152,20 +176,25 @@ mod tests {
 
     struct TestDir(PathBuf);
 
-    struct FailingNestedListStore {
+    struct ControlledListStore {
         inner: FileStorer,
-        failing_collection: String,
+        failing_collection: Option<String>,
+        relocation: Mutex<Option<(Repository, BookDetails)>>,
     }
 
     #[async_trait::async_trait]
-    impl FileStore for FailingNestedListStore {
+    impl FileStore for ControlledListStore {
         async fn create_folder(&self, path: &Path) -> anyhow::Result<()> {
             self.inner.create_folder(path).await
         }
 
         async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-            if path == self.failing_collection {
+            if self.failing_collection.as_deref() == Some(path) {
                 anyhow::bail!("forced nested list failure for {path}");
+            }
+            let relocation = self.relocation.lock().unwrap().take();
+            if let Some((repository, book)) = relocation {
+                repository.save_book(&book).await?;
             }
             self.inner.list_folder(path).await
         }
@@ -479,9 +508,10 @@ mod tests {
         repository.save_book(&orphan).await.unwrap();
 
         let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
-        let storer: FileStorer = Arc::new(FailingNestedListStore {
+        let storer: FileStorer = Arc::new(ControlledListStore {
             inner,
-            failing_collection: "broken".to_string(),
+            failing_collection: Some("broken".to_string()),
+            relocation: Mutex::new(None),
         });
         let (sender, _receiver) = mpsc::channel(8);
         let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
@@ -490,5 +520,150 @@ mod tests {
 
         assert!(error.to_string().contains("forced nested list failure"));
         assert_eq!(repository.retrieve_book(301).await.unwrap().file_name, "missing.pdf");
+    }
+
+    #[tokio::test]
+    async fn preserves_checksum_relocated_after_scanner_snapshot() {
+        let root = TestDir::new("relocation-race");
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let mut original = BookDetails::new(
+            "Dune.epub".to_string(),
+            "Old".to_string(),
+            &root.path().join("Old/Dune.epub"),
+            BookFormat::Epub,
+        );
+        original.checksum = 401;
+        original.state = BookState::Ready;
+        repository.save_book(&original).await.unwrap();
+        let mut relocated = original.clone();
+        relocated.collection = "New".to_string();
+        relocated.file_name = "Relocated.epub".to_string();
+
+        let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let storer: FileStorer = Arc::new(ControlledListStore {
+            inner,
+            failing_collection: None,
+            relocation: Mutex::new(Some((repository.clone(), relocated))),
+        });
+        let (sender, _receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
+
+        checker.check_book_information().await.unwrap();
+
+        let current = repository.retrieve_book(401).await.unwrap();
+        assert_eq!(current.collection, "New");
+        assert_eq!(current.file_name, "Relocated.epub");
+    }
+
+    #[tokio::test]
+    async fn publishes_scanner_events_only_after_orphan_reconciliation() {
+        let root = TestDir::new("event-order");
+        let new_path = root.path().join("new.pdf");
+        tokio::fs::write(&new_path, b"book").await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(8);
+        let repository: Repository =
+            Arc::new(SqlRepository::new(":memory:", Some(sender.clone())).await.unwrap());
+        let mut orphan = BookDetails::new(
+            "missing.epub".to_string(),
+            "Missing".to_string(),
+            &root.path().join("Missing/missing.epub"),
+            BookFormat::Epub,
+        );
+        orphan.checksum = 402;
+        orphan.state = BookState::Ready;
+        repository.save_book(&orphan).await.unwrap();
+        receiver.try_recv().unwrap();
+        let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let checker = BookCheck::new_with_root(storer, repository, sender, root.path());
+
+        checker.check_book_information().await.unwrap();
+
+        let LocalMessage::Book(deleted) = receiver.try_recv().expect("delete event first") else {
+            panic!("orphan reconciliation must happen before scanner publication");
+        };
+        assert_eq!(deleted.checksum, "402");
+        let LocalMessage::Media(MediaEvent::MediaAvailable(available)) =
+            receiver.try_recv().expect("media event second")
+        else {
+            panic!("expected scanner media event after reconciliation");
+        };
+        assert_eq!(available.full_path, new_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_collection_after_valid_book_fails_without_delete_or_publication() {
+        let root = TestDir::new("invalid-collection");
+        tokio::fs::create_dir_all(root.path().join("a-good")).await.unwrap();
+        tokio::fs::write(root.path().join("a-good/new.pdf"), b"book")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(root.path().join("z:invalid"))
+            .await
+            .unwrap();
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let mut orphan = BookDetails::new(
+            "missing.pdf".to_string(),
+            "missing".to_string(),
+            &root.path().join("missing/missing.pdf"),
+            BookFormat::Pdf,
+        );
+        orphan.checksum = 403;
+        orphan.state = BookState::Ready;
+        repository.save_book(&orphan).await.unwrap();
+        let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let (sender, mut receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
+
+        let error = checker.check_book_information().await.unwrap_err();
+
+        assert!(error.to_string().contains("portable path"));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(repository.retrieve_book(403).await.unwrap().file_name, "missing.pdf");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skips_external_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new("external-symlink-root");
+        let outside = TestDir::new("external-symlink-target");
+        let outside_book = outside.path().join("outside.pdf");
+        tokio::fs::write(&outside_book, b"outside").await.unwrap();
+        symlink(outside.path(), root.path().join("linked-outside")).unwrap();
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let (sender, mut receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository, sender, root.path());
+
+        timeout(Duration::from_secs(1), checker.check_book_information())
+            .await
+            .expect("scan should complete")
+            .unwrap();
+
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skips_cyclic_directory_symlink_and_completes() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new("cyclic-symlink");
+        let nested = root.path().join("nested");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        symlink(root.path(), nested.join("cycle")).unwrap();
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
+        let (sender, mut receiver) = mpsc::channel(8);
+        let checker = BookCheck::new_with_root(storer, repository, sender, root.path());
+
+        timeout(Duration::from_secs(1), checker.check_book_information())
+            .await
+            .expect("cyclic symlink must not recurse forever")
+            .unwrap();
+
+        assert!(receiver.try_recv().is_err());
     }
 }

@@ -1025,6 +1025,11 @@ impl Filer for FileStoreObject {
     }
 }
 
+fn directory_entry_name(name: OsString) -> Result<String> {
+    name.into_string()
+        .map_err(|name| anyhow!("directory entry name is not valid UTF-8: {name:?}"))
+}
+
 #[async_trait]
 impl FileStore for FileSystemStore {
     async fn create_folder(&self, path: &Path) -> Result<()> {
@@ -1049,16 +1054,13 @@ impl FileStore for FileSystemStore {
         }
 
         let mut read_dir = fs::read_dir(path).await?;
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
-            if let Ok(name) = entry.file_name().into_string() {
-                if entry.path().is_dir() {
-                    /*if !_path.is_empty() {
-                        name = format!("{}/{}", _path, name);
-                    }*/
-                    directories.push(name);
-                } else {
-                    files.push(name);
-                }
+        while let Some(entry) = read_dir.next_entry().await? {
+            let name = directory_entry_name(entry.file_name())?;
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                directories.push(name);
+            } else if file_type.is_file() {
+                files.push(name);
             }
         }
 
@@ -2461,6 +2463,44 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_entry_name_rejects_non_utf8_names() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let result = directory_entry_name(OsString::from_vec(vec![b'b', 0xff]));
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_folder_skips_symlinks_to_files_and_directories() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-list-symlinks-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("real.pdf"), b"book").unwrap();
+        std::fs::create_dir(root.join("real-directory")).unwrap();
+        std::fs::write(outside.join("outside.pdf"), b"outside").unwrap();
+        symlink(&outside, root.join("linked-directory")).unwrap();
+        symlink(outside.join("outside.pdf"), root.join("linked-file.pdf")).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+
+        let listing = store.list_folder("").await.unwrap();
+
+        assert_eq!(listing.0, vec!["real-directory"]);
+        assert_eq!(listing.1, vec!["real.pdf"]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]
