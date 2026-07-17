@@ -7,7 +7,6 @@ use crate::domain::{
     },
     traits::{FileStorer, PrivateSnapshot, Repository, StagedFile},
 };
-use lopdf::{decode_text_string, Dictionary, Document};
 use once_cell::sync::Lazy;
 use quick_xml::{
     events::{BytesStart, Event},
@@ -1080,39 +1079,9 @@ pub trait PdfThumbnailRenderer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultPdfThumbnailRenderer;
 
-#[cfg(not(feature = "pdf-thumbnails"))]
 impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
     fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
         Err("PDF thumbnail rendering is disabled".to_string())
-    }
-}
-
-#[cfg(feature = "pdf-thumbnails")]
-impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
-    fn render_thumbnail(&self, pdf_path: &Path) -> Result<image::DynamicImage, String> {
-        use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
-
-        let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-            .or_else(|_| Pdfium::bind_to_system_library())
-            .map_err(|error| format!("could not load Pdfium: {error}"))?;
-        let pdfium = Pdfium::new(bindings);
-        let document = pdfium
-            .load_pdf_from_file(pdf_path, None)
-            .map_err(|error| format!("could not load PDF with Pdfium: {error}"))?;
-        let page = document
-            .pages()
-            .first()
-            .map_err(|error| format!("could not open first PDF page: {error}"))?;
-        let image = page
-            .render_with_config(
-                &PdfRenderConfig::new()
-                    .set_target_width(512)
-                    .set_maximum_height(768),
-            )
-            .map_err(|error| format!("could not render first PDF page: {error}"))?
-            .as_image()
-            .into_rgb8();
-        Ok(image::DynamicImage::ImageRgb8(image))
     }
 }
 
@@ -1132,66 +1101,26 @@ pub fn extract_pdf_metadata(
 pub fn extract_pdf_metadata_with_renderer<R: PdfThumbnailRenderer + ?Sized>(
     pdf_path: &Path,
     thumbnail_dir: &Path,
-    thumbnail_key: &str,
-    renderer: &R,
+    _thumbnail_key: &str,
+    _renderer: &R,
 ) -> Result<BookMetadataExtraction, BookMetadataExtractionError> {
-    let document = Document::load(pdf_path)
+    ensure_default_book_thumbnail(thumbnail_dir)
         .map_err(|error| BookMetadataExtractionError::Pdf(error.to_string()))?;
-    let info = pdf_info_dictionary(&document);
-    let title = info
-        .and_then(|info| pdf_info_text(info, b"Title"))
-        .or_else(|| Some(filename_derived_title(pdf_path)));
-    let authors = info
-        .and_then(|info| pdf_info_text(info, b"Author"))
-        .into_iter()
-        .collect();
-    let description = info.and_then(|info| pdf_info_text(info, b"Subject"));
-    let keywords = info.and_then(|info| pdf_info_text(info, b"Keywords"));
-    let creation_date = info.and_then(|info| pdf_info_text(info, b"CreationDate"));
-    let page_count = i64::try_from(document.get_pages().len()).ok();
-
-    let (thumbnail, warnings) =
-        match render_pdf_thumbnail(renderer, pdf_path, thumbnail_dir, thumbnail_key) {
-            Ok(thumbnail) => (thumbnail, Vec::new()),
-            Err(warning) => default_thumbnail_fallback(pdf_path, thumbnail_dir, warning),
-        };
-
     Ok(BookMetadataExtraction {
-        title,
-        authors,
-        description,
-        page_count,
-        thumbnail,
+        title: Some(filename_derived_title(pdf_path)),
+        authors: Vec::new(),
+        description: None,
+        page_count: None,
+        thumbnail: DEFAULT_BOOK_THUMBNAIL.to_string(),
         metadata: BookMetadata {
             raw: Some(json!({
-                "pdf": {
-                    "keywords": keywords,
-                    "creationDate": creation_date,
-                    "thumbnailWarnings": warnings,
-                }
+                "pdf": { "metadataSkipped": "untrusted PDF parsing disabled" }
             })),
-            extraction_error: None,
+            ..BookMetadata::default()
         },
-        warnings,
-        ..Default::default()
+        warnings: vec!["PDF metadata parsing is disabled for untrusted input".to_string()],
+        ..BookMetadataExtraction::default()
     })
-}
-
-fn pdf_info_dictionary(document: &Document) -> Option<&Dictionary> {
-    document
-        .trailer
-        .get(b"Info")
-        .ok()
-        .and_then(|info| document.dereference(info).ok())
-        .and_then(|(_, info)| info.as_dict().ok())
-}
-
-fn pdf_info_text(info: &Dictionary, key: &[u8]) -> Option<String> {
-    info.get(key)
-        .ok()
-        .and_then(|value| decode_text_string(value).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn filename_derived_title(pdf_path: &Path) -> String {
@@ -1200,23 +1129,6 @@ fn filename_derived_title(pdf_path: &Path) -> String {
         .unwrap_or_else(|| pdf_path.as_os_str())
         .to_string_lossy()
         .replace(['.', '_'], " ")
-}
-
-fn render_pdf_thumbnail<R: PdfThumbnailRenderer + ?Sized>(
-    renderer: &R,
-    pdf_path: &Path,
-    thumbnail_dir: &Path,
-    thumbnail_key: &str,
-) -> Result<String, String> {
-    let thumbnail = thumbnail_filename(thumbnail_key)?;
-    fs::create_dir_all(thumbnail_dir)
-        .map_err(|error| format!("could not create PDF thumbnail directory: {error}"))?;
-    let thumbnail_path = thumbnail_dir.join(&thumbnail);
-    let image = renderer
-        .render_thumbnail(pdf_path)
-        .map_err(|error| format!("could not render PDF thumbnail: {error}"))?;
-    write_jpeg_atomically(&thumbnail_path, &image)?;
-    Ok(thumbnail)
 }
 
 pub fn extract_epub_metadata(
@@ -2230,7 +2142,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use base64::Engine as _;
-    use lopdf::{dictionary, text_string, Document, Object};
     use std::{
         fs::{self, File},
         io::Write,
@@ -2311,226 +2222,101 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    struct FailingPdfRenderer;
+    struct CountingRenderer(AtomicUsize);
 
-    impl PdfThumbnailRenderer for FailingPdfRenderer {
+    impl PdfThumbnailRenderer for CountingRenderer {
         fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
-            Err("test renderer unavailable".to_string())
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("renderer must not run".to_string())
         }
     }
 
-    struct WritingPdfRenderer;
-
-    impl PdfThumbnailRenderer for WritingPdfRenderer {
-        fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
-            Ok(image::DynamicImage::ImageRgb8(
-                image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3])),
-            ))
-        }
-    }
-
-    fn write_pdf(path: &Path, info: Option<lopdf::Dictionary>, page_count: usize) {
-        let mut document = Document::with_version("1.7");
-        let pages_id = document.new_object_id();
-        let page_ids = (0..page_count)
-            .map(|_| {
-                document.add_object(dictionary! {
-                    "Type" => "Page",
-                    "Parent" => pages_id,
-                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
-                })
-            })
-            .collect::<Vec<_>>();
-        document.objects.insert(
-            pages_id,
-            Object::Dictionary(dictionary! {
-                "Type" => "Pages",
-                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
-                "Count" => page_count as i64,
-            }),
-        );
-        let catalog_id = document.add_object(dictionary! {
-            "Type" => "Catalog",
-            "Pages" => pages_id,
-        });
-        document.trailer.set("Root", catalog_id);
-        if let Some(info) = info {
-            let info_id = document.add_object(info);
-            document.trailer.set("Info", info_id);
-        }
-        document.save(path).unwrap();
+    fn write_untrusted_pdf(path: &Path, marker: &[u8]) {
+        fs::write(path, marker).unwrap();
     }
 
     #[test]
-    fn extracts_pdf_info_metadata_and_page_count_without_pdfium() {
+    fn invalid_pdf_uses_filename_and_default_cover_without_parsing_or_rendering() {
+        let temp = TestDir::new();
+        let pdf_path = temp.path().join("Untrusted Manual.pdf");
+        fs::write(&pdf_path, b"not a PDF and deliberately unparseable").unwrap();
+        let covers = temp.path().join("covers");
+        let renderer = CountingRenderer(AtomicUsize::new(0));
+
+        let result = extract_pdf_metadata_with_renderer(&pdf_path, &covers, "unsafe", &renderer)
+            .expect("safe PDF fallback should not parse input bytes");
+
+        assert_eq!(result.title.as_deref(), Some("Untrusted Manual"));
+        assert!(result.authors.is_empty());
+        assert_eq!(result.page_count, None);
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
+        assert_eq!(renderer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
+            crate::domain::models::default_book_thumbnail_bytes()
+        );
+    }
+
+    #[test]
+    fn pdf_metadata_bytes_are_skipped_in_favor_of_safe_fallback() {
         let temp = TestDir::new();
         let pdf_path = temp.path().join("metadata.pdf");
-        write_pdf(
+        write_untrusted_pdf(
             &pdf_path,
-            Some(dictionary! {
-                "Title" => text_string("The PDF Title"),
-                "Author" => text_string("Ada Author"),
-                "Subject" => text_string("A useful PDF"),
-                "Keywords" => text_string("rust, books"),
-                "CreationDate" => text_string("D:20260714091500+02'00'"),
-            }),
-            2,
+            b"%PDF-1.7 embedded Title=The PDF Title Author=Ada Author Pages=2",
         );
+        let covers = temp.path().join("covers");
+        let renderer = CountingRenderer(AtomicUsize::new(0));
 
         let result = extract_pdf_metadata_with_renderer(
             &pdf_path,
-            &temp.path().join("covers"),
+            &covers,
             "pdf-42",
-            &FailingPdfRenderer,
+            &renderer,
         )
-        .expect("valid PDF metadata should extract without Pdfium");
+        .expect("PDF bytes must not be parsed");
 
-        assert_eq!(result.title.as_deref(), Some("The PDF Title"));
-        assert_eq!(result.authors, ["Ada Author"]);
-        assert_eq!(result.description.as_deref(), Some("A useful PDF"));
-        assert_eq!(result.page_count, Some(2));
+        assert_eq!(result.title.as_deref(), Some("metadata"));
+        assert!(result.authors.is_empty());
+        assert_eq!(result.description, None);
+        assert_eq!(result.page_count, None);
+        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
         assert_eq!(
-            result.metadata.raw.as_ref().unwrap()["pdf"]["keywords"],
-            "rust, books"
+            result.metadata.raw.as_ref().unwrap()["pdf"]["metadataSkipped"],
+            "untrusted PDF parsing disabled"
         );
         assert_eq!(
-            result.metadata.raw.as_ref().unwrap()["pdf"]["creationDate"],
-            "D:20260714091500+02'00'"
+            result.warnings,
+            ["PDF metadata parsing is disabled for untrusted input"]
+        );
+        assert_eq!(renderer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
+            crate::domain::models::default_book_thumbnail_bytes()
         );
     }
 
     #[test]
-    fn pdf_without_info_uses_filename_title_and_empty_authors() {
+    fn pdf_fallback_uses_filename_title_and_empty_authors() {
         let temp = TestDir::new();
         let pdf_path = temp.path().join("the.hidden_library.pdf");
-        write_pdf(&pdf_path, None, 1);
+        write_untrusted_pdf(&pdf_path, b"opaque PDF bytes");
+        let renderer = CountingRenderer(AtomicUsize::new(0));
 
         let result = extract_pdf_metadata_with_renderer(
             &pdf_path,
             &temp.path().join("covers"),
             "pdf-fallback",
-            &FailingPdfRenderer,
+            &renderer,
         )
         .unwrap();
 
         assert_eq!(result.title.as_deref(), Some("the hidden library"));
         assert!(result.authors.is_empty());
         assert_eq!(result.description, None);
-        assert_eq!(result.page_count, Some(1));
-    }
-
-    #[test]
-    fn pdf_renderer_failure_materializes_and_assigns_default_thumbnail() {
-        let temp = TestDir::new();
-        let pdf_path = temp.path().join("book.pdf");
-        let covers = temp.path().join("covers");
-        write_pdf(&pdf_path, None, 1);
-
-        let result = extract_pdf_metadata_with_renderer(
-            &pdf_path,
-            &covers,
-            "renderer-failure",
-            &FailingPdfRenderer,
-        )
-        .unwrap();
-
+        assert_eq!(result.page_count, None);
         assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
-        assert_eq!(
-            fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
-            crate::domain::models::default_book_thumbnail_bytes()
-        );
-        assert!(result
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("test renderer unavailable")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn pdf_thumbnail_generation_does_not_follow_preexisting_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TestDir::new();
-        let pdf_path = temp.path().join("book.pdf");
-        let covers = temp.path().join("covers");
-        let target = temp.path().join("target.jpg");
-        fs::create_dir_all(&covers).unwrap();
-        fs::write(&target, b"preserve target bytes").unwrap();
-        symlink(&target, covers.join("pdf-symlink.jpg")).unwrap();
-        write_pdf(&pdf_path, None, 1);
-
-        let result = extract_pdf_metadata_with_renderer(
-            &pdf_path,
-            &covers,
-            "pdf-symlink",
-            &WritingPdfRenderer,
-        )
-        .unwrap();
-
-        assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
-        assert_eq!(fs::read(&target).unwrap(), b"preserve target bytes");
-        assert!(covers
-            .join("pdf-symlink.jpg")
-            .symlink_metadata()
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(fs::read_dir(&covers).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".tmp")
-        }));
-    }
-
-    #[test]
-    fn pdf_thumbnail_generation_preserves_preexisting_regular_file_bytes() {
-        let temp = TestDir::new();
-        let pdf_path = temp.path().join("book.pdf");
-        let covers = temp.path().join("covers");
-        fs::create_dir_all(&covers).unwrap();
-        let existing = covers.join("pdf-existing.jpg");
-        fs::write(&existing, b"preexisting PDF thumbnail").unwrap();
-        write_pdf(&pdf_path, None, 1);
-
-        let result = extract_pdf_metadata_with_renderer(
-            &pdf_path,
-            &covers,
-            "pdf-existing",
-            &WritingPdfRenderer,
-        )
-        .unwrap();
-
-        assert_eq!(result.thumbnail, "pdf-existing.jpg");
-        assert_eq!(fs::read(existing).unwrap(), b"preexisting PDF thumbnail");
-        assert!(fs::read_dir(&covers).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".tmp")
-        }));
-    }
-
-    #[test]
-    fn pdf_unsafe_thumbnail_key_uses_format_neutral_warning() {
-        let temp = TestDir::new();
-        let pdf_path = temp.path().join("book.pdf");
-        write_pdf(&pdf_path, None, 1);
-
-        let result = extract_pdf_metadata_with_renderer(
-            &pdf_path,
-            &temp.path().join("covers"),
-            "../unsafe",
-            &FailingPdfRenderer,
-        )
-        .unwrap();
-
-        assert!(result
-            .warnings
-            .iter()
-            .any(|warning| warning == "book thumbnail key is empty or unsafe"));
+        assert_eq!(renderer.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -4303,12 +4089,8 @@ mod tests {
         fs::create_dir_all(&second_dir).unwrap();
         let first = first_dir.join("shared.pdf");
         let second = second_dir.join("shared.pdf");
-        write_pdf(&first, Some(dictionary! { "Title" => text_string("First") }), 1);
-        write_pdf(
-            &second,
-            Some(dictionary! { "Title" => text_string("Second") }),
-            2,
-        );
+        write_untrusted_pdf(&first, b"first PDF bytes");
+        write_untrusted_pdf(&second, b"second PDF bytes");
         let (storer, repository) = ingestion_dependencies(&book_root).await;
 
         let (first_result, second_result) = tokio::join!(
@@ -4357,11 +4139,7 @@ mod tests {
         let thumbnail_root = temp.path().join("book-thumbnails");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("raced.pdf");
-        write_pdf(
-            &source,
-            Some(dictionary! { "Title" => text_string("Incoming") }),
-            1,
-        );
+        write_untrusted_pdf(&source, b"incoming PDF bytes");
         let original_source = fs::read(&source).unwrap();
         let (inner, repository) = ingestion_dependencies(&book_root).await;
         let storer: FileStorer = Arc::new(DestinationRaceStore { inner });
@@ -4394,16 +4172,8 @@ mod tests {
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("identity.pdf");
         let replacement = source_dir.join("replacement.pdf");
-        write_pdf(
-            &source,
-            Some(dictionary! { "Title" => text_string("Original Identity") }),
-            1,
-        );
-        write_pdf(
-            &replacement,
-            Some(dictionary! { "Title" => text_string("Replacement Identity") }),
-            2,
-        );
+        write_untrusted_pdf(&source, b"original identity bytes");
+        write_untrusted_pdf(&replacement, b"replacement identity");
         let original_len = fs::metadata(&source).unwrap().len();
         let replacement_len = fs::metadata(&replacement).unwrap().len();
         let target_len = original_len.max(replacement_len);
@@ -4437,8 +4207,8 @@ mod tests {
         .unwrap();
 
         let destination = book_root.join("Identity/identity.pdf");
-        assert_eq!(details.title, "Replacement Identity");
-        assert_eq!(details.page_count, Some(2));
+        assert_eq!(details.title, "identity");
+        assert_eq!(details.page_count, None);
         assert_eq!(details.checksum, expected_checksum);
         assert_eq!(fs::read(&destination).unwrap(), replacement_bytes);
         assert_eq!(
@@ -4459,16 +4229,8 @@ mod tests {
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("immutable.pdf");
         let replacement = source_dir.join("replacement.pdf");
-        write_pdf(
-            &source,
-            Some(dictionary! { "Title" => text_string("Snapshot Identity") }),
-            1,
-        );
-        write_pdf(
-            &replacement,
-            Some(dictionary! { "Title" => text_string("Late Replacement") }),
-            2,
-        );
+        write_untrusted_pdf(&source, b"snapshot identity bytes");
+        write_untrusted_pdf(&replacement, b"late replacement bytes");
         let target_len = fs::metadata(&source)
             .unwrap()
             .len()
@@ -4511,8 +4273,8 @@ mod tests {
 
         let destination = book_root.join("Immutable/immutable.pdf");
         assert_eq!(store.snapshot_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(details.title, "Snapshot Identity");
-        assert_eq!(details.page_count, Some(1));
+        assert_eq!(details.title, "immutable");
+        assert_eq!(details.page_count, None);
         assert_eq!(details.checksum, expected_checksum);
         assert_eq!(fs::read(&destination).unwrap(), original_bytes);
         assert_eq!(repository.retrieve_book(details.checksum).await.unwrap().title, details.title);
@@ -4718,11 +4480,7 @@ mod tests {
         let thumbnail_root = temp.path().join("book-thumbnails");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("growing.pdf");
-        write_pdf(
-            &source,
-            Some(dictionary! { "Title" => text_string("Eventually Stable") }),
-            1,
-        );
+        write_untrusted_pdf(&source, b"eventually stable PDF bytes");
         let mut writer = std::fs::OpenOptions::new().append(true).open(&source).unwrap();
         let mutation = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -4745,7 +4503,7 @@ mod tests {
         mutation.await.unwrap();
 
         let destination = book_root.join("Retry/growing.pdf");
-        assert_eq!(details.title, "Eventually Stable");
+        assert_eq!(details.title, "growing");
         assert!(destination.exists());
         assert_eq!(
             super::super::video_metadata::calculate_checksum(&destination)
@@ -5146,7 +4904,7 @@ mod tests {
         let source = temp.path().join("cancelled.pdf");
         let book_root = temp.path().join("books");
         let thumbnail_root = temp.path().join("book-thumbnails");
-        write_pdf(&source, None, 1);
+        write_untrusted_pdf(&source, b"cancelled PDF bytes");
         let original = fs::read(&source).unwrap();
         let (storer, repository) = ingestion_dependencies(&book_root).await;
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -5175,7 +4933,7 @@ mod tests {
         let source = temp.path().join("stage-blocked.pdf");
         let book_root = temp.path().join("books");
         let thumbnail_root = temp.path().join("book-thumbnails");
-        write_pdf(&source, None, 1);
+        write_untrusted_pdf(&source, b"stage-blocked PDF bytes");
         let original = fs::read(&source).unwrap();
         let (inner, repository) = ingestion_dependencies(&book_root).await;
         let store = Arc::new(BlockingPhaseStore {
@@ -5378,11 +5136,7 @@ mod tests {
         let source = temp.path().join("publication-blocked.pdf");
         let book_root = temp.path().join("books");
         let thumbnail_root = temp.path().join("book-thumbnails");
-        write_pdf(
-            &source,
-            Some(dictionary! { "Title" => text_string("Committed During Shutdown") }),
-            1,
-        );
+        write_untrusted_pdf(&source, b"committed during shutdown bytes");
         let (inner, repository) = ingestion_dependencies(&book_root).await;
         let store = Arc::new(BlockingPhaseStore {
             inner,
@@ -5416,7 +5170,7 @@ mod tests {
         assert!(book_root.join("Committed/publication-blocked.pdf").exists());
         assert_eq!(
             repository.retrieve_book(details.checksum).await.unwrap().title,
-            "Committed During Shutdown"
+            "publication-blocked"
         );
     }
 
@@ -5426,7 +5180,7 @@ mod tests {
         let source = temp.path().join("move-failure.pdf");
         let book_root = temp.path().join("books");
         let thumbnail_root = temp.path().join("book-thumbnails");
-        write_pdf(&source, None, 1);
+        write_untrusted_pdf(&source, b"move-failure PDF bytes");
         let inner_storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
         let storer: FileStorer = Arc::new(FailingRenameStore {
             inner: inner_storer,
@@ -5459,7 +5213,7 @@ mod tests {
         let source = temp.path().join("save-failure.pdf");
         let book_root = temp.path().join("books");
         let thumbnail_root = temp.path().join("book-thumbnails");
-        write_pdf(&source, None, 1);
+        write_untrusted_pdf(&source, b"save-failure PDF bytes");
         let storer: FileStorer = Arc::new(FileSystemStore::new(book_root.to_str().unwrap()));
         let (inner, mut receiver) = repository_with_book_listener().await;
         let repository: Repository = Arc::new(FailingSaveRepository {
@@ -5703,20 +5457,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingests_pdf_metadata_moves_file_and_saves_record() {
+    async fn ingests_pdf_with_safe_fallback_moves_file_and_saves_record() {
         let temp = TestDir::new();
         let source_dir = temp.path().join("downloads");
         let book_root = temp.path().join("books");
         let thumbnail_root = temp.path().join("book-thumbnails");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("manual.pdf");
-        write_pdf(
+        write_untrusted_pdf(
             &source,
-            Some(dictionary! {
-                "Title" => text_string("PDF Manual"),
-                "Author" => text_string("Pat Writer"),
-            }),
-            3,
+            b"%PDF-1.7 embedded Title=PDF Manual Author=Pat Writer Pages=3",
         );
         let (storer, repository) = ingestion_dependencies(&book_root).await;
 
@@ -5732,9 +5482,9 @@ mod tests {
         .unwrap()
         .expect("stable PDF should be ingested");
 
-        assert_eq!(details.title, "PDF Manual");
-        assert_eq!(details.authors, ["Pat Writer"]);
-        assert_eq!(details.page_count, Some(3));
+        assert_eq!(details.title, "manual");
+        assert!(details.authors.is_empty());
+        assert_eq!(details.page_count, None);
         assert_eq!(details.format, BookFormat::Pdf);
         assert_eq!(details.collection, "downloads");
         assert_eq!(details.state, BookState::Ready);
@@ -5758,7 +5508,7 @@ mod tests {
         let thumbnail_root = temp.path().join("book-thumbnails");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("the_hidden_library.pdf");
-        write_pdf(&source, None, 1);
+        write_untrusted_pdf(&source, b"metadata-free PDF bytes");
         let (storer, repository) = ingestion_dependencies(&book_root).await;
 
         let details = generate_book_metadata_with_roots(
