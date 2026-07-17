@@ -1,3 +1,5 @@
+#![cfg(feature = "webserver")]
+
 mod common;
 
 use crate::common::{get_media_store, get_pirate_search, get_repository, get_task_manager};

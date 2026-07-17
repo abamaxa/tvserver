@@ -189,11 +189,10 @@ impl BookCollectionDetails {
     }
 
     fn parent_collection(collection: &str) -> String {
-        if let Some(pos) = collection.find('/') {
-            collection[..pos].to_string()
-        } else {
-            String::new()
-        }
+        collection
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -382,6 +381,17 @@ mod test {
             updated_on: fixed_time(),
             ..BookDetails::default()
         }
+    }
+
+    #[test]
+    fn collection_details_reports_the_immediate_parent() {
+        let details = BookCollectionDetails::new(
+            "Fiction/Classics/British".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(details.parent_collection, "Fiction/Classics");
     }
 
     #[test]

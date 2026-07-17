@@ -185,7 +185,20 @@ impl BookStore {
             }
         }
 
-        if let Err(delete_error) = self.repo.delete_book(checksum).await {
+        let delete_error = match self
+            .repo
+            .delete_book_if_path_matches(checksum, &book.collection, &book.file_name)
+            .await
+        {
+            Ok(1) => None,
+            Ok(0) => Some(anyhow::anyhow!("book changed while deletion was in progress")),
+            Ok(deleted) => Some(anyhow::anyhow!(
+                "database deletion affected an unexpected number of books: {deleted}"
+            )),
+            Err(error) => Some(error.into()),
+        };
+
+        if let Some(delete_error) = delete_error {
             let thumbnail_restore_error =
                 if let Some((thumbnail_path, staged_path)) = staged_thumbnail.as_ref() {
                     restore_file(&self.thumbnail_store, staged_path, thumbnail_path)
@@ -199,7 +212,7 @@ impl BookStore {
                 .err();
 
             return match (book_restore_error, thumbnail_restore_error) {
-                (None, None) => Err(delete_error.into()),
+                (None, None) => Err(delete_error),
                 (book_restore_error, thumbnail_restore_error) => Err(anyhow::anyhow!(
                     "database deletion failed: {delete_error}; book restore error: {}; thumbnail restore error: {}",
                     book_restore_error
@@ -380,13 +393,17 @@ mod tests {
         },
     };
 
+    use async_trait::async_trait;
     use chrono::Local;
 
     use crate::{
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
-            models::{BookDetails, BookFormat, BookState, DEFAULT_BOOK_THUMBNAIL},
-            traits::{FileStorer, Repository},
+            models::{
+                BookDetails, BookFormat, BookState, CollectionItem, VideoDetails,
+                DEFAULT_BOOK_THUMBNAIL,
+            },
+            traits::{Databaser, FileStorer, Repository},
         },
     };
 
@@ -444,6 +461,114 @@ mod tests {
             created_on: now,
             updated_on: now,
             ..BookDetails::default()
+        }
+    }
+
+    struct RelocatingDeleteRepository {
+        inner: Repository,
+        relocated: BookDetails,
+    }
+
+    impl RelocatingDeleteRepository {
+        async fn relocate(&self) -> Result<(), sqlx::Error> {
+            self.inner.save_book(&self.relocated).await.map(|_| ())
+        }
+    }
+
+    #[async_trait]
+    impl Databaser for RelocatingDeleteRepository {
+        async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error> {
+            self.inner.save_book(details).await
+        }
+
+        async fn list_book_collections(
+            &self,
+            collection: &str,
+        ) -> Result<Vec<String>, sqlx::Error> {
+            self.inner.list_book_collections(collection).await
+        }
+
+        async fn list_books(&self, collection: &str) -> Result<Vec<BookDetails>, sqlx::Error> {
+            self.inner.list_books(collection).await
+        }
+
+        async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error> {
+            self.inner.list_all_books().await
+        }
+
+        async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error> {
+            self.inner.retrieve_book(checksum).await
+        }
+
+        async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error> {
+            self.relocate().await?;
+            self.inner.delete_book(checksum).await
+        }
+
+        async fn delete_book_if_path_matches(
+            &self,
+            checksum: i64,
+            collection: &str,
+            file_name: &str,
+        ) -> Result<u64, sqlx::Error> {
+            self.relocate().await?;
+            self.inner
+                .delete_book_if_path_matches(checksum, collection, file_name)
+                .await
+        }
+
+        async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error> {
+            self.inner.save_video(details).await
+        }
+
+        async fn list_collection(&self, collection: &str) -> Result<Vec<String>, sqlx::Error> {
+            self.inner.list_collection(collection).await
+        }
+
+        async fn list_videos(&self, collection: &str) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_videos(collection).await
+        }
+
+        async fn list_all_series(&self) -> Result<Vec<CollectionItem>, sqlx::Error> {
+            self.inner.list_all_series().await
+        }
+
+        async fn list_series_details(
+            &self,
+            series: &str,
+            season: Option<&str>,
+        ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_series_details(series, season).await
+        }
+
+        async fn retrieve_video(&self, checksum: i64) -> Result<VideoDetails, sqlx::Error> {
+            self.inner.retrieve_video(checksum).await
+        }
+
+        async fn delete_video(&self, checksum: i64) -> Result<u64, sqlx::Error> {
+            self.inner.delete_video(checksum).await
+        }
+
+        async fn update_watched_video(
+            &self,
+            checksum: i64,
+            current_time: f64,
+        ) -> Result<(), sqlx::Error> {
+            self.inner
+                .update_watched_video(checksum, current_time)
+                .await
+        }
+
+        async fn get_history(
+            &self,
+            offset: i32,
+            limit: i32,
+        ) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.get_history(offset, limit).await
+        }
+
+        async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error> {
+            self.inner.list_all_videos().await
         }
     }
 
@@ -744,6 +869,70 @@ mod tests {
             repository.retrieve_book(book.checksum).await,
             Err(sqlx::Error::RowNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_restores_staged_files_when_the_book_is_relocated_concurrently() {
+        let layout = TestLayout::new("delete-concurrent-relocation");
+        let original_path = layout.book_root.join("Fiction/Dune.epub");
+        tokio::fs::create_dir_all(original_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&original_path, b"original book")
+            .await
+            .unwrap();
+        let relocated_path = layout.book_root.join("Classics/Dune.epub");
+        tokio::fs::create_dir_all(relocated_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&relocated_path, b"relocated book")
+            .await
+            .unwrap();
+        let thumbnail_path = layout.thumbnail_root.join("dune-cover.jpg");
+        tokio::fs::write(&thumbnail_path, b"cover").await.unwrap();
+
+        let inner: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let mut original = sample_book(34, "Fiction", "Dune.epub");
+        original.thumbnail = "dune-cover.jpg".to_string();
+        inner.save_book(&original).await.unwrap();
+        let mut relocated = original.clone();
+        relocated.collection = "Classics".to_string();
+        let repository: Repository = Arc::new(RelocatingDeleteRepository {
+            inner: inner.clone(),
+            relocated,
+        });
+        let book_files: FileStorer = Arc::new(FileSystemStore::new(
+            layout
+                .book_root
+                .to_str()
+                .expect("book root should be UTF-8"),
+        ));
+        let thumbnail_files: FileStorer = Arc::new(FileSystemStore::new(
+            layout
+                .thumbnail_root
+                .to_str()
+                .expect("thumbnail root should be UTF-8"),
+        ));
+        let store = BookStore::new_with_roots(
+            book_files,
+            thumbnail_files,
+            repository,
+            &layout.book_root,
+            &layout.thumbnail_root,
+        );
+
+        let result = store.delete(original.checksum).await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read(&original_path).await.unwrap(), b"original book");
+        assert_eq!(tokio::fs::read(&thumbnail_path).await.unwrap(), b"cover");
+        assert_eq!(
+            tokio::fs::read(&relocated_path).await.unwrap(),
+            b"relocated book"
+        );
+        let stored = inner.retrieve_book(original.checksum).await.unwrap();
+        assert_eq!(stored.collection, "Classics");
+        assert_eq!(stored.file_name, "Dune.epub");
     }
 
     #[tokio::test]

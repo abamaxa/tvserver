@@ -7,6 +7,7 @@ mod media_store;
 mod player;
 mod repository;
 mod search;
+#[cfg(feature = "webserver")]
 mod server;
 mod spawner;
 mod task_manager;
@@ -27,6 +28,7 @@ pub use repository::get_repository;
 #[allow(unused_imports)]
 pub use search::{get_pirate_search, get_search_service, get_youtube_search};
 #[allow(unused_imports)]
+#[cfg(feature = "webserver")]
 pub use server::{create_server, create_server_with_book_roots};
 #[allow(unused_imports)]
 pub use spawner::{get_no_spawner, get_spawner};

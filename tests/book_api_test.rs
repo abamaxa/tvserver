@@ -1,3 +1,5 @@
+#![cfg(feature = "webserver")]
+
 mod common;
 
 use std::{
