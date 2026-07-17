@@ -22,7 +22,6 @@ const TELEGRAM_CHAT_ID: &str = "TELEGRAM_CHAT_ID";
 const AUTH_CREDENTIALS: &str = "AUTH_CREDENTIALS";
 //  Defaults
 const DEFAULT_DATABASE_URL: &str = "sqlite::memory:";
-const DEFAULT_MIGRATIONS_DIR: &str = "./migrations";
 const DEFAULT_CLIENT_DIR: &str = "client";
 const DEFAULT_PB_URL: &str = "https://apibay.org";
 const DEFAULT_DELAY_REAPING_TASKS_SECS: i64 = 60;
