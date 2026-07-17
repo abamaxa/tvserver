@@ -1106,6 +1106,16 @@ fn directory_entry_name(name: OsString) -> Result<String> {
         .map_err(|name| anyhow!("directory entry name is not valid UTF-8: {name:?}"))
 }
 
+fn strict_entry_or_skip<T>(entry: io::Result<T>) -> Option<T> {
+    match entry {
+        Ok(entry) => Some(entry),
+        Err(error) => {
+            tracing::warn!("Skipping unreadable strict directory entry: {error}");
+            None
+        }
+    }
+}
+
 #[async_trait]
 impl FileStore for FileSystemStore {
     async fn create_folder(&self, path: &Path) -> Result<()> {
@@ -1174,9 +1184,23 @@ impl FileStore for FileSystemStore {
             let mut directories = Vec::new();
             let mut files = Vec::new();
             for entry in directory.entries()? {
-                let entry = entry?;
-                let name = directory_entry_name(entry.file_name())?;
-                let file_type = entry.file_type()?;
+                let Some(entry) = strict_entry_or_skip(entry) else {
+                    continue;
+                };
+                let name = match directory_entry_name(entry.file_name()) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        tracing::warn!("Skipping strict directory entry with invalid name: {error}");
+                        continue;
+                    }
+                };
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(error) => {
+                        tracing::warn!("Skipping strict directory entry with unreadable type: {error}");
+                        continue;
+                    }
+                };
                 if file_type.is_dir() {
                     directories.push(name);
                 } else if file_type.is_file() {
@@ -2704,6 +2728,45 @@ mod tests {
         let result = directory_entry_name(OsString::from_vec(vec![b'b', 0xff]));
 
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn strict_listing_skips_non_utf8_entry_and_keeps_valid_sibling() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-list-non-utf8-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("valid.pdf"), b"book").unwrap();
+        if let Err(error) = std::fs::write(
+            base.join(OsString::from_vec(vec![b'b', 0xff])),
+            b"odd",
+        ) {
+            // Some Unix filesystems (including the macOS test volume) reject non-UTF-8 names.
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            std::fs::remove_dir_all(base).unwrap();
+            return;
+        }
+        let store = FileSystemStore::new(base.to_str().unwrap());
+
+        let listing = store.list_folder_no_follow("").await.unwrap();
+
+        assert_eq!(listing, (Vec::new(), vec!["valid.pdf".to_string()]));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn strict_listing_skips_one_vanished_entry_error() {
+        let result = strict_entry_or_skip::<cap_std::fs::DirEntry>(Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "entry vanished",
+        )));
+
+        assert!(result.is_none());
     }
 
     #[cfg(unix)]

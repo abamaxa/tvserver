@@ -159,6 +159,10 @@ impl PrivateSnapshot {
     }
 }
 
+fn unsupported_no_follow_listing(path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    anyhow::bail!("strict no-follow listing is not supported for {path}")
+}
+
 /// An interface to a collection of files.
 ///
 /// Unlike the MediaStorer interface, this is a low level interface implemented
@@ -172,7 +176,7 @@ pub trait FileStore: Sync + Send {
         &self,
         path: &str,
     ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        self.list_folder(path).await
+        unsupported_no_follow_listing(path)
     }
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
@@ -213,6 +217,20 @@ pub trait FileStore: Sync + Send {
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
     async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_follow_listing_default_is_explicitly_unsupported() {
+        let error = unsupported_no_follow_listing("Shelf").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("strict no-follow listing is not supported"));
+    }
 }
 
 pub type FileStorer = Arc<dyn FileStore>;
