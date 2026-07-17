@@ -1,10 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    net::SocketAddr,
     path::Path,
 };
 
-use app_lib::domain::messages::{Command, PlayRequest};
+use app_lib::domain::messages::{
+    ClientLogMessage, Command, ConversionRequest, DownloadRequest, PlayRequest, RemoteMessage,
+};
 use roas::validation::{Options as RoasOptions, Validate as RoasValidate};
 use serde_json::Value;
 
@@ -95,6 +98,26 @@ fn schema_accepts(document: &Value, schema: &Value, instance: &Value) -> bool {
         }
     }
 
+    if let (Some(pattern), Some(string)) =
+        (schema.get("pattern").and_then(Value::as_str), instance.as_str())
+    {
+        if !regex::Regex::new(pattern)
+            .expect("OpenAPI patterns must be valid regular expressions")
+            .is_match(string)
+        {
+            return false;
+        }
+    }
+
+    if schema.get("format").and_then(Value::as_str) == Some("socket-address") {
+        let Some(string) = instance.as_str() else {
+            return false;
+        };
+        if string.parse::<SocketAddr>().is_err() {
+            return false;
+        }
+    }
+
     let matches_type = |schema_type: &str| match schema_type {
         "array" => instance.is_array(),
         "boolean" => instance.is_boolean(),
@@ -179,7 +202,12 @@ fn valid_response_code(code: &str) -> bool {
             || (bytes[1] == b'X' && bytes[2] == b'X'))
 }
 
-fn validate_content_schemas(errors: &mut Vec<String>, context: &str, content: &Value) {
+fn validate_content_schemas(
+    errors: &mut Vec<String>,
+    context: &str,
+    content: &Value,
+    allow_empty_media_type_object: bool,
+) {
     let Some(content) = content.as_object() else {
         errors.push(format!("{context} content must be an object"));
         return;
@@ -188,10 +216,28 @@ fn validate_content_schemas(errors: &mut Vec<String>, context: &str, content: &V
         errors.push(format!("{context} content must not be empty"));
     }
     for (media_type, media) in content {
-        if media.get("schema").and_then(Value::as_object).is_none() {
+        if !media.is_object() {
+            errors.push(format!(
+                "{context} media type {media_type} must be a Media Type Object"
+            ));
+        } else if media.get("schema").and_then(Value::as_object).is_none()
+            && !(allow_empty_media_type_object
+                && media.as_object().is_some_and(serde_json::Map::is_empty))
+        {
             errors.push(format!("{context} media type {media_type} must define a schema"));
         }
     }
+}
+
+fn allows_empty_response_media_type(path: &str, method: &str, status: &str) -> bool {
+    matches!(
+        (path, method, status),
+        ("/api/books/download/{path}", "get", "200")
+            | ("/api/book-thumbnails/{file}", "get", "200")
+            | ("/api/stream/{path}", "get", "200" | "206" | "416")
+            | ("/api/stream-audio/{audio_index}/{path}", "get", "200")
+            | ("/api/thumbnails/{path}", "get", "200" | "206" | "416")
+    )
 }
 
 fn semantic_contract_errors(document: &Value) -> Vec<String> {
@@ -294,6 +340,7 @@ fn semantic_contract_errors(document: &Value) -> Vec<String> {
                         &mut errors,
                         &format!("{context} request body"),
                         content,
+                        false,
                     ),
                     None => errors.push(format!("{context} request body must define content")),
                 }
@@ -323,6 +370,7 @@ fn semantic_contract_errors(document: &Value) -> Vec<String> {
                         &mut errors,
                         &format!("{context} response {code}"),
                         content,
+                        allows_empty_response_media_type(path, method, code),
                     );
                 }
             }
@@ -623,6 +671,75 @@ fn remote_request_schemas_accept_runtime_valid_serde_payloads() {
             }
         }),
         serde_json::json!({"message": {"SetSubtitleTrack": {"trackId": null}}}),
+        serde_json::json!({"message": {"Command": {"command": "stop", "ignored": true}}}),
+        serde_json::json!({"message": {"Seek": {"interval": 30, "ignored": true}}}),
+        serde_json::json!({"message": {"SetAudioTrack": {"trackId": 1, "ignored": true}}}),
+        serde_json::json!({"message": {"SetPlaybackRate": {"rate": 1.25, "ignored": true}}}),
+        serde_json::json!({
+            "message": {
+                "State": {
+                    "collection": "Series",
+                    "video": "episode.webm",
+                    "videoId": "42",
+                    "paused": false,
+                    "ignored": true
+                }
+            }
+        }),
+        serde_json::json!({
+            "message": {
+                "Play": {
+                    "videoId": "42",
+                    "url": "/api/stream/episode.webm",
+                    "collection": "",
+                    "video": "episode.webm",
+                    "width": 1920,
+                    "height": 1080,
+                    "aspectWidth": 16,
+                    "aspectHeight": 9,
+                    "ignored": true
+                }
+            }
+        }),
+        serde_json::json!({"message": {"SetSubtitleTrack": {"ignored": true}}}),
+        serde_json::json!({
+            "message": {
+                "CurrentTasks": [{
+                    "key": "task-1",
+                    "name": "download",
+                    "displayName": "Download",
+                    "finished": false,
+                    "eta": 10,
+                    "percentDone": 50.0,
+                    "sizeDetails": "1 MB",
+                    "rateDetails": "1 MB/s",
+                    "processDetails": "running",
+                    "errorString": "",
+                    "taskType": "Transmission",
+                    "ignored": true
+                }]
+            }
+        }),
+        serde_json::json!({
+            "message": {
+                "Book": [{
+                    "type": "BookEventAdded",
+                    "book": {"ignoredBookField": true},
+                    "checksum": "42",
+                    "ignoredEventField": true
+                }]
+            }
+        }),
+        serde_json::json!({
+            "message": {
+                "Video": [{
+                    "type": "VideoEventAdded",
+                    "video": {"ignoredVideoField": true},
+                    "checksum": "42",
+                    "ignoredEventField": true
+                }]
+            }
+        }),
     ];
     for fixture in command_fixtures {
         serde_json::from_value::<Command>(fixture.clone())
@@ -666,6 +783,74 @@ fn remote_request_schemas_accept_runtime_valid_serde_payloads() {
         &schemas["PlayRequest"],
         &play_request_with_null_metadata
     ));
+
+    for (schema_name, fixture) in [
+        (
+            "DownloadRequest",
+            serde_json::json!({
+                "name": "Example",
+                "link": "magnet:?xt=urn:example",
+                "engine": "Torrent",
+                "series": null,
+                "ignored": true
+            }),
+        ),
+        (
+            "ClientLogMessage",
+            serde_json::json!({"level": "info", "messages": ["hello"], "ignored": true}),
+        ),
+        (
+            "ConversionRequest",
+            serde_json::json!({"name": "mobile", "ignored": true}),
+        ),
+    ] {
+        match schema_name {
+            "DownloadRequest" => {
+                serde_json::from_value::<DownloadRequest>(fixture.clone()).unwrap();
+            }
+            "ClientLogMessage" => {
+                serde_json::from_value::<ClientLogMessage>(fixture.clone()).unwrap();
+            }
+            "ConversionRequest" => {
+                serde_json::from_value::<ConversionRequest>(fixture.clone()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            schema_accepts(&document, &schemas[schema_name], &fixture),
+            "{schema_name} schema rejected a runtime-valid unknown property"
+        );
+    }
+
+    let pong_schema = schemas["RemoteMessage"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|variant| variant.pointer("/properties/Pong"))
+        .expect("RemoteMessage must define its Pong payload");
+    assert_eq!(pong_schema["format"], "socket-address");
+    for valid_address in
+        ["127.0.0.1:0", "255.255.255.255:65535", "[::1]:8080", "[2001:db8::1]:65535"]
+    {
+        let valid_pong = serde_json::json!({"Pong": valid_address});
+        serde_json::from_value::<RemoteMessage>(valid_pong.clone())
+            .expect("runtime accepts a valid socket address");
+        assert!(
+            schema_accepts(&document, &schemas["RemoteMessageRequest"], &valid_pong),
+            "Pong input schema must accept valid SocketAddr {valid_address}"
+        );
+    }
+
+    for invalid_address in
+        ["not-an-address", "999.999.999.999:8080", "127.0.0.1:99999", "[::::]:8080"]
+    {
+        let invalid_pong = serde_json::json!({"Pong": invalid_address});
+        assert!(serde_json::from_value::<RemoteMessage>(invalid_pong.clone()).is_err());
+        assert!(
+            !schema_accepts(&document, &schemas["RemoteMessageRequest"], &invalid_pong),
+            "Pong input schema must reject invalid SocketAddr {invalid_address}"
+        );
+    }
 }
 
 #[test]
@@ -822,19 +1007,114 @@ fn security_contract_matches_restrict_access_router_layering() {
 }
 
 #[test]
-fn stream_responses_cover_all_video_content_types() {
+fn raw_file_responses_use_openapi_31_binary_media_types() {
     let document = contract();
-    for status in ["200", "206"] {
-        let content = document["paths"]["/api/stream/{path}"]["get"]["responses"][status]
-            ["content"]
+    for (path, status) in [
+        ("/api/books/download/{path}", "200"),
+        ("/api/book-thumbnails/{file}", "200"),
+        ("/api/stream/{path}", "200"),
+        ("/api/stream/{path}", "206"),
+        ("/api/stream-audio/{audio_index}/{path}", "200"),
+        ("/api/thumbnails/{path}", "200"),
+        ("/api/thumbnails/{path}", "206"),
+        ("/api/stream/{path}", "416"),
+        ("/api/thumbnails/{path}", "416"),
+    ] {
+        let response = resolved(&document, &document["paths"][path]["get"]["responses"][status]);
+        let content = response["content"]
             .as_object()
-            .unwrap();
-        let content_types: BTreeSet<_> = content.keys().map(String::as_str).collect();
+            .unwrap_or_else(|| panic!("{path} response {status} must define content"));
+        for (media_type, media) in content {
+            assert_eq!(
+                media,
+                &serde_json::json!({}),
+                "raw {media_type} response {status} for {path} must use an empty Media Type Object"
+            );
+        }
+    }
+}
+
+#[test]
+fn serve_dir_contract_documents_runtime_responses_and_headers() {
+    let document = contract();
+    for path in ["/api/stream/{path}", "/api/thumbnails/{path}"] {
+        let responses = &document["paths"][path]["get"]["responses"];
+        for status in ["200", "206", "304", "307", "404", "412", "416", "500"] {
+            assert!(
+                responses.get(status).is_some(),
+                "ServeDir route {path} must document status {status}"
+            );
+        }
+
+        for status in ["200", "206"] {
+            let response = resolved(&document, &responses[status]);
+            let content = response["content"].as_object().unwrap();
+            assert_eq!(
+                content,
+                &serde_json::Map::from_iter([("*/*".to_string(), serde_json::json!({}))]),
+                "ServeDir guesses MIME from any served file extension"
+            );
+            for header in ["Accept-Ranges", "Content-Length", "Last-Modified"] {
+                assert!(response["headers"].get(header).is_some());
+            }
+        }
+        assert!(resolved(&document, &responses["206"])["headers"]
+            .get("Content-Range")
+            .is_some());
+        assert!(resolved(&document, &responses["307"])["headers"]
+            .get("Location")
+            .is_some());
+        assert!(resolved(&document, &responses["416"])["headers"]
+            .get("Content-Range")
+            .is_some());
+    }
+}
+
+#[test]
+fn axum_extractor_rejections_are_documented_as_plain_text() {
+    let document = contract();
+    let expected_components = [
+        ("400", "#/components/responses/BadRequestTextResponse"),
+        ("413", "#/components/responses/PayloadTooLargeTextResponse"),
+        ("415", "#/components/responses/UnsupportedMediaTypeTextResponse"),
+        ("422", "#/components/responses/UnprocessableEntityTextResponse"),
+    ];
+
+    for (path, method) in [
+        ("/api/tasks", "post"),
+        ("/api/log", "post"),
+        ("/api/media/{media}", "post"),
+        ("/api/remote/control", "post"),
+        ("/api/remote/play", "post"),
+    ] {
+        for (status, reference) in expected_components {
+            assert_eq!(
+                document["paths"][path][method]["responses"][status]["$ref"], reference,
+                "{method} {path} must document Axum JSON rejection {status}"
+            );
+        }
+    }
+
+    for (path, method) in [
+        ("/api/tasks/{type}/{path}", "delete"),
+        ("/api/media/{media}", "get"),
+        ("/api/media/{media}", "delete"),
+        ("/api/media/{media}", "patch"),
+        ("/api/books/{collection}", "get"),
+        ("/api/books/download/{path}", "get"),
+        ("/api/book-thumbnails/{file}", "get"),
+        ("/api/stream-audio/{audio_index}/{path}", "get"),
+    ] {
         assert_eq!(
-            content_types,
-            BTreeSet::from(["video/*", "application/octet-stream"]),
-            "stream response {status} must cover every ServeDir video MIME plus its fallback"
+            document["paths"][path][method]["responses"]["400"]["$ref"],
+            "#/components/responses/BadRequestTextResponse",
+            "{method} {path} must document Axum path rejection"
         );
+    }
+
+    for (_, reference) in expected_components {
+        let response = resolve_local_reference(&document, reference).unwrap();
+        assert_eq!(response["content"]["text/plain"]["schema"]["type"], "string");
     }
 }
 
@@ -878,6 +1158,10 @@ fn project_semantic_checks_reject_representative_contract_defects() {
         .as_object_mut()
         .unwrap()
         .remove("schema");
+    document["paths"]["/api/media"]["get"]["responses"]["200"]["content"]["application/json"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema");
     let response_schema = document["components"]["schemas"]["Response"].clone();
     document["components"]["schemas"]
         .as_object_mut()
@@ -891,6 +1175,7 @@ fn project_semantic_checks_reject_representative_contract_defects() {
         "response 200 must have a description",
         "invalid response code 099",
         "media type application/json must define a schema",
+        "GET /api/media response 200 media type application/json must define a schema",
         "invalid component key schemas.invalid component key",
     ] {
         assert!(

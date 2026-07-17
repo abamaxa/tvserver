@@ -50,8 +50,16 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /api/tasks/{type}/{path}:
@@ -75,6 +83,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
         '500':
@@ -93,8 +103,16 @@ paths:
       responses:
         '200':
           description: Messages were logged; the response has no body.
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
   /api/media:
     get:
       tags: [Media]
@@ -136,6 +154,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MediaItem'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '404':
           description: Video collection error encoded as a MediaItem Error variant
           content:
@@ -158,6 +178,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
         '500':
@@ -184,9 +206,15 @@ paths:
         '200':
           $ref: '#/components/responses/SuccessResponse'
         '400':
-          description: The wildcard value is not a valid integer checksum.
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
     patch:
@@ -203,6 +231,8 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
         '500':
@@ -246,6 +276,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/BookCollectionDetails'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '500':
           description: Collection-shaped error response with errors populated
           content:
@@ -314,14 +346,10 @@ paths:
                 type: integer
                 minimum: 0
           content:
-            application/pdf:
-              schema:
-                type: string
-                contentEncoding: binary
-            application/epub+zip:
-              schema:
-                type: string
-                contentEncoding: binary
+            application/pdf: {}
+            application/epub+zip: {}
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '404':
           description: Missing, unsupported, or rejected path; the response has no body.
         '401':
@@ -350,10 +378,9 @@ paths:
                 type: integer
                 minimum: 0
           content:
-            image/jpeg:
-              schema:
-                type: string
-                contentEncoding: binary
+            image/jpeg: {}
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '404':
           description: Missing, unsupported, or rejected filename; the response has no body.
         '500':
@@ -386,8 +413,16 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /api/remote/play:
@@ -404,8 +439,16 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
   /api/remote/ws:
@@ -493,29 +536,21 @@ paths:
             type: string
       responses:
         '200':
-          description: Complete video representation; media type depends on the stored file.
-          content:
-            video/*:
-              schema:
-                type: string
-                contentEncoding: binary
-            application/octet-stream:
-              schema:
-                type: string
-                contentEncoding: binary
+          $ref: '#/components/responses/ServeDirOkResponse'
         '206':
-          description: Byte range selected by the static file service.
-          content:
-            video/*:
-              schema:
-                type: string
-                contentEncoding: binary
-            application/octet-stream:
-              schema:
-                type: string
-                contentEncoding: binary
+          $ref: '#/components/responses/ServeDirPartialContentResponse'
+        '304':
+          $ref: '#/components/responses/ServeDirNotModifiedResponse'
+        '307':
+          $ref: '#/components/responses/ServeDirRedirectResponse'
         '404':
           description: File not found
+        '412':
+          $ref: '#/components/responses/ServeDirPreconditionFailedResponse'
+        '416':
+          $ref: '#/components/responses/ServeDirRangeNotSatisfiableResponse'
+        '500':
+          $ref: '#/components/responses/ServeDirInternalErrorResponse'
   /api/stream-audio/{audio_index}/{path}:
     get:
       tags: [Media]
@@ -541,10 +576,9 @@ paths:
         '200':
           description: Remuxed Matroska stream
           content:
-            video/x-matroska:
-              schema:
-                type: string
-                contentEncoding: binary
+            video/x-matroska: {}
+        '400':
+          $ref: '#/components/responses/BadRequestTextResponse'
         '403':
           description: Resolved file is outside the movie directory
           content:
@@ -578,14 +612,21 @@ paths:
             type: string
       responses:
         '200':
-          description: Thumbnail bytes; media type depends on the stored image.
-          content:
-            image/*:
-              schema:
-                type: string
-                contentEncoding: binary
+          $ref: '#/components/responses/ServeDirOkResponse'
+        '206':
+          $ref: '#/components/responses/ServeDirPartialContentResponse'
+        '304':
+          $ref: '#/components/responses/ServeDirNotModifiedResponse'
+        '307':
+          $ref: '#/components/responses/ServeDirRedirectResponse'
         '404':
           description: Thumbnail not found
+        '412':
+          $ref: '#/components/responses/ServeDirPreconditionFailedResponse'
+        '416':
+          $ref: '#/components/responses/ServeDirRangeNotSatisfiableResponse'
+        '500':
+          $ref: '#/components/responses/ServeDirInternalErrorResponse'
 components:
   securitySchemes:
     HttpBasicAuth:
@@ -645,6 +686,92 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/SearchResults'
+    BadRequestTextResponse:
+      description: Axum could not deserialize a path value or the JSON syntax was malformed.
+      content:
+        text/plain:
+          schema:
+            type: string
+    PayloadTooLargeTextResponse:
+      description: The JSON body exceeds Axum's default two-megabyte request-body limit.
+      content:
+        text/plain:
+          schema:
+            type: string
+    UnsupportedMediaTypeTextResponse:
+      description: The request Content-Type is missing or is not JSON.
+      content:
+        text/plain:
+          schema:
+            type: string
+    UnprocessableEntityTextResponse:
+      description: The JSON is valid but does not deserialize into the request type.
+      content:
+        text/plain:
+          schema:
+            type: string
+    ServeDirOkResponse:
+      description: Complete file representation; Content-Type is guessed from the stored file extension.
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            const: bytes
+        Last-Modified:
+          schema:
+            type: string
+        Content-Length:
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        '*/*': {}
+    ServeDirPartialContentResponse:
+      description: One satisfiable byte range selected by the static file service.
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            const: bytes
+        Last-Modified:
+          schema:
+            type: string
+        Content-Length:
+          schema:
+            type: integer
+            minimum: 0
+        Content-Range:
+          schema:
+            type: string
+      content:
+        '*/*': {}
+    ServeDirNotModifiedResponse:
+      description: Conditional request matched and the file was not modified.
+    ServeDirRedirectResponse:
+      description: Directory path redirected to its trailing-slash form.
+      headers:
+        Location:
+          schema:
+            type: string
+    ServeDirPreconditionFailedResponse:
+      description: A conditional request precondition failed.
+    ServeDirRangeNotSatisfiableResponse:
+      description: Requested range is invalid, unsatisfiable, or contains multiple ranges.
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            const: bytes
+        Last-Modified:
+          schema:
+            type: string
+        Content-Range:
+          schema:
+            type: string
+      content:
+        '*/*': {}
+    ServeDirInternalErrorResponse:
+      description: Static-service redirect construction or file access failed.
   schemas:
     Response:
       type: object
@@ -677,7 +804,7 @@ components:
       enum: [Transmission, AsyncProcess]
     DownloadRequest:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [name, link, engine]
       properties:
         name:
@@ -691,6 +818,47 @@ components:
     TaskState:
       type: object
       additionalProperties: false
+      required:
+        - key
+        - name
+        - displayName
+        - finished
+        - eta
+        - percentDone
+        - sizeDetails
+        - rateDetails
+        - processDetails
+        - errorString
+        - taskType
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+        displayName:
+          type: string
+        finished:
+          type: boolean
+        eta:
+          type: integer
+          format: int64
+        percentDone:
+          type: number
+          format: float
+        sizeDetails:
+          type: string
+        rateDetails:
+          type: string
+        processDetails:
+          type: string
+        errorString:
+          type: string
+        taskType:
+          $ref: '#/components/schemas/TaskType'
+    TaskStateRequest:
+      type: object
+      additionalProperties: true
+      description: Inbound task state; all serialized fields are required and unknown fields are ignored by Serde.
       required:
         - key
         - name
@@ -787,7 +955,7 @@ components:
           type: [string, 'null']
     ConversionRequest:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [name]
       properties:
         name:
@@ -1113,6 +1281,15 @@ components:
           description: Raw or semi-structured extractor output.
         extractionError:
           type: string
+    BookMetadataRequest:
+      type: object
+      additionalProperties: true
+      description: Inbound extractor metadata; optional values may be omitted or null and unknown fields are ignored.
+      properties:
+        raw:
+          description: Raw or semi-structured extractor output.
+        extractionError:
+          type: [string, 'null']
     BookCollectionItem:
       type: object
       additionalProperties: false
@@ -1206,9 +1383,56 @@ components:
         url:
           type: string
           description: Webserver-relative URL below /api/books/download/.
+    BookDetailsRequest:
+      type: object
+      additionalProperties: true
+      description: |
+        Inbound BookDetails shape. The runtime uses #[serde(default)], so every
+        field may be omitted and unknown fields are ignored.
+      properties:
+        fileName:
+          type: string
+        collection:
+          type: string
+        title:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        description:
+          type: [string, 'null']
+        publisher:
+          type: [string, 'null']
+        publishedDate:
+          type: [string, 'null']
+        language:
+          type: [string, 'null']
+        isbn:
+          type: [string, 'null']
+        format:
+          $ref: '#/components/schemas/BookFormat'
+        pageCount:
+          type: [integer, 'null']
+          format: int64
+        thumbnail:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/BookMetadataRequest'
+        checksum:
+          type: string
+          pattern: '^-?[0-9]+$'
+        searchPhrase:
+          type: [string, 'null']
+        state:
+          $ref: '#/components/schemas/BookState'
+        createdOn:
+          type: string
+        updatedOn:
+          type: string
     ClientLogMessage:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [level, messages]
       properties:
         level:
@@ -1252,7 +1476,7 @@ components:
           format: int32
     RemotePlayerStateRequest:
       type: object
-      additionalProperties: false
+      additionalProperties: true
       required: [collection, video, videoId, paused]
       properties:
         currentTime:
@@ -1290,6 +1514,20 @@ components:
           $ref: '#/components/schemas/BookDetails'
         checksum:
           type: string
+    BookEventRequest:
+      type: object
+      additionalProperties: true
+      required: [type, checksum]
+      properties:
+        type:
+          type: string
+          enum: [BookEventAdded, BookEventChanged, BookEventDeleted]
+        book:
+          oneOf:
+            - $ref: '#/components/schemas/BookDetailsRequest'
+            - type: 'null'
+        checksum:
+          type: string
     VideoEvent:
       type: object
       additionalProperties: false
@@ -1300,6 +1538,20 @@ components:
           enum: [VideoEventAdded, VideoEventChanged, VideoEventDeleted]
         video:
           $ref: '#/components/schemas/VideoDetails'
+        checksum:
+          type: string
+    VideoEventRequest:
+      type: object
+      additionalProperties: true
+      required: [type, checksum]
+      properties:
+        type:
+          type: string
+          enum: [VideoEventAdded, VideoEventChanged, VideoEventDeleted]
+        video:
+          oneOf:
+            - $ref: '#/components/schemas/VideoDetailsRequest'
+            - type: 'null'
         checksum:
           type: string
     RemoteMessage:
@@ -1430,7 +1682,9 @@ components:
           properties:
             Pong:
               type: string
+              format: socket-address
               description: Socket address such as 192.0.2.1:8080 or [2001:db8::1]:8080.
+              pattern: '^(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.%]+\]):[0-9]{1,5}$'
         - type: object
           additionalProperties: false
           required: [Close]
@@ -1475,6 +1729,53 @@ components:
         - $ref: '#/components/schemas/RemoteMessage'
         - type: object
           additionalProperties: false
+          required: [Command]
+          properties:
+            Command:
+              type: object
+              additionalProperties: true
+              required: [command]
+              properties:
+                command:
+                  type: string
+        - type: object
+          additionalProperties: false
+          required: [Seek]
+          properties:
+            Seek:
+              type: object
+              additionalProperties: true
+              required: [interval]
+              properties:
+                interval:
+                  type: integer
+                  format: int32
+        - type: object
+          additionalProperties: false
+          required: [SetAudioTrack]
+          properties:
+            SetAudioTrack:
+              type: object
+              additionalProperties: true
+              required: [trackId]
+              properties:
+                trackId:
+                  type: integer
+                  format: int32
+        - type: object
+          additionalProperties: false
+          required: [SetPlaybackRate]
+          properties:
+            SetPlaybackRate:
+              type: object
+              additionalProperties: true
+              required: [rate]
+              properties:
+                rate:
+                  type: number
+                  format: double
+        - type: object
+          additionalProperties: false
           required: [State]
           properties:
             State:
@@ -1485,7 +1786,7 @@ components:
           properties:
             Play:
               type: object
-              additionalProperties: false
+              additionalProperties: true
               required: [videoId, url, collection, video, width, height, aspectWidth, aspectHeight]
               properties:
                 videoId:
@@ -1518,7 +1819,7 @@ components:
           properties:
             SetSubtitleTrack:
               type: object
-              additionalProperties: false
+              additionalProperties: true
               properties:
                 trackId:
                   type: [integer, 'null']
@@ -1529,6 +1830,30 @@ components:
           properties:
             LastState:
               $ref: '#/components/schemas/VideoDetailsRequest'
+        - type: object
+          additionalProperties: false
+          required: [CurrentTasks]
+          properties:
+            CurrentTasks:
+              type: array
+              items:
+                $ref: '#/components/schemas/TaskStateRequest'
+        - type: object
+          additionalProperties: false
+          required: [Book]
+          properties:
+            Book:
+              type: array
+              items:
+                $ref: '#/components/schemas/BookEventRequest'
+        - type: object
+          additionalProperties: false
+          required: [Video]
+          properties:
+            Video:
+              type: array
+              items:
+                $ref: '#/components/schemas/VideoEventRequest'
     Command:
       type: object
       additionalProperties: true
