@@ -155,8 +155,16 @@ impl BookCheck {
             if relative_collection.as_os_str().is_empty() && directory == ".thumbnails" {
                 continue;
             }
+            let child_collection = relative_collection.join(&directory);
+            if path_to_collection_id(&child_collection).is_none() {
+                tracing::warn!(
+                    collection = %child_collection.display(),
+                    "Skipping book directory whose name is not portable"
+                );
+                continue;
+            }
             self.process_collection(
-                relative_collection.join(directory),
+                child_collection,
                 known_books,
                 disk_books,
                 pending_events,
@@ -942,34 +950,31 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn invalid_collection_after_valid_book_fails_without_delete_or_publication() {
+    async fn invalid_collection_is_skipped_without_blocking_valid_sibling() {
         let root = TestDir::new("invalid-collection");
-        tokio::fs::create_dir_all(root.path().join("a-good")).await.unwrap();
-        tokio::fs::write(root.path().join("a-good/new.pdf"), b"book")
+        let valid_book = root.path().join("a-good/new.pdf");
+        tokio::fs::create_dir_all(valid_book.parent().unwrap())
             .await
             .unwrap();
+        tokio::fs::write(&valid_book, b"book").await.unwrap();
         tokio::fs::create_dir_all(root.path().join("z:invalid"))
             .await
             .unwrap();
         let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
-        let mut orphan = BookDetails::new(
-            "missing.pdf".to_string(),
-            "missing".to_string(),
-            &root.path().join("missing/missing.pdf"),
-            BookFormat::Pdf,
-        );
-        orphan.checksum = 403;
-        orphan.state = BookState::Ready;
-        repository.save_book(&orphan).await.unwrap();
         let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
         let (sender, mut receiver) = mpsc::channel(8);
-        let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
+        let checker = BookCheck::new_with_root(storer, repository, sender, root.path());
 
-        let error = checker.check_book_information().await.unwrap_err();
+        checker.check_book_information().await.unwrap();
 
-        assert!(error.to_string().contains("portable path"));
-        assert!(receiver.try_recv().is_err());
-        assert_eq!(repository.retrieve_book(403).await.unwrap().file_name, "missing.pdf");
+        let LocalMessage::Media(MediaEvent::MediaAvailable(event)) = receiver
+            .try_recv()
+            .expect("valid sibling book should still be queued")
+        else {
+            panic!("expected MediaAvailable event");
+        };
+        assert_eq!(event.full_path, valid_book);
+        assert!(receiver.try_recv().is_err(), "invalid subtree must be skipped");
     }
 
     #[cfg(unix)]
