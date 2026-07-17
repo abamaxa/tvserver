@@ -7,8 +7,7 @@ use crate::domain::messages::{
     MediaItem, PlayRequest, PlayerList, Response,
 };
 use crate::domain::models::{
-    BookCollectionDetails, BookDetails, Conversion, SearchResults, TaskListResults,
-    AVAILABLE_CONVERSIONS,
+    BookCollectionDetails, Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS,
 };
 use crate::domain::traits::{MediaSharer, Searcher};
 use crate::domain::{SearchEngineType, TaskType};
@@ -19,17 +18,19 @@ use axum::{
     extract::ws::WebSocketUpgrade,
     extract::{rejection::PathRejection, ConnectInfo, Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response as AxumResponse},
     routing::{delete, get, post, patch},
     Json, Router,
 };
 use super::context::Context;
+use super::BOOK_LIBRARY_UNAVAILABLE;
 
 type QueryParams = Query<HashMap<String, String>>;
 type StdResponse = (StatusCode, Json<Response>);
 
 const BAD_REQUEST: StatusCode = StatusCode::BAD_REQUEST;
 const INTERNAL_SERVER_ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
+const SERVICE_UNAVAILABLE: StatusCode = StatusCode::SERVICE_UNAVAILABLE;
 const OK: StatusCode = StatusCode::OK;
 const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
 const BOOK_NOT_FOUND_MESSAGE: &str = "book not found";
@@ -153,17 +154,26 @@ async fn list_books(
 async fn list_book_collection(
     state: &SharedState,
     collection: &str,
-) -> (StatusCode, Json<BookCollectionDetails>) {
-    match state.get_book_store().list(collection).await {
-        Ok(result) => (OK, Json(result)),
+) -> AxumResponse {
+    let Some(runtime) = state.get_available_book_runtime() else {
+        return book_library_unavailable_response().into_response();
+    };
+
+    match runtime.store.list(collection).await {
+        Ok(result) => (OK, Json(result)).into_response(),
         Err(error) => {
             tracing::error!("Failed to list book collection {}: {}", collection, error);
             (
                 INTERNAL_SERVER_ERROR,
                 Json(BookCollectionDetails::error(INTERNAL_ERROR_MESSAGE.to_string())),
             )
+                .into_response()
         }
     }
+}
+
+fn book_library_unavailable_response() -> StdResponse {
+    std_error(SERVICE_UNAVAILABLE, BOOK_LIBRARY_UNAVAILABLE.to_string())
 }
 
 fn repository_book_error_status(error: &sqlx::Error) -> StatusCode {
@@ -195,12 +205,21 @@ fn invalid_book_checksum_error() -> StdResponse {
 async fn get_book(
     state: State<SharedState>,
     checksum: Result<Path<String>, PathRejection>,
-) -> Result<Json<BookDetails>, (StatusCode, Json<Response>)> {
-    let checksum = checksum.map_err(|_| invalid_book_checksum_error())?;
-    let checksum = parse_book_checksum(&checksum.0)?;
+) -> AxumResponse {
+    let Some(_runtime) = state.get_available_book_runtime() else {
+        return book_library_unavailable_response().into_response();
+    };
+    let checksum = match checksum {
+        Ok(checksum) => checksum,
+        Err(_) => return invalid_book_checksum_error().into_response(),
+    };
+    let checksum = match parse_book_checksum(&checksum.0) {
+        Ok(checksum) => checksum,
+        Err(response) => return response.into_response(),
+    };
 
     match state.get_repository().retrieve_book(checksum).await {
-        Ok(book) => Ok(Json(book)),
+        Ok(book) => Json(book).into_response(),
         Err(error) => {
             let status = repository_book_error_status(&error);
             if status == INTERNAL_SERVER_ERROR {
@@ -211,7 +230,7 @@ async fn get_book(
             } else {
                 INTERNAL_ERROR_MESSAGE
             };
-            Err((status, Json(Response::error(message.to_string()))))
+            (status, Json(Response::error(message.to_string()))).into_response()
         }
     }
 }
@@ -221,6 +240,9 @@ async fn delete_book(
     state: State<SharedState>,
     checksum: Result<Path<String>, PathRejection>,
 ) -> StdResponse {
+    let Some(runtime) = state.get_available_book_runtime() else {
+        return book_library_unavailable_response();
+    };
     let checksum = match checksum {
         Ok(checksum) => checksum,
         Err(_) => return invalid_book_checksum_error(),
@@ -230,7 +252,7 @@ async fn delete_book(
         Err(response) => return response,
     };
 
-    match state.get_book_store().delete(checksum).await {
+    match runtime.store.delete(checksum).await {
         Ok(()) => (OK, Json(Response::success("success".to_string()))),
         Err(error) => {
             let status = book_store_error_status(&error);

@@ -129,13 +129,7 @@ async fn start_server_with_repository(
     .await?;
 
     Ok((
-        common::create_server_with_book_roots(
-            context,
-            port,
-            book_root.to_path_buf(),
-            book_thumbnail_root.to_path_buf(),
-        )
-        .await,
+        common::create_server(context, port).await,
         repository,
     ))
 }

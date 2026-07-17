@@ -20,6 +20,7 @@ use crate::{
 pub const BOOK_LIBRARY_UNAVAILABLE: &str = "book library unavailable";
 
 #[derive(Clone)]
+#[cfg_attr(not(feature = "webserver"), allow(dead_code))]
 pub struct BookStaticRoots {
     pub(crate) downloads: Arc<Dir>,
     pub(crate) thumbnails: Arc<Dir>,

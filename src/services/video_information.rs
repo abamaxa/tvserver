@@ -1,9 +1,8 @@
 use crate::domain::algorithm::{classify_media_kind, MediaKind};
 use crate::domain::messages::{LocalMessage, LocalMessageReceiver, LocalMessageSender, MediaEvent};
-use crate::domain::services::{
-    generate_book_metadata_with_cancellation, generate_video_metadatas, BookPathLeaseCoordinator,
-};
+use crate::domain::services::{generate_book_metadata_with_cancellation, generate_video_metadatas};
 use crate::domain::traits::{FileStorer, ProcessSpawner, Repository, Storer};
+use crate::entrypoints::BookIngestionRuntime;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
@@ -87,11 +86,10 @@ impl MetadataProcessor for ProductionMetadataProcessor {
 pub struct MetaDataManager {
     repo: Repository,
     storer: Storer,
-    book_storer: FileStorer,
+    book_ingestion: Option<BookIngestionRuntime>,
     receiver: LocalMessageReceiver,
     _sender: LocalMessageSender,
     processing_paths: Arc<StdMutex<HashSet<PathBuf>>>,
-    book_path_leases: BookPathLeaseCoordinator,
     spawner: Arc<dyn ProcessSpawner>,
     processor: Arc<dyn MetadataProcessor>,
     workers: JoinSet<()>,
@@ -162,49 +160,23 @@ impl Drop for MetaDataManagerHandle {
 }
 
 impl MetaDataManager {
-    #[cfg(test)]
     fn new_with_processor(
         repo: Repository,
         storer: Storer,
-        book_storer: FileStorer,
+        book_ingestion: Option<BookIngestionRuntime>,
         receiver: LocalMessageReceiver,
         sender: LocalMessageSender,
         spawner: Arc<dyn ProcessSpawner>,
         processor: Arc<dyn MetadataProcessor>,
         cancellation: CancellationToken,
-    ) -> Self {
-        Self::new_with_processor_and_leases(
-            repo,
-            storer,
-            book_storer,
-            receiver,
-            sender,
-            spawner,
-            processor,
-            cancellation,
-            BookPathLeaseCoordinator::new(),
-        )
-    }
-
-    fn new_with_processor_and_leases(
-        repo: Repository,
-        storer: Storer,
-        book_storer: FileStorer,
-        receiver: LocalMessageReceiver,
-        sender: LocalMessageSender,
-        spawner: Arc<dyn ProcessSpawner>,
-        processor: Arc<dyn MetadataProcessor>,
-        cancellation: CancellationToken,
-        book_path_leases: BookPathLeaseCoordinator,
     ) -> Self {
         Self {
             repo,
             storer,
-            book_storer,
+            book_ingestion,
             receiver,
             _sender: sender,
             processing_paths: Arc::new(StdMutex::new(HashSet::new())),
-            book_path_leases,
             spawner,
             processor,
             workers: JoinSet::new(),
@@ -215,7 +187,7 @@ impl MetaDataManager {
     pub fn consume(
         repo: Repository,
         storer: Storer,
-        book_storer: FileStorer,
+        book_ingestion: Option<BookIngestionRuntime>,
         receiver: LocalMessageReceiver,
         sender: LocalMessageSender,
         spawner: Arc<dyn ProcessSpawner>,
@@ -223,79 +195,35 @@ impl MetaDataManager {
         Self::consume_with_processor(
             repo,
             storer,
-            book_storer,
+            book_ingestion,
             receiver,
             sender,
             spawner,
             Arc::new(ProductionMetadataProcessor),
-        )
-    }
-
-    pub fn consume_with_leases(
-        repo: Repository,
-        storer: Storer,
-        book_storer: FileStorer,
-        receiver: LocalMessageReceiver,
-        sender: LocalMessageSender,
-        spawner: Arc<dyn ProcessSpawner>,
-        book_path_leases: BookPathLeaseCoordinator,
-    ) -> MetaDataManagerHandle {
-        Self::consume_with_processor_and_leases(
-            repo,
-            storer,
-            book_storer,
-            receiver,
-            sender,
-            spawner,
-            Arc::new(ProductionMetadataProcessor),
-            book_path_leases,
         )
     }
 
     fn consume_with_processor(
         repo: Repository,
         storer: Storer,
-        book_storer: FileStorer,
+        book_ingestion: Option<BookIngestionRuntime>,
         receiver: LocalMessageReceiver,
         sender: LocalMessageSender,
         spawner: Arc<dyn ProcessSpawner>,
         processor: Arc<dyn MetadataProcessor>,
-    ) -> MetaDataManagerHandle {
-        Self::consume_with_processor_and_leases(
-            repo,
-            storer,
-            book_storer,
-            receiver,
-            sender,
-            spawner,
-            processor,
-            BookPathLeaseCoordinator::new(),
-        )
-    }
-
-    fn consume_with_processor_and_leases(
-        repo: Repository,
-        storer: Storer,
-        book_storer: FileStorer,
-        receiver: LocalMessageReceiver,
-        sender: LocalMessageSender,
-        spawner: Arc<dyn ProcessSpawner>,
-        processor: Arc<dyn MetadataProcessor>,
-        book_path_leases: BookPathLeaseCoordinator,
     ) -> MetaDataManagerHandle {
         let cancellation = CancellationToken::new();
         let manager_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
-            let mut manager = Self::new_with_processor_and_leases(
+            let mut manager = Self::new_with_processor(
                 repo,
                 storer,
-                book_storer,
+                book_ingestion,
                 receiver,
                 sender,
                 spawner,
                 processor,
                 manager_cancellation,
-                book_path_leases,
             );
             manager.event_loop().await;
             eprintln!("local event loop exiting");
@@ -350,6 +278,19 @@ impl MetaDataManager {
                     return;
                 }
 
+                let book_ingestion = if route == MediaKind::Book {
+                    let Some(book_ingestion) = self.book_ingestion.clone() else {
+                        tracing::warn!(
+                            path = %full_path.display(),
+                            "book library unavailable"
+                        );
+                        return;
+                    };
+                    Some(book_ingestion)
+                } else {
+                    None
+                };
+
                 let Some(path_guard) = ProcessingPathGuard::reserve(
                     self.processing_paths.clone(),
                     full_path.clone(),
@@ -362,11 +303,9 @@ impl MetaDataManager {
                 let search = event.search;
                 let repo = self.repo.clone();
                 let storer = self.storer.clone();
-                let book_storer = self.book_storer.clone();
                 let semaphore = WORKER_SEMAPHORE.clone();
                 let spawner = self.spawner.clone();
                 let processor = self.processor.clone();
-                let book_path_leases = self.book_path_leases.clone();
                 let cancellation = self.cancellation.clone();
                 self.workers.spawn(async move {
                     let _path_guard = path_guard;
@@ -398,11 +337,14 @@ impl MetaDataManager {
                             }
                         }
                         MediaKind::Book => {
-                            let _processing = book_path_leases.acquire_processing(&full_path).await;
+                            let book_ingestion = book_ingestion
+                                .expect("book ingestion is established before spawning");
+                            let _processing =
+                                book_ingestion.leases.acquire_processing(&full_path).await;
                             if let Err(err) = processor
                                 .process_book(
                                     full_path,
-                                    book_storer,
+                                    book_ingestion.storer,
                                     repo,
                                     search,
                                     cancellation,
@@ -640,7 +582,10 @@ mod tests {
         MetaDataManager::new_with_processor(
             repository,
             storer,
-            book_storer,
+            Some(BookIngestionRuntime {
+                storer: book_storer,
+                leases: BookPathLeaseCoordinator::new(),
+            }),
             receiver,
             exchange.new_sender(),
             Arc::new(NoSpawner::new()),
@@ -658,22 +603,63 @@ mod tests {
             .listen_for_messages(MessageFilter::All)
             .await
             .unwrap();
-        MetaDataManager::new_with_processor_and_leases(
+        MetaDataManager::new_with_processor(
             Arc::new(SqlRepository::new(":memory:", None).await.unwrap()),
             Arc::new(MockMediaStorer::new()),
-            Arc::new(FileSystemStore::new(
-                std::env::temp_dir()
-                    .join("tvserver-routing-lease-test-books")
-                    .to_str()
-                    .unwrap(),
-            )),
+            Some(BookIngestionRuntime {
+                storer: Arc::new(FileSystemStore::new(
+                    std::env::temp_dir()
+                        .join("tvserver-routing-lease-test-books")
+                        .to_str()
+                        .unwrap(),
+                )),
+                leases,
+            }),
             receiver,
             exchange.new_sender(),
             Arc::new(NoSpawner::new()),
             processor,
             CancellationToken::new(),
-            leases,
         )
+    }
+
+    #[tokio::test]
+    async fn disabled_books_do_not_block_video_workers() {
+        let processor = Arc::new(RecordingProcessor::new(false));
+        let exchange = LocalMessageExchange::new();
+        let receiver = exchange
+            .listen_for_messages(MessageFilter::All)
+            .await
+            .unwrap();
+        let mut manager = MetaDataManager::new_with_processor(
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap()),
+            Arc::new(MockMediaStorer::new()),
+            None,
+            receiver,
+            exchange.new_sender(),
+            Arc::new(NoSpawner::new()),
+            processor.clone(),
+            CancellationToken::new(),
+        );
+
+        manager
+            .handle_media_event(MediaEvent::new_media(
+                std::path::Path::new("library/book.epub"),
+                None,
+            ))
+            .await;
+        let video_started = processor.started.notified();
+        manager
+            .handle_media_event(MediaEvent::new_media(
+                std::path::Path::new("library/video.mp4"),
+                None,
+            ))
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), video_started)
+            .await
+            .expect("video processor should run when books are disabled");
+
+        assert_eq!(processor.calls(), [MediaKind::Video]);
     }
 
     async fn dispatch_and_wait(
@@ -801,7 +787,10 @@ mod tests {
         let handle = MetaDataManager::consume_with_processor(
             repository,
             storer,
-            book_storer,
+            Some(BookIngestionRuntime {
+                storer: book_storer,
+                leases: BookPathLeaseCoordinator::new(),
+            }),
             receiver,
             exchange.new_sender(),
             Arc::new(NoSpawner::new()),
@@ -844,12 +833,15 @@ mod tests {
         let handle = MetaDataManager::consume_with_processor(
             repository,
             Arc::new(MockMediaStorer::new()),
-            Arc::new(FileSystemStore::new(
-                std::env::temp_dir()
-                    .join("tvserver-routing-cooperative-shutdown")
-                    .to_str()
-                    .unwrap(),
-            )),
+            Some(BookIngestionRuntime {
+                storer: Arc::new(FileSystemStore::new(
+                    std::env::temp_dir()
+                        .join("tvserver-routing-cooperative-shutdown")
+                        .to_str()
+                        .unwrap(),
+                )),
+                leases: BookPathLeaseCoordinator::new(),
+            }),
             receiver,
             exchange.new_sender(),
             Arc::new(NoSpawner::new()),
@@ -893,12 +885,15 @@ mod tests {
         let handle = MetaDataManager::consume_with_processor(
             Arc::new(SqlRepository::new(":memory:", None).await.unwrap()),
             Arc::new(MockMediaStorer::new()),
-            Arc::new(FileSystemStore::new(
-                std::env::temp_dir()
-                    .join("tvserver-routing-cancellation-token")
-                    .to_str()
-                    .unwrap(),
-            )),
+            Some(BookIngestionRuntime {
+                storer: Arc::new(FileSystemStore::new(
+                    std::env::temp_dir()
+                        .join("tvserver-routing-cancellation-token")
+                        .to_str()
+                        .unwrap(),
+                )),
+                leases: BookPathLeaseCoordinator::new(),
+            }),
             receiver,
             exchange.new_sender(),
             Arc::new(NoSpawner::new()),

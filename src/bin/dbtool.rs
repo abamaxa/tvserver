@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
     let metadata_manager = MetaDataManager::consume(
         context.get_repository(),
         context.get_store(),
-        context.get_book_file_storer(),
+        context.get_book_runtime().ingestion(),
         context.listen_for_messages(MessageFilter::All).await?,
         context.get_local_sender(),
         context.get_spawner(),

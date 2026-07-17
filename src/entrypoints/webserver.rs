@@ -15,13 +15,12 @@ use std::{
 
 use crate::adaptors::restrict_access;
 use crate::domain::config::{
-    get_book_dir, get_book_thumbnail_dir, get_client_path, get_movie_dir, get_thumbnail_dir,
+    get_client_path, get_movie_dir, get_thumbnail_dir,
 };
-use crate::domain::models::ensure_default_book_thumbnail;
 use crate::entrypoints::register;
 use crate::entrypoints::TVServer;
 use crate::services::{setup_logging, TVSERVER_LOG};
-use anyhow::{anyhow, Context as _};
+use anyhow::anyhow;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
@@ -33,7 +32,6 @@ use axum::{
 };
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::{
-    ambient_authority,
     fs::{Dir, OpenOptions},
 };
 use tokio_util::io::ReaderStream;
@@ -69,28 +67,8 @@ async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Resu
 }
 
 pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result<Router> {
-    let book_dir = get_book_dir();
-    let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
-
-    build_http_router_with_roots(context, book_dir, book_thumbnail_dir)
-}
-
-pub fn build_http_router_with_roots(
-    context: crate::entrypoints::Context,
-    book_dir: impl AsRef<Path>,
-    book_thumbnail_dir: impl AsRef<Path>,
-) -> anyhow::Result<Router> {
     let movie_dir = get_movie_dir();
-    let book_dir = book_dir.as_ref();
-    let book_thumbnail_dir = book_thumbnail_dir.as_ref();
-    ensure_default_book_thumbnail(&book_thumbnail_dir).with_context(|| {
-        format!(
-            "failed to materialize default book thumbnail in {}",
-            book_thumbnail_dir.display()
-        )
-    })?;
-    let book_root = RetainedRoot::open(book_dir, "book download")?;
-    let book_thumbnail_root = RetainedRoot::open(book_thumbnail_dir, "book thumbnail")?;
+    let book_static_roots = context.get_book_runtime().static_roots();
 
     // Protected routes: API endpoints, player, and fallback (app)
     let mut protected_routes = register(Arc::new(context))
@@ -106,18 +84,25 @@ pub fn build_http_router_with_roots(
         .nest_service("/api/stream", ServeDir::new(&movie_dir))
         .nest_service("/api/thumbnails", ServeDir::new(get_thumbnail_dir(&movie_dir)));
 
-    protected_routes = protected_routes.nest(
-        "/api/books/download",
-        Router::new()
-            .route("/{*path}", get(serve_book_download))
-            .with_state(book_root),
-    );
-    unprotected_routes = unprotected_routes.nest(
-        "/api/book-thumbnails",
-        Router::new()
-            .route("/{file}", get(serve_book_thumbnail))
-            .with_state(book_thumbnail_root),
-    );
+    let (book_download_routes, book_thumbnail_routes) = match book_static_roots {
+        Some(roots) => (
+            Router::new()
+                .route("/{*path}", get(serve_book_download))
+                .with_state(RetainedRoot::new(roots.downloads)),
+            Router::new()
+                .route("/{file}", get(serve_book_thumbnail))
+                .with_state(RetainedRoot::new(roots.thumbnails)),
+        ),
+        None => (
+            Router::new().route("/{*path}", get(serve_unavailable_book_static)),
+            Router::new().route("/{file}", get(serve_unavailable_book_static)),
+        ),
+    };
+
+    protected_routes =
+        protected_routes.nest("/api/books/download", book_download_routes);
+    unprotected_routes =
+        unprotected_routes.nest("/api/book-thumbnails", book_thumbnail_routes);
 
     let protected_routes = protected_routes.layer(middleware::from_fn(restrict_access));
 
@@ -137,11 +122,8 @@ struct RetainedRoot {
 }
 
 impl RetainedRoot {
-    fn open(path: &Path, description: &str) -> anyhow::Result<Self> {
-        let dir = Dir::open_ambient_dir(path, ambient_authority()).with_context(|| {
-            format!("failed to retain {description} root capability: {}", path.display())
-        })?;
-        Ok(Self { dir: Arc::new(dir) })
+    fn new(dir: Arc<Dir>) -> Self {
+        Self { dir }
     }
 }
 
@@ -286,4 +268,8 @@ async fn serve_book_thumbnail(
         }
     };
     stream_static_file(root, file, false, content_type).await
+}
+
+async fn serve_unavailable_book_static() -> StatusCode {
+    StatusCode::SERVICE_UNAVAILABLE
 }

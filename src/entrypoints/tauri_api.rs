@@ -21,6 +21,8 @@ use crate::domain::{SearchEngineType, TaskType};
 use crate::services::BookStore;
 #[cfg(not(feature = "webserver"))]
 use super::context::Context;
+#[cfg(not(feature = "webserver"))]
+use super::{AvailableBookRuntime, BookRuntime, BOOK_LIBRARY_UNAVAILABLE};
 
 #[cfg(not(feature = "webserver"))]
 pub type SharedState = Arc<Context>;
@@ -124,8 +126,8 @@ async fn list_media(state: &SharedState, collection: &str) -> Result<MediaItem, 
 pub async fn list_root_books(
     state: tauri::State<'_, SharedState>,
 ) -> Result<BookCollectionDetails, String> {
-    let book_store = state.get_book_store();
-    list_books_core(book_store.as_ref(), "").await
+    let runtime = require_available_books(&state.get_book_runtime())?;
+    list_books_core(runtime.store.as_ref(), "").await
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -134,8 +136,15 @@ pub async fn list_books(
     state: tauri::State<'_, SharedState>,
     collection: String,
 ) -> Result<BookCollectionDetails, String> {
-    let book_store = state.get_book_store();
-    list_books_core(book_store.as_ref(), &collection).await
+    let runtime = require_available_books(&state.get_book_runtime())?;
+    list_books_core(runtime.store.as_ref(), &collection).await
+}
+
+#[cfg(not(feature = "webserver"))]
+fn require_available_books(runtime: &BookRuntime) -> Result<Arc<AvailableBookRuntime>, String> {
+    runtime
+        .available()
+        .ok_or_else(|| BOOK_LIBRARY_UNAVAILABLE.to_string())
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -162,6 +171,7 @@ pub async fn get_book(
     state: tauri::State<'_, SharedState>,
     checksum: String,
 ) -> Result<BookDetails, String> {
+    require_available_books(&state.get_book_runtime())?;
     let repository = state.get_repository();
     get_book_core(&repository, &checksum).await
 }
@@ -184,8 +194,8 @@ pub async fn delete_book(
     state: tauri::State<'_, SharedState>,
     checksum: String,
 ) -> Result<Response, String> {
-    let book_store = state.get_book_store();
-    delete_book_core(book_store.as_ref(), &checksum).await
+    let runtime = require_available_books(&state.get_book_runtime())?;
+    delete_book_core(runtime.store.as_ref(), &checksum).await
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -369,7 +379,21 @@ mod tests {
         services::BookStore,
     };
 
-    use super::{delete_book_core, get_book_core, list_books_core};
+    use super::{delete_book_core, get_book_core, list_books_core, require_available_books};
+    use crate::entrypoints::{BookRuntime, BOOK_LIBRARY_UNAVAILABLE};
+
+    #[test]
+    fn unavailable_book_runtime_returns_stable_command_error() {
+        let runtime = BookRuntime::Unavailable {
+            message: Arc::from(BOOK_LIBRARY_UNAVAILABLE),
+        };
+
+        let error = require_available_books(&runtime)
+            .err()
+            .expect("unavailable runtime should return an error");
+
+        assert_eq!(error, BOOK_LIBRARY_UNAVAILABLE);
+    }
 
     fn sample_book(checksum: i64, collection: &str, file_name: &str) -> BookDetails {
         BookDetails {

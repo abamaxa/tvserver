@@ -29,7 +29,7 @@ pub use repository::get_repository;
 pub use search::{get_pirate_search, get_search_service, get_youtube_search};
 #[allow(unused_imports)]
 #[cfg(feature = "webserver")]
-pub use server::{create_server, create_server_with_book_roots};
+pub use server::create_server;
 #[allow(unused_imports)]
 pub use spawner::{get_no_spawner, get_spawner};
 pub use task_manager::get_task_manager;

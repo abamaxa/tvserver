@@ -12,7 +12,7 @@ use crate::domain::messagebus::{
     LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter,
 };
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
-use crate::domain::services::{BookPathLeaseCoordinator, MediaCheck};
+use crate::domain::services::MediaCheck;
 use crate::domain::traits::FileStorer;
 use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Repository, Storer};
 use crate::domain::SearchEngineType;
@@ -126,28 +126,6 @@ impl Context {
 
     pub fn get_available_book_runtime(&self) -> Option<Arc<AvailableBookRuntime>> {
         self.book_runtime.available()
-    }
-
-    pub fn get_book_store(&self) -> Arc<crate::services::BookStore> {
-        self.book_runtime
-            .available()
-            .expect("book runtime is unavailable")
-            .store
-            .clone()
-    }
-
-    pub fn get_book_file_storer(&self) -> FileStorer {
-        self.book_runtime
-            .ingestion()
-            .expect("book runtime is unavailable")
-            .storer
-    }
-
-    pub fn get_book_path_leases(&self) -> BookPathLeaseCoordinator {
-        self.book_runtime
-            .ingestion()
-            .expect("book runtime is unavailable")
-            .leases
     }
 }
 

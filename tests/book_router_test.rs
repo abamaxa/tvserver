@@ -10,16 +10,17 @@ use app_lib::{
     domain::{
         config::{BOOK_DIR, BOOK_THUMBNAIL_DIR, MOVIE_DIR},
         models::{default_book_thumbnail_bytes, DEFAULT_BOOK_THUMBNAIL},
-        traits::Repository,
+        traits::{MockMediaStorer, Repository, Storer},
     },
-    entrypoints::{webserver::build_http_router, Context},
+    entrypoints::{
+        webserver::build_http_router, BookRuntime, Context, BOOK_LIBRARY_UNAVAILABLE,
+    },
 };
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     Response, StatusCode,
 };
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
 
 use crate::common::{
     get_book_services_at, get_checker, get_context_with_book_services, get_media_store,
@@ -64,8 +65,70 @@ async fn make_context(book_root: &PathBuf, thumbnail_root: &PathBuf) -> Result<C
     .await
 }
 
+async fn make_unavailable_context() -> Result<Context> {
+    let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
+    let mut media_store = MockMediaStorer::new();
+    media_store
+        .expect_list()
+        .withf(|collection| collection == "root")
+        .returning(|_| Err(anyhow::anyhow!("missing test video collection")));
+    let media_store: Storer = Arc::new(media_store);
+    get_context_with_book_services(
+        media_store,
+        get_pirate_search("torrents_get.json", "pb_search.html").await,
+        get_task_manager(),
+        repository,
+        get_checker(),
+        BookRuntime::Unavailable {
+            message: Arc::from(BOOK_LIBRARY_UNAVAILABLE),
+        },
+    )
+    .await
+}
+
 #[tokio::test]
-async fn server_startup_materializes_default_book_thumbnail_in_fallback_directory() -> Result<()> {
+async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -> Result<()> {
+    let _env_lock = ENV_LOCK.lock().await;
+    env::set_var(MOVIE_DIR, MOVIE_ROOT);
+
+    let server = common::create_server(make_unavailable_context().await?, 57213).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+
+    for (method, path) in [
+        (reqwest::Method::GET, "/api/books"),
+        (reqwest::Method::GET, "/api/book/1"),
+        (reqwest::Method::DELETE, "/api/book/1"),
+        (
+            reqwest::Method::GET,
+            "/api/books/download/Shelf/book.epub",
+        ),
+        (
+            reqwest::Method::GET,
+            "/api/book-thumbnails/default-book.jpg",
+        ),
+    ] {
+        let response = client
+            .request(method, format!("http://localhost:57213{path}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        if path == "/api/books" || path.starts_with("/api/book/") {
+            let body: app_lib::domain::messages::Response = response.json().await?;
+            assert_eq!(body.errors, [BOOK_LIBRARY_UNAVAILABLE], "{path}");
+        }
+    }
+
+    let video = client
+        .get("http://localhost:57213/api/media/root")
+        .send()
+        .await?;
+    assert_ne!(video.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn runtime_materializes_and_retains_the_default_book_thumbnail_capability() -> Result<()> {
     let _env_lock = ENV_LOCK.lock().await;
     let temp_root = TempRoot::new()?;
     let book_root = temp_root.0.join("books");
@@ -87,12 +150,17 @@ async fn server_startup_materializes_default_book_thumbnail_in_fallback_director
     let invalid_thumbnail_root = temp_root.0.join("not-a-directory");
     std::fs::write(&invalid_thumbnail_root, b"not a directory")?;
     env::set_var(BOOK_THUMBNAIL_DIR, &invalid_thumbnail_root);
-    let failed_server =
+    let server_after_config_change =
         common::create_server(make_context(&book_root, &thumbnail_root).await?, 57208).await;
-    let startup_result = timeout(Duration::from_secs(1), failed_server)
-        .await
-        .expect("router construction should fail before the server starts")?;
-    assert!(startup_result.is_err());
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
+        .get("http://localhost:57208/api/book-thumbnails/default-book.jpg")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await?.as_ref(), default_book_thumbnail_bytes());
+    server_after_config_change.abort();
 
     Ok(())
 }
@@ -159,13 +227,8 @@ async fn book_static_routes_enforce_capability_and_file_type_boundaries() -> Res
     )?;
 
     env::set_var(MOVIE_DIR, MOVIE_ROOT);
-    let server = common::create_server_with_book_roots(
-        make_context(&book_root, &thumbnail_root).await?,
-        57210,
-        book_root.clone(),
-        thumbnail_root.clone(),
-    )
-    .await;
+    let server = common::create_server(make_context(&book_root, &thumbnail_root).await?, 57210)
+        .await;
     let client = reqwest::Client::new();
 
     let epub_response = client
