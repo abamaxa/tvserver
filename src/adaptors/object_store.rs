@@ -20,7 +20,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::{fs, io::AsyncWriteExt};
 
-use crate::domain::traits::{FileStore, Filer, PrivateSnapshot, StagedFile, StoreObject};
+use crate::domain::traits::{
+    FileStore, Filer, PrivateSnapshot, PrivateSnapshotFingerprint, StagedFile, StoreObject,
+};
 
 const PRIVATE_SNAPSHOT_DIRECTORY: &str = ".tvserver-book-snapshots";
 
@@ -1472,6 +1474,51 @@ impl FileStore for FileSystemStore {
         .await?
     }
 
+    async fn private_snapshot_fingerprint(
+        &self,
+        snapshot: &PrivateSnapshot,
+    ) -> Result<PrivateSnapshotFingerprint> {
+        let store = self.clone();
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || {
+            let authority = store.private_snapshot_authority(&snapshot)?;
+            let metadata = authority.directory.symlink_metadata(&authority.name)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.dev() != authority.device
+                || metadata.ino() != authority.inode
+            {
+                return Err(anyhow!(
+                    "private snapshot path no longer names its creation-time identity: {}",
+                    snapshot.path.display()
+                ));
+            }
+            let visible_parent = snapshot.path.parent().ok_or_else(|| {
+                anyhow!("private snapshot path has no parent: {}", snapshot.path.display())
+            })?;
+            let visible_name = snapshot.path.file_name().ok_or_else(|| {
+                anyhow!("private snapshot path has no file name: {}", snapshot.path.display())
+            })?;
+            let visible_directory = Dir::open_ambient_dir(visible_parent, ambient_authority())?;
+            let visible = visible_directory.symlink_metadata(Path::new(visible_name))?;
+            if visible.file_type().is_symlink()
+                || !visible.is_file()
+                || visible.dev() != authority.device
+                || visible.ino() != authority.inode
+            {
+                return Err(anyhow!(
+                    "private snapshot path no longer names its creation-time identity: {}",
+                    snapshot.path.display()
+                ));
+            }
+            Ok(PrivateSnapshotFingerprint {
+                len: metadata.len(),
+                modified: metadata.modified().ok().map(|time| time.into_std()),
+            })
+        })
+        .await?
+    }
+
     async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> Result<FileSeal> {
         let store = self.clone();
         let snapshot = snapshot.clone();
@@ -1831,6 +1878,14 @@ mod tests {
 
     const TEST_DIR: &str = "tests/fixtures/media_dir";
 
+    fn test_root(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tvserver-{test_name}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ))
+    }
+
     struct ForcedCrossDevice;
 
     impl MoveFileSystem for ForcedCrossDevice {
@@ -1843,6 +1898,25 @@ mod tests {
         ) -> io::Result<()> {
             Err(io::Error::from(io::ErrorKind::CrossesDevices))
         }
+    }
+
+    #[tokio::test]
+    async fn private_snapshot_fingerprint_rejects_replaced_visible_path() {
+        let base = test_root("snapshot-fingerprint-replacement");
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = base.join("book.epub");
+        std::fs::write(&source, b"owned").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+        std::fs::remove_file(&snapshot.path).unwrap();
+        std::fs::write(&snapshot.path, b"replacement").unwrap();
+
+        let error = store.private_snapshot_fingerprint(&snapshot).await.unwrap_err();
+        assert!(error.to_string().contains("creation-time identity"));
+        store.restore_staged(&staged).await.unwrap();
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]

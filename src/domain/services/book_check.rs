@@ -231,8 +231,8 @@ mod tests {
             messages::{LocalMessage, MediaEvent},
             models::{BookDetails, BookFormat, BookState},
             traits::{
-                BookChecker, FileStore, FileStorer, PrivateSnapshot, Repository, StagedFile,
-                StoreObject,
+                BookChecker, FileStore, FileStorer, PrivateSnapshot,
+                PrivateSnapshotFingerprint, Repository, StagedFile, StoreObject,
             },
         },
     };
@@ -339,6 +339,13 @@ mod tests {
             staged: &StagedFile,
         ) -> anyhow::Result<PrivateSnapshot> {
             self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
         }
 
         async fn seal_private_snapshot(

@@ -138,6 +138,12 @@ pub struct PrivateSnapshot {
     pub(crate) inode: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateSnapshotFingerprint {
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
 impl PrivateSnapshot {
     pub(crate) fn new(path: PathBuf, id: u128, device: u64, inode: u64) -> Self {
         Self {
@@ -146,16 +152,6 @@ impl PrivateSnapshot {
             device,
             inode,
         }
-    }
-
-    pub(crate) fn path_has_creation_identity(&self) -> anyhow::Result<bool> {
-        use cap_fs_ext::MetadataExt;
-
-        let metadata = std::fs::symlink_metadata(&self.path)?;
-        Ok(metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata.dev() == self.device
-            && metadata.ino() == self.inode)
     }
 }
 
@@ -186,6 +182,12 @@ pub trait FileStore: Sync + Send {
         &self,
         staged: &StagedFile,
     ) -> anyhow::Result<PrivateSnapshot>;
+    async fn private_snapshot_fingerprint(
+        &self,
+        _snapshot: &PrivateSnapshot,
+    ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+        anyhow::bail!("private snapshot fingerprinting is not supported by this file store")
+    }
     async fn seal_private_snapshot(
         &self,
         snapshot: &PrivateSnapshot,

@@ -5,8 +5,11 @@ use crate::domain::{
         ensure_default_book_thumbnail, BookDetails, BookFormat, BookMetadata, BookState,
         DEFAULT_BOOK_THUMBNAIL,
     },
-    traits::{FileStorer, PrivateSnapshot, Repository, StagedFile},
+    traits::{
+        FileStorer, PrivateSnapshot, PrivateSnapshotFingerprint, Repository, StagedFile,
+    },
 };
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use once_cell::sync::Lazy;
 use quick_xml::{
     events::{BytesStart, Event},
@@ -388,9 +391,9 @@ async fn generate_book_metadata_with_roots_and_cancellation(
         }
 
         let checksum_result = async {
-            let before = private_snapshot_fingerprint(&snapshot).await?;
+            let before = private_snapshot_fingerprint(&storer, &snapshot).await?;
             let checksum = super::video_metadata::calculate_checksum(&snapshot.path).await?;
-            let after = private_snapshot_fingerprint(&snapshot).await?;
+            let after = private_snapshot_fingerprint(&storer, &snapshot).await?;
             if before != after {
                 anyhow::bail!("private snapshot identity changed during checksum calculation");
             }
@@ -549,21 +552,22 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             generated_thumbnail_path,
             thumbnail_preexisted,
         );
-        let snapshot_before_extraction = match private_snapshot_fingerprint(&snapshot).await {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                let cleanup = cleanup_prepublication(
-                    &storer,
-                    &staged,
-                    Some(&snapshot),
-                    Some(&mut thumbnail_guard),
-                    CleanupMode::Restore,
-                )
-                .await;
-                staged_guard.disarm();
-                return Err(with_cleanup_error(error, cleanup));
-            }
-        };
+        let snapshot_before_extraction =
+            match private_snapshot_fingerprint(&storer, &snapshot).await {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    let cleanup = cleanup_prepublication(
+                        &storer,
+                        &staged,
+                        Some(&snapshot),
+                        Some(&mut thumbnail_guard),
+                        CleanupMode::Restore,
+                    )
+                    .await;
+                    staged_guard.disarm();
+                    return Err(with_cleanup_error(error, cleanup));
+                }
+            };
         let extraction_path = snapshot.path.clone();
         let extraction_path_for_fixup = extraction_path.clone();
         let extraction_thumbnail_root = thumbnail_root.clone();
@@ -620,7 +624,7 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             ));
         }
 
-        let snapshot_before_verification = private_snapshot_fingerprint(&snapshot).await;
+        let snapshot_before_verification = private_snapshot_fingerprint(&storer, &snapshot).await;
         let verified_checksum = match &snapshot_before_verification {
             Ok(_) => super::video_metadata::calculate_checksum(&snapshot.path).await,
             Err(error) => Err(std::io::Error::other(format!("{error:#}"))),
@@ -640,7 +644,7 @@ async fn generate_book_metadata_with_roots_and_cancellation(
                 return Err(with_cleanup_error(error, cleanup));
             }
         };
-        let snapshot_after_verification = private_snapshot_fingerprint(&snapshot).await;
+        let snapshot_after_verification = private_snapshot_fingerprint(&storer, &snapshot).await;
         let snapshot_is_verified = matches!(
             (
                 &snapshot_before_verification,
@@ -829,15 +833,10 @@ async fn staged_fingerprint(path: &Path) -> anyhow::Result<StagedFingerprint> {
 }
 
 async fn private_snapshot_fingerprint(
+    storer: &FileStorer,
     snapshot: &PrivateSnapshot,
-) -> anyhow::Result<StagedFingerprint> {
-    if !snapshot.path_has_creation_identity()? {
-        anyhow::bail!(
-            "private snapshot path no longer names its creation-time file identity: {}",
-            snapshot.path.display()
-        );
-    }
-    staged_fingerprint(&snapshot.path).await
+) -> anyhow::Result<PrivateSnapshotFingerprint> {
+    storer.private_snapshot_fingerprint(snapshot).await
 }
 
 struct StagedSourceGuard {
@@ -1946,31 +1945,50 @@ fn publish_thumbnail_temp_no_replace(
     retained_file: &File,
     final_path: &Path,
 ) -> Result<(), String> {
-    let retained_metadata = retained_file
-        .metadata()
-        .map_err(|error| format!("could not inspect retained temporary thumbnail: {error}"))?;
-    if !retained_metadata.is_file() {
-        return Err("retained temporary thumbnail must be a regular file".to_string());
-    }
+    let retained_file = cap_std::fs::File::from_std(
+        retained_file
+            .try_clone()
+            .map_err(|error| format!("could not retain temporary thumbnail: {error}"))?,
+    );
 
     match fs::hard_link(temp_path, final_path) {
         Ok(()) => {
-            let published_metadata = match final_path.symlink_metadata() {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    return Err(rollback_published_thumbnail(
+            let published_parent = final_path
+                .parent()
+                .ok_or_else(|| "published thumbnail path has no parent directory".to_string())?;
+            let published_name = final_path
+                .file_name()
+                .ok_or_else(|| "published thumbnail path has no file name".to_string())?;
+            let published_directory = cap_std::fs::Dir::open_ambient_dir(
+                published_parent,
+                cap_std::ambient_authority(),
+            )
+            .map_err(|error| {
+                rollback_published_thumbnail(
+                    final_path,
+                    format!("could not open published thumbnail directory: {error}"),
+                )
+            })?;
+            let mut published_options = cap_std::fs::OpenOptions::new();
+            published_options.read(true).follow(FollowSymlinks::No);
+            let published_file =
+                match published_directory.open_with(published_name, &published_options) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        return Err(rollback_published_thumbnail(
+                            final_path,
+                            format!("could not open published thumbnail identity: {error}"),
+                        ));
+                    }
+                };
+            let same_identity = same_cap_file_identity(&published_file, &retained_file)
+                .map_err(|error| {
+                    rollback_published_thumbnail(
                         final_path,
                         format!("could not inspect published thumbnail identity: {error}"),
-                    ));
-                }
-            };
-            if published_metadata.file_type().is_symlink()
-                || !published_metadata.is_file()
-                || cap_fs_ext::MetadataExt::dev(&published_metadata)
-                    != cap_fs_ext::MetadataExt::dev(&retained_metadata)
-                || cap_fs_ext::MetadataExt::ino(&published_metadata)
-                    != cap_fs_ext::MetadataExt::ino(&retained_metadata)
-            {
+                    )
+                })?;
+            if !same_identity {
                 return Err(rollback_published_thumbnail(
                     final_path,
                     "temporary thumbnail changed before publication".to_string(),
@@ -1995,6 +2013,19 @@ fn publish_thumbnail_temp_no_replace(
             "could not publish temporary thumbnail without replacing the final path: {error}"
         )),
     }
+}
+
+fn same_cap_file_identity(
+    left: &cap_std::fs::File,
+    right: &cap_std::fs::File,
+) -> Result<bool, String> {
+    use cap_fs_ext::MetadataExt;
+    let left = left.metadata().map_err(|error| error.to_string())?;
+    let right = right.metadata().map_err(|error| error.to_string())?;
+    Ok(left.is_file()
+        && right.is_file()
+        && left.dev() == right.dev()
+        && left.ino() == right.ino())
 }
 
 fn rollback_published_thumbnail(final_path: &Path, error: String) -> String {
@@ -2818,6 +2849,23 @@ mod tests {
     }
 
     #[test]
+    fn cap_file_identity_distinguishes_hard_link_from_unrelated_file() {
+        let temp = TestDir::new();
+        let original_path = temp.path().join("original.jpg");
+        let hard_link_path = temp.path().join("hard-link.jpg");
+        let unrelated_path = temp.path().join("unrelated.jpg");
+        fs::write(&original_path, b"original").unwrap();
+        fs::hard_link(&original_path, &hard_link_path).unwrap();
+        fs::write(&unrelated_path, b"unrelated").unwrap();
+        let original = cap_std::fs::File::from_std(File::open(original_path).unwrap());
+        let hard_link = cap_std::fs::File::from_std(File::open(hard_link_path).unwrap());
+        let unrelated = cap_std::fs::File::from_std(File::open(unrelated_path).unwrap());
+
+        assert!(same_cap_file_identity(&original, &hard_link).unwrap());
+        assert!(!same_cap_file_identity(&original, &unrelated).unwrap());
+    }
+
+    #[test]
     fn thumbnail_publication_rejects_a_swapped_temporary_path() {
         let temp = TestDir::new();
         let final_path = temp.path().join("cover.jpg");
@@ -3130,6 +3178,13 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
+        }
+
         async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
             let seal = self.inner.seal_private_snapshot(snapshot).await?;
             self.seal_calls.fetch_add(1, Ordering::SeqCst);
@@ -3251,6 +3306,13 @@ mod tests {
             Ok(snapshot)
         }
 
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
+        }
+
         async fn seal_private_snapshot(
             &self,
             snapshot: &PrivateSnapshot,
@@ -3358,6 +3420,13 @@ mod tests {
                     .write_all(b"mutation")?;
             }
             Ok(snapshot)
+        }
+
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
         }
 
         async fn seal_private_snapshot(
@@ -3474,6 +3543,13 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
+        }
+
         async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
             self.inner.seal_private_snapshot(snapshot).await
         }
@@ -3578,6 +3654,13 @@ mod tests {
             Ok(snapshot)
         }
 
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
+        }
+
         async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
             self.inner.seal_private_snapshot(snapshot).await
         }
@@ -3674,6 +3757,13 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
+        }
+
         async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
             self.inner.seal_private_snapshot(snapshot).await
         }
@@ -3768,6 +3858,13 @@ mod tests {
             self.inner.create_private_snapshot(staged).await
         }
 
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
+        }
+
         async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
             self.inner.seal_private_snapshot(snapshot).await
         }
@@ -3853,6 +3950,13 @@ mod tests {
 
         async fn create_private_snapshot(&self, staged: &StagedFile) -> anyhow::Result<PrivateSnapshot> {
             self.inner.create_private_snapshot(staged).await
+        }
+
+        async fn private_snapshot_fingerprint(
+            &self,
+            snapshot: &PrivateSnapshot,
+        ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+            self.inner.private_snapshot_fingerprint(snapshot).await
         }
 
         async fn seal_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<FileSeal> {
