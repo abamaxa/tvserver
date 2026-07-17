@@ -46,7 +46,7 @@ The tvserver daemon is configured through the following environment variables
 |----------------------|-----------------------------------------------------------------------------------------------|
 | GOOGLE_KEY           | *A key to use with the Google API, see below for instructions for obtaining a key.            |
 | MOVIE_DIR            | *The directory where movies will be stored.                                                   |
-| BOOK_DIR             | *The directory where PDF and EPUB books will be stored.                                       |
+| BOOK_DIR             | The directory where PDF and EPUB books will be stored; defaults to lowercase `books` beside `MOVIE_DIR`. |
 | BOOK_THUMBNAIL_DIR   | The directory for book covers; defaults to `<BOOK_DIR>/.thumbnails`.                           |
 | CLIENT_DIR           | The directory contain the client apps, defaults to `clients`                                  |
 | TRANSMISSION_URL     | URL to access the Transmission HTTP interface                                                 |
@@ -58,7 +58,8 @@ The tvserver daemon is configured through the following environment variables
 
 ## Book Library
 
-PDF and EPUB books are stored separately from videos under `BOOK_DIR`. Book covers are written to
+PDF and EPUB books are stored separately from videos under `BOOK_DIR`. When unset, `BOOK_DIR`
+defaults to a lowercase `books` directory beside `MOVIE_DIR`. Book covers are written to
 `BOOK_THUMBNAIL_DIR`, which is optional and defaults to `<BOOK_DIR>/.thumbnails`. If a cover cannot
 be extracted, the bundled `assets/book/default-book.jpg` is materialized there as
 `default-book.jpg`. This shared fallback is preserved when books are deleted.

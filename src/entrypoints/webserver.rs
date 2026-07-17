@@ -7,7 +7,6 @@
 extern crate core;
 
 use std::{
-    env,
     ffi::OsString,
     net::SocketAddr,
     path::{Component, Path},
@@ -16,7 +15,7 @@ use std::{
 
 use crate::adaptors::restrict_access;
 use crate::domain::config::{
-    get_book_thumbnail_dir, get_client_path, get_movie_dir, get_thumbnail_dir, BOOK_DIR,
+    get_book_dir, get_book_thumbnail_dir, get_client_path, get_movie_dir, get_thumbnail_dir,
 };
 use crate::domain::models::ensure_default_book_thumbnail;
 use crate::entrypoints::register;
@@ -70,8 +69,7 @@ async fn run_http_server(tvserver: &TVServer, port: Option<u16>) -> anyhow::Resu
 }
 
 pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result<Router> {
-    let book_dir = env::var(BOOK_DIR)
-        .with_context(|| format!("{BOOK_DIR} environment variable is required"))?;
+    let book_dir = get_book_dir();
     let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
 
     build_http_router_with_roots(context, book_dir, book_thumbnail_dir)

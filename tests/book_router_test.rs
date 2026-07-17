@@ -99,18 +99,22 @@ async fn server_startup_materializes_default_book_thumbnail_in_fallback_director
 }
 
 #[tokio::test]
-async fn builder_requires_book_dir() -> Result<()> {
+async fn builder_defaults_book_dir_beside_movie_dir() -> Result<()> {
     let _env_lock = ENV_LOCK.lock().await;
     let temp_root = TempRoot::new()?;
+    let movie_root = temp_root.0.join("movies");
     let book_root = temp_root.0.join("books");
     let thumbnail_root = book_root.join(".thumbnails");
-    env::set_var(MOVIE_DIR, MOVIE_ROOT);
+    std::fs::create_dir_all(&movie_root)?;
+    env::set_var(MOVIE_DIR, &movie_root);
     env::remove_var(BOOK_DIR);
     env::remove_var(BOOK_THUMBNAIL_DIR);
 
-    let result = build_http_router(make_context(&book_root, &thumbnail_root).await?);
-    assert!(result.is_err());
-    assert!(format!("{:#}", result.unwrap_err()).contains(BOOK_DIR));
+    let _router = build_http_router(make_context(&book_root, &thumbnail_root).await?)?;
+    assert_eq!(
+        std::fs::read(thumbnail_root.join(DEFAULT_BOOK_THUMBNAIL))?,
+        default_book_thumbnail_bytes()
+    );
 
     Ok(())
 }

@@ -32,7 +32,15 @@ pub fn get_movie_dir() -> String {
 }
 
 pub fn get_book_dir() -> String {
-    env::var(BOOK_DIR).expect("BOOK_DIR environment variable is not set")
+    env::var(BOOK_DIR).unwrap_or_else(|_| {
+        let movie_dir = PathBuf::from(get_movie_dir());
+        movie_dir
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join("books")
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 pub fn enable_vlc_player() -> bool {
@@ -133,9 +141,10 @@ pub fn get_auth_credentials() -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::{get_book_dir, get_book_thumbnail_dir, BOOK_DIR, BOOK_THUMBNAIL_DIR};
+    use super::{
+        get_book_dir, get_book_thumbnail_dir, BOOK_DIR, BOOK_THUMBNAIL_DIR, MOVIE_DIR,
+    };
     use std::env;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -168,13 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn book_dir_is_required_and_thumbnail_dir_defaults_under_book_dir() {
+    fn book_dir_defaults_beside_movie_dir_and_thumbnail_dir_defaults_under_book_dir() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvVarGuard::new(&[BOOK_DIR, BOOK_THUMBNAIL_DIR]);
+        let _guard = EnvVarGuard::new(&[MOVIE_DIR, BOOK_DIR, BOOK_THUMBNAIL_DIR]);
 
+        env::set_var(MOVIE_DIR, "/library/movies");
         env::remove_var(BOOK_DIR);
         env::remove_var(BOOK_THUMBNAIL_DIR);
-        assert!(catch_unwind(AssertUnwindSafe(get_book_dir)).is_err());
+        assert_eq!(get_book_dir(), "/library/books");
 
         env::set_var(BOOK_DIR, "/library/books");
         assert_eq!(get_book_dir(), "/library/books");
