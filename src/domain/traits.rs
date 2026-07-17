@@ -186,6 +186,13 @@ pub trait FileStore: Sync + Send {
         &self,
         snapshot: &PrivateSnapshot,
     ) -> anyhow::Result<FileSeal>;
+    async fn private_snapshot_matches_regular_no_follow(
+        &self,
+        _snapshot: &PrivateSnapshot,
+        _path: &Path,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("private snapshot comparison is not supported by this file store")
+    }
     async fn publish_private_snapshot_no_replace(
         &self,
         snapshot: &PrivateSnapshot,

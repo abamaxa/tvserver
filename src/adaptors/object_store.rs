@@ -464,6 +464,82 @@ fn ensure_cap_regular_file(dir: &Dir, path: &Path, description: &str) -> Result<
     Ok(())
 }
 
+fn open_regular_file_no_follow(
+    root: &Dir,
+    path: &Path,
+    description: &str,
+) -> Result<cap_std::fs::File> {
+    let mut components = path.components().peekable();
+    let mut directory = root.try_clone()?;
+
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(anyhow!(
+                "{description} requires a relative path of normal components: {}",
+                path.display()
+            ));
+        };
+        let name = Path::new(name);
+        if components.peek().is_some() {
+            directory = directory.open_dir_nofollow(name)?;
+            continue;
+        }
+
+        let expected = directory.symlink_metadata(name)?;
+        if expected.file_type().is_symlink() || !expected.is_file() {
+            return Err(anyhow!(
+                "{description} must be a regular file and not a symlink: {}",
+                path.display()
+            ));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = directory.open_with(name, &options)?;
+        let opened = file.metadata()?;
+        if !opened.is_file()
+            || opened.dev() != expected.dev()
+            || opened.ino() != expected.ino()
+        {
+            return Err(anyhow!(
+                "{description} changed while it was opened: {}",
+                path.display()
+            ));
+        }
+        return Ok(file);
+    }
+
+    Err(anyhow!("{description} path is empty"))
+}
+
+fn read_up_to<R: Read>(reader: &mut R, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut total = 0;
+    while total < buffer.len() {
+        let read = reader.read(&mut buffer[total..])?;
+        if read == 0 {
+            break;
+        }
+        total += read;
+    }
+    Ok(total)
+}
+
+fn readers_are_equal<R: Read, S: Read>(first: &mut R, second: &mut S) -> io::Result<bool> {
+    let mut first_buffer = vec![0_u8; 1024 * 1024];
+    let mut second_buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let first_read = read_up_to(first, &mut first_buffer)?;
+        let second_read = read_up_to(second, &mut second_buffer)?;
+        if first_read != second_read
+            || first_buffer[..first_read] != second_buffer[..second_read]
+        {
+            return Ok(false);
+        }
+        if first_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
 fn ensure_snapshot_identity(
     metadata: &cap_std::fs::Metadata,
     device: u64,
@@ -1380,6 +1456,39 @@ impl FileStore for FileSystemStore {
         .await?
     }
 
+    async fn private_snapshot_matches_regular_no_follow(
+        &self,
+        snapshot: &PrivateSnapshot,
+        path: &Path,
+    ) -> Result<bool> {
+        let store = self.clone();
+        let snapshot = snapshot.clone();
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            store.validate_visible_private_snapshot_directory()?;
+            let authority = store.private_snapshot_authority(&snapshot)?;
+            let mut snapshot_options = OpenOptions::new();
+            snapshot_options.read(true).follow(FollowSymlinks::No);
+            let mut snapshot_file = authority
+                .directory
+                .open_with(&authority.name, &snapshot_options)?;
+            ensure_snapshot_identity(
+                &snapshot_file.metadata()?,
+                authority.device,
+                authority.inode,
+            )?;
+
+            let relative = store.rooted_relative_path(&path)?;
+            let mut canonical = open_regular_file_no_follow(
+                store.open_root()?,
+                &relative,
+                "canonical book file",
+            )?;
+            Ok(readers_are_equal(&mut snapshot_file, &mut canonical)?)
+        })
+        .await?
+    }
+
     async fn publish_private_snapshot_no_replace(
         &self,
         snapshot: &PrivateSnapshot,
@@ -2291,6 +2400,84 @@ mod tests {
             .file_name()
             .is_some_and(|name| name == ".tvserver-book-snapshots"));
 
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+        store.restore_staged(&staged).await.unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn private_snapshot_comparison_reads_complete_regular_files() {
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-private-snapshot-compare-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let collection = root.join("Collection");
+        std::fs::create_dir_all(&collection).unwrap();
+        let source = base.join("incoming.epub");
+        let canonical = collection.join("canonical.epub");
+        std::fs::write(&source, b"identical through the final byte").unwrap();
+        std::fs::write(&canonical, b"identical through the final byte").unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+
+        assert!(store
+            .private_snapshot_matches_regular_no_follow(
+                &snapshot,
+                Path::new("Collection/canonical.epub"),
+            )
+            .await
+            .unwrap());
+
+        std::fs::write(&canonical, b"identical through the final BYTE").unwrap();
+        assert!(!store
+            .private_snapshot_matches_regular_no_follow(
+                &snapshot,
+                Path::new("Collection/canonical.epub"),
+            )
+            .await
+            .unwrap());
+
+        store.remove_private_snapshot(&snapshot).await.unwrap();
+        store.restore_staged(&staged).await.unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_snapshot_comparison_rejects_canonical_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "tvserver-private-snapshot-compare-symlink-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let root = base.join("root");
+        let collection = root.join("Collection");
+        std::fs::create_dir_all(&collection).unwrap();
+        let source = base.join("incoming.epub");
+        let outside = base.join("outside.epub");
+        let canonical = collection.join("canonical.epub");
+        std::fs::write(&source, b"book bytes").unwrap();
+        std::fs::write(&outside, b"book bytes").unwrap();
+        symlink(&outside, &canonical).unwrap();
+        let store = FileSystemStore::new(root.to_str().unwrap());
+        let staged = store.stage_no_follow(source.to_str().unwrap()).await.unwrap();
+        let snapshot = store.create_private_snapshot(&staged).await.unwrap();
+
+        let result = store
+            .private_snapshot_matches_regular_no_follow(
+                &snapshot,
+                Path::new("Collection/canonical.epub"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"book bytes");
+        assert!(canonical.symlink_metadata().unwrap().file_type().is_symlink());
         store.remove_private_snapshot(&snapshot).await.unwrap();
         store.restore_staged(&staged).await.unwrap();
         let _ = std::fs::remove_dir_all(&base);

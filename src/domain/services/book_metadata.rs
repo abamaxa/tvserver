@@ -480,12 +480,51 @@ async fn generate_book_metadata_with_roots_and_cancellation(
                 canonical_relative.push(existing_file);
                 Ok(canonical_relative)
             })();
-            let canonical_exists = match canonical_relative {
-                Ok(relative) => storer.regular_file_exists_no_follow(&relative).await,
-                Err(error) => Err(error),
+            let canonical_exists = match &canonical_relative {
+                Ok(relative) => storer.regular_file_exists_no_follow(relative).await,
+                Err(error) => Err(anyhow::anyhow!(error.to_string())),
             };
             match canonical_exists {
                 Ok(true) => {
+                    let relative = canonical_relative
+                        .as_ref()
+                        .expect("a canonical path exists only after successful validation");
+                    match storer
+                        .private_snapshot_matches_regular_no_follow(&snapshot, relative)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let error = anyhow::anyhow!(
+                                "book checksum collision for {} and {}/{}",
+                                path.display(),
+                                existing.collection,
+                                existing.file_name
+                            );
+                            let cleanup = cleanup_prepublication(
+                                &storer,
+                                &staged,
+                                Some(&snapshot),
+                                None,
+                                CleanupMode::Restore,
+                            )
+                            .await;
+                            staged_guard.disarm();
+                            return Err(with_cleanup_error(error, cleanup));
+                        }
+                        Err(error) => {
+                            let cleanup = cleanup_prepublication(
+                                &storer,
+                                &staged,
+                                Some(&snapshot),
+                                None,
+                                CleanupMode::Restore,
+                            )
+                            .await;
+                            staged_guard.disarm();
+                            return Err(with_cleanup_error(error, cleanup));
+                        }
+                    }
                     let cleanup = cleanup_healthy_duplicate(&storer, &staged, &snapshot).await;
                     staged_guard.disarm();
                     cleanup?;
@@ -5551,6 +5590,67 @@ mod tests {
         let saved = repository.retrieve_book(first.checksum).await.unwrap();
         assert_eq!(saved.collection, "Originals");
         assert_eq!(saved.file_name, "first.epub");
+    }
+
+    #[tokio::test]
+    async fn checksum_collision_restores_source_and_preserves_canonical_book() {
+        const MIB: usize = 1024 * 1024;
+
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let canonical_dir = book_root.join("Originals");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&canonical_dir).unwrap();
+
+        let canonical_path = canonical_dir.join("original.pdf");
+        let source = source_dir.join("incoming.pdf");
+        let canonical_bytes = vec![0_u8; 12 * MIB];
+        let mut incoming_bytes = canonical_bytes.clone();
+        incoming_bytes[11 * MIB] = 1;
+        fs::write(&canonical_path, &canonical_bytes).unwrap();
+        fs::write(&source, &incoming_bytes).unwrap();
+
+        let checksum = super::super::video_metadata::calculate_checksum(&canonical_path)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::super::video_metadata::calculate_checksum(&source)
+                .await
+                .unwrap(),
+            checksum,
+            "fixture must collide under the legacy prefix checksum"
+        );
+
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+        let mut canonical = BookDetails::new(
+            "original.pdf".to_string(),
+            "Originals".to_string(),
+            &canonical_path,
+            BookFormat::Pdf,
+        );
+        canonical.checksum = checksum;
+        canonical.title = "Canonical".to_string();
+        canonical.state = BookState::Ready;
+        repository.save_book(&canonical).await.unwrap();
+        let canonical_row = repository.retrieve_book(checksum).await.unwrap();
+
+        let error = generate_book_metadata_with_roots(
+            source.clone(),
+            storer,
+            repository.clone(),
+            Some("incoming".to_string()),
+            book_root,
+            thumbnail_root,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("checksum collision"));
+        assert_eq!(fs::read(&source).unwrap(), incoming_bytes);
+        assert_eq!(fs::read(&canonical_path).unwrap(), canonical_bytes);
+        assert_eq!(repository.retrieve_book(checksum).await.unwrap(), canonical_row);
     }
 
     #[tokio::test]
