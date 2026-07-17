@@ -527,6 +527,7 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             }
         };
         let extraction_path = snapshot.path.clone();
+        let extraction_path_for_fixup = extraction_path.clone();
         let extraction_thumbnail_root = thumbnail_root.clone();
         let extraction = match tokio::task::spawn_blocking(move || {
             #[cfg(test)]
@@ -644,7 +645,7 @@ async fn generate_book_metadata_with_roots_and_cancellation(
             Ok(mut extraction) => {
                 if format == BookFormat::Pdf
                     && extraction.title.as_deref()
-                        == Some(filename_derived_title(&staged_path).as_str())
+                        == Some(filename_derived_title(&extraction_path_for_fixup).as_str())
                 {
                     extraction.title = Some(filename_derived_title(&path));
                 }
@@ -5647,6 +5648,35 @@ mod tests {
         assert_eq!(saved.authors, details.authors);
         assert_eq!(saved.page_count, details.page_count);
         assert_eq!(saved.state, details.state);
+    }
+
+    #[tokio::test]
+    async fn ingestion_metadata_free_pdf_uses_original_filename_title() {
+        let temp = TestDir::new();
+        let source_dir = temp.path().join("downloads");
+        let book_root = temp.path().join("books");
+        let thumbnail_root = temp.path().join("book-thumbnails");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("the_hidden_library.pdf");
+        write_pdf(&source, None, 1);
+        let (storer, repository) = ingestion_dependencies(&book_root).await;
+
+        let details = generate_book_metadata_with_roots(
+            source,
+            storer,
+            repository.clone(),
+            None,
+            book_root,
+            thumbnail_root,
+        )
+        .await
+        .unwrap()
+        .expect("metadata-free PDF should be ingested");
+
+        assert_eq!(details.title, "the hidden library");
+        assert!(!details.title.contains("snapshot"));
+        let saved = repository.retrieve_book(details.checksum).await.unwrap();
+        assert_eq!(saved.title, "the hidden library");
     }
 
     #[tokio::test]
