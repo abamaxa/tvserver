@@ -98,7 +98,7 @@ pub fn generate_display_name(name: &Option<String>) -> String {
 }
 
 pub fn get_collection_from_path(path: &Path) -> String {
-    get_collection_from_rooted_path(path, &get_movie_dir())
+    get_video_collection_from_rooted_path(path, &get_movie_dir())
 }
 
 pub fn get_book_collection_from_path(path: &Path) -> String {
@@ -154,7 +154,7 @@ pub fn get_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> S
 }
 
 pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
-    get_collection_and_file_from_rooted_path(path, &get_movie_dir())
+    get_video_collection_and_file_from_rooted_path(path, &get_movie_dir())
 }
 
 pub fn get_collection_and_book_from_path(path: &Path) -> (String, String) {
@@ -181,6 +181,35 @@ pub fn get_collection_and_file_from_rooted_path(
             .file_name()
             .unwrap_or_default()
             .to_str()
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+fn get_video_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> String {
+    let short_path = path.strip_prefix(root.as_ref()).unwrap_or(path);
+    let collection = if path.is_dir() {
+        short_path
+    } else {
+        short_path.parent().unwrap_or_else(|| Path::new(""))
+    };
+    collection.to_str().unwrap_or_default().to_string()
+}
+
+fn get_video_collection_and_file_from_rooted_path(
+    path: &Path,
+    root: impl AsRef<Path>,
+) -> (String, String) {
+    let short_path = path.strip_prefix(root.as_ref()).unwrap_or(path);
+    (
+        short_path
+            .parent()
+            .and_then(Path::to_str)
+            .unwrap_or_default()
+            .to_string(),
+        short_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
             .unwrap_or_default()
             .to_string(),
     )
@@ -489,6 +518,50 @@ mod test {
             get_collection_and_file_from_rooted_path(book_path, "/library/books"),
             ("Fiction/Classics".to_string(), "novel.epub".to_string())
         );
+    }
+
+    #[test]
+    fn video_collection_helpers_preserve_legacy_nonportable_names() {
+        let root = std::env::temp_dir().join(format!(
+            "tvserver-video-collection-names-{}",
+            std::process::id()
+        ));
+        let colon_dir = root.join("Mission: Impossible");
+        std::fs::create_dir_all(&colon_dir).unwrap();
+        let colon_path = colon_dir.join("movie.mkv");
+        assert_eq!(
+            get_video_collection_from_rooted_path(&colon_dir, &root),
+            "Mission: Impossible"
+        );
+        assert_eq!(
+            get_video_collection_from_rooted_path(&colon_path, &root),
+            "Mission: Impossible"
+        );
+        assert_eq!(
+            get_video_collection_and_file_from_rooted_path(&colon_path, &root),
+            ("Mission: Impossible".to_string(), "movie.mkv".to_string())
+        );
+
+        #[cfg(unix)]
+        {
+            let backslash_dir = root.join(r"Manuals\Extras");
+            std::fs::create_dir_all(&backslash_dir).unwrap();
+            let backslash_path = backslash_dir.join("movie.mkv");
+            assert_eq!(
+                get_video_collection_from_rooted_path(&backslash_dir, &root),
+                r"Manuals\Extras"
+            );
+            assert_eq!(
+                get_video_collection_from_rooted_path(&backslash_path, &root),
+                r"Manuals\Extras"
+            );
+            assert_eq!(
+                get_video_collection_and_file_from_rooted_path(&backslash_path, &root),
+                (r"Manuals\Extras".to_string(), "movie.mkv".to_string())
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(feature = "webserver")]
