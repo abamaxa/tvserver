@@ -2847,7 +2847,12 @@ mod tests {
             b"odd",
         ) {
             // Some Unix filesystems (including the macOS test volume) reject non-UTF-8 names.
-            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            // macOS exposes its EILSEQ result as `Uncategorized` on stable Rust.
+            assert!(
+                error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(rustix::io::Errno::ILSEQ.raw_os_error()),
+                "unexpected error while creating a non-UTF-8 filename: {error}"
+            );
             return;
         }
         let store = FileSystemStore::new(base.to_str().unwrap());
