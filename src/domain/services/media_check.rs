@@ -4,7 +4,7 @@
 //! to some sort of cloud storage like AWS S3.
 //!
 //! provides an implementation of MediaChecker.
-use crate::domain::algorithm::{get_collection_from_path, skip_file};
+use crate::domain::algorithm::{get_collection_from_path, is_video_scan_candidate, skip_file};
 use crate::domain::config::get_movie_dir;
 use crate::domain::messages::{LocalMessage, LocalMessageSender, MediaEvent};
 use crate::domain::services::calculate_checksum;
@@ -68,7 +68,7 @@ impl MediaCheck {
                 .to_str()
                 .unwrap_or_default();
 
-            if skip_file(filename) {
+            if !is_video_scan_candidate(filename) {
                 continue;
             }
 

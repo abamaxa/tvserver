@@ -32,7 +32,7 @@ pub use media_kind::{
 };
 
 pub use video_utils::{
-    get_videos_for_series_or_id, skip_file
+    get_videos_for_series_or_id, is_video_scan_candidate, skip_file
 };
 
 pub use series::{

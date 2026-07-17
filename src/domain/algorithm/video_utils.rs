@@ -76,6 +76,20 @@ pub fn skip_file(name: &str) -> bool {
     true
 }
 
+pub fn is_video_scan_candidate(name: &str) -> bool {
+    if skip_file(name) {
+        return false;
+    }
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        None | Some("") => true,
+        Some(extension) => is_video_extension(extension),
+    }
+}
+
 /// Splits the input string at the last occurrence of '/'.
 /// Returns a tuple containing:
 /// - The series part (everything before the last slash)
@@ -111,6 +125,19 @@ mod tests {
 
         for (name, expected) in test_cases {
             assert_eq!(skip_file(name), expected);
+        }
+    }
+
+    #[test]
+    fn video_scan_rejects_books_and_preserves_extensionless_legacy_files() {
+        for name in ["manual.pdf", "MANUAL.PDF", "novel.epub", "NOVEL.EPUB"] {
+            assert!(!is_video_scan_candidate(name), "movie scan admitted {name}");
+        }
+        for name in ["movie.mp4", "MOVIE.MKV", "legacy-file"] {
+            assert!(is_video_scan_candidate(name), "movie scan rejected {name}");
+        }
+        for name in [".hidden.mp4", "partial.tmp.mp4", "cover.jpg"] {
+            assert!(!is_video_scan_candidate(name), "movie scan admitted {name}");
         }
     }
 }
