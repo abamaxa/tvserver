@@ -96,6 +96,9 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
 
     for (method, path) in [
         (reqwest::Method::GET, "/api/books"),
+        // Axum rejects this path while extracting `Path<String>`. The unavailable
+        // runtime response must take precedence over that extractor rejection.
+        (reqwest::Method::GET, "/api/books/%FF"),
         (reqwest::Method::GET, "/api/book/1"),
         (reqwest::Method::DELETE, "/api/book/1"),
         (
@@ -112,7 +115,9 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
             .send()
             .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
-        if path == "/api/books" || path.starts_with("/api/book/") {
+        let has_json_error = matches!(path, "/api/books" | "/api/books/%FF")
+            || path.starts_with("/api/book/");
+        if has_json_error {
             let body: app_lib::domain::messages::Response = response.json().await?;
             assert_eq!(body.errors, [BOOK_LIBRARY_UNAVAILABLE], "{path}");
         }

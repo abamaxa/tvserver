@@ -146,8 +146,15 @@ async fn list_root_books(state: State<SharedState>) -> impl IntoResponse {
 #[debug_handler]
 async fn list_books(
     state: State<SharedState>,
-    collection: Path<String>,
-) -> impl IntoResponse {
+    collection: Result<Path<String>, PathRejection>,
+) -> AxumResponse {
+    if state.get_available_book_runtime().is_none() {
+        return book_library_unavailable_response().into_response();
+    }
+    let collection = match collection {
+        Ok(collection) => collection,
+        Err(error) => return error.into_response(),
+    };
     list_book_collection(&state, &collection).await
 }
 
