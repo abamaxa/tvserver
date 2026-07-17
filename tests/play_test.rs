@@ -7,13 +7,11 @@ use anyhow::Result;
 use app_lib::domain::config::MOVIE_DIR;
 use app_lib::domain::messagebus::{LocalMessageExchange, MessageExchange, MessageFilter};
 use app_lib::domain::messages::PlayRequest;
-use app_lib::domain::traits::MockBookChecker;
 use app_lib::{domain::messages::Response, entrypoints};
 use common::get_checker;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_remote_play() -> Result<()> {
@@ -36,7 +34,7 @@ async fn test_remote_play() -> Result<()> {
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
 
     let repository = get_repository().await;
-    let (book_store, book_file_storer) = common::get_book_services(repository.clone());
+    let book_runtime = common::get_book_services(repository.clone()).await;
     let context = entrypoints::Context::new(
         get_media_store(),
         searcher,
@@ -44,10 +42,8 @@ async fn test_remote_play() -> Result<()> {
         get_task_manager(),
         repository,
         get_checker(),
-        Arc::new(MockBookChecker::new()),
         local_exchange,
-        book_store,
-        book_file_storer,
+        book_runtime,
         None,
     );
 

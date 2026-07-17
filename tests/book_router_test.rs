@@ -51,16 +51,15 @@ impl Drop for TempRoot {
 
 async fn make_context(book_root: &PathBuf, thumbnail_root: &PathBuf) -> Result<Context> {
     let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
-    let (book_store, book_file_storer) =
-        get_book_services_at(repository.clone(), book_root, thumbnail_root);
+    let book_runtime =
+        get_book_services_at(repository.clone(), book_root, thumbnail_root).await;
     get_context_with_book_services(
         get_media_store(),
         get_pirate_search("torrents_get.json", "pb_search.html").await,
         get_task_manager(),
         repository,
         get_checker(),
-        book_store,
-        book_file_storer,
+        book_runtime,
     )
     .await
 }

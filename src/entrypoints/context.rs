@@ -12,28 +12,26 @@ use crate::domain::messagebus::{
     LocalMessageExchange, LocalMessageExchangeError, MessageExchange, MessageFilter,
 };
 use crate::domain::messages::{LocalMessageReceiver, LocalMessageSender};
-use crate::domain::services::{BookCheck, BookPathLeaseCoordinator, MediaCheck};
+use crate::domain::services::{BookPathLeaseCoordinator, MediaCheck};
 use crate::domain::traits::FileStorer;
 use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Repository, Storer};
 use crate::domain::SearchEngineType;
 use crate::services::{
-    BookStore, MediaStore, PirateClient, SearchEngine, SearchService, SharingService, TaskManager,
-    YoutubeClient,
+    MediaStore, PirateClient, SearchEngine, SearchService, SharingService, TaskManager, YoutubeClient,
 };
+
+use super::book_runtime::{unavailable_book_checker, AvailableBookRuntime, BookRuntime};
 
 #[derive(Clone)]
 pub struct Context {
     store: Storer,
     checker: Checker,
-    book_checker: BookCheckerHandle,
     search: SearchService,
     messenger: MessageExchange,
     task_manager: Arc<TaskManager>,
     repository: Repository,
     local_message_exchange: LocalMessageExchange,
-    book_store: Arc<BookStore>,
-    book_file_storer: FileStorer,
-    book_path_leases: BookPathLeaseCoordinator,
+    book_runtime: BookRuntime,
     sharing: Option<Arc<SharingService>>,
 }
 
@@ -45,54 +43,19 @@ impl Context {
         task_manager: Arc<TaskManager>,
         repository: Repository,
         checker: Checker,
-        book_checker: BookCheckerHandle,
         local_message_exchange: LocalMessageExchange,
-        book_store: Arc<BookStore>,
-        book_file_storer: FileStorer,
+        book_runtime: BookRuntime,
         sharing: Option<Arc<SharingService>>,
-    ) -> Context {
-        Self::new_with_book_path_leases(
-            store,
-            search,
-            messenger,
-            task_manager,
-            repository,
-            checker,
-            book_checker,
-            local_message_exchange,
-            book_store,
-            book_file_storer,
-            sharing,
-            BookPathLeaseCoordinator::new(),
-        )
-    }
-
-    pub fn new_with_book_path_leases(
-        store: Storer,
-        search: SearchService,
-        messenger: MessageExchange,
-        task_manager: Arc<TaskManager>,
-        repository: Repository,
-        checker: Checker,
-        book_checker: BookCheckerHandle,
-        local_message_exchange: LocalMessageExchange,
-        book_store: Arc<BookStore>,
-        book_file_storer: FileStorer,
-        sharing: Option<Arc<SharingService>>,
-        book_path_leases: BookPathLeaseCoordinator,
     ) -> Context {
         Context {
             store,
             checker,
-            book_checker,
             search,
             messenger,
             task_manager,
             repository,
             local_message_exchange,
-            book_store,
-            book_file_storer,
-            book_path_leases,
+            book_runtime,
             sharing,
         }
     }
@@ -131,7 +94,10 @@ impl Context {
     }
 
     pub fn get_book_checker(&self) -> BookCheckerHandle {
-        self.book_checker.clone()
+        self.book_runtime
+            .available()
+            .map(|runtime| runtime.checker.clone())
+            .unwrap_or_else(unavailable_book_checker)
     }
 
     pub fn get_storer(&self) -> Storer {
@@ -154,16 +120,34 @@ impl Context {
         self.sharing.clone()
     }
 
-    pub fn get_book_store(&self) -> Arc<BookStore> {
-        self.book_store.clone()
+    pub fn get_book_runtime(&self) -> BookRuntime {
+        self.book_runtime.clone()
+    }
+
+    pub fn get_available_book_runtime(&self) -> Option<Arc<AvailableBookRuntime>> {
+        self.book_runtime.available()
+    }
+
+    pub fn get_book_store(&self) -> Arc<crate::services::BookStore> {
+        self.book_runtime
+            .available()
+            .expect("book runtime is unavailable")
+            .store
+            .clone()
     }
 
     pub fn get_book_file_storer(&self) -> FileStorer {
-        self.book_file_storer.clone()
+        self.book_runtime
+            .ingestion()
+            .expect("book runtime is unavailable")
+            .storer
     }
 
     pub fn get_book_path_leases(&self) -> BookPathLeaseCoordinator {
-        self.book_path_leases.clone()
+        self.book_runtime
+            .ingestion()
+            .expect("book runtime is unavailable")
+            .leases
     }
 }
 
@@ -213,81 +197,127 @@ pub async fn create_context() -> anyhow::Result<Context> {
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(&get_movie_dir()));
     let book_dir = get_book_dir();
     let book_thumbnail_dir = get_book_thumbnail_dir(&book_dir);
-    let book_file_storer: FileStorer = Arc::new(FileSystemStore::new(&book_dir));
-    let book_thumbnail_dir_string = book_thumbnail_dir.to_str().ok_or_else(|| {
-        anyhow::anyhow!(
-            "configured book thumbnail directory is not valid UTF-8: {}",
-            book_thumbnail_dir.display()
-        )
-    })?;
-    let book_thumbnail_file_storer: FileStorer =
-        Arc::new(FileSystemStore::new(book_thumbnail_dir_string));
-    let book_store = Arc::new(BookStore::new_with_roots(
-        book_file_storer.clone(),
-        book_thumbnail_file_storer,
+    let book_runtime = BookRuntime::initialize(
         repository.clone(),
+        local_message_exchange.new_sender(),
         &book_dir,
         &book_thumbnail_dir,
-    ));
+    )
+    .await;
 
     let checker = Arc::new(MediaCheck::new(
         file_storer.clone(),
         repository.clone(),
         local_message_exchange.new_sender(),
     ));
-    let book_path_leases = BookPathLeaseCoordinator::new();
-    let book_checker = Arc::new(BookCheck::new_with_leases(
-        book_file_storer.clone(),
-        repository.clone(),
-        local_message_exchange.new_sender(),
-        book_path_leases.clone(),
-    ));
-
     let sharing = Arc::new(SharingService::new(
         Arc::new(TelegramBot::new(&get_telegram_chat_id(), &get_telegram_token())),
         repository.clone(),
         spawner.clone(),
     ));
 
-    Ok(Context::new_with_book_path_leases(
+    Ok(Context::new(
         Arc::new(MediaStore::new(file_storer, repository.clone())),
         search_service,
         messenger,
         task_manager,
         repository,
         checker,
-        book_checker,
         local_message_exchange,
-        book_store,
-        book_file_storer,
+        book_runtime,
         Some(sharing),
-        book_path_leases,
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Arc};
-
-    use crate::{
-        adaptors::{FileSystemStore, SqlRepository},
-        domain::{
-            messagebus::{LocalMessageExchange, MessageExchange, MessageFilter},
-            services::BookPathLeaseCoordinator,
-            traits::{
-                BookCheckerHandle, FileStorer, MockBookChecker, MockMediaChecker, MockMediaStorer,
-                Repository, Storer,
-            },
-            NoSpawner,
+    use std::{
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
         },
-        services::{BookStore, SearchService, TaskManager},
     };
 
-    use super::Context;
+    use crate::{
+        adaptors::SqlRepository,
+        domain::{
+            messagebus::{LocalMessageExchange, MessageExchange, MessageFilter},
+            traits::{MockMediaChecker, MockMediaStorer, Repository, Storer},
+            NoSpawner,
+        },
+        services::{SearchService, TaskManager},
+    };
+
+    use super::{BookRuntime, Context};
+    use crate::entrypoints::BOOK_LIBRARY_UNAVAILABLE;
+
+    static NEXT_CONTEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_context_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tvserver-{name}-{}-{}",
+            std::process::id(),
+            NEXT_CONTEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[tokio::test]
-    async fn context_exposes_injected_book_store_and_book_file_store() {
-        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+    async fn unavailable_book_root_builds_disabled_runtime_without_error() {
+        let base = temp_context_root("unavailable-books");
+        std::fs::create_dir_all(&base).unwrap();
+        let blocked = base.join("not-a-directory");
+        std::fs::write(&blocked, b"file").unwrap();
+        let repository: Repository =
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let exchange = LocalMessageExchange::new();
+
+        let runtime = BookRuntime::initialize(
+            repository,
+            exchange.new_sender(),
+            &blocked,
+            blocked.join("covers"),
+        )
+        .await;
+
+        assert!(runtime.available().is_none());
+        assert!(runtime.ingestion().is_none());
+        assert!(runtime.static_roots().is_none());
+        assert_eq!(
+            runtime.unavailable_message(),
+            Some(BOOK_LIBRARY_UNAVAILABLE)
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn writable_book_root_builds_available_runtime() {
+        let base = temp_context_root("available-books");
+        let books = base.join("books");
+        let covers = base.join("covers");
+        let repository: Repository =
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let exchange = LocalMessageExchange::new();
+
+        let runtime =
+            BookRuntime::initialize(repository, exchange.new_sender(), &books, &covers).await;
+        let available = runtime.available().expect("book runtime should be available");
+        let static_roots = runtime
+            .static_roots()
+            .expect("book static roots should be retained");
+
+        assert!(runtime.ingestion().is_some());
+        assert!(runtime.unavailable_message().is_none());
+        assert!(static_roots.downloads.metadata(".").unwrap().is_dir());
+        assert!(static_roots.thumbnails.metadata(".").unwrap().is_dir());
+        assert!(covers.join("default-book.jpg").is_file());
+        drop(static_roots);
+        drop(available);
+        drop(runtime);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    async fn test_context(repository: Repository, book_runtime: BookRuntime) -> Context {
         let task_manager = Arc::new(TaskManager::new(Arc::new(NoSpawner::new())));
         let search = SearchService::new(task_manager.clone(), Vec::new(), repository.clone());
         let local_message_exchange = LocalMessageExchange::new();
@@ -300,42 +330,69 @@ mod tests {
         );
         let media_store: Storer = Arc::new(MockMediaStorer::new());
         let checker = Arc::new(MockMediaChecker::new());
-        let book_checker: BookCheckerHandle = Arc::new(MockBookChecker::new());
-        let book_files: FileStorer = Arc::new(FileSystemStore::new("/tmp/context-books"));
-        let thumbnail_files: FileStorer =
-            Arc::new(FileSystemStore::new("/tmp/context-book-thumbnails"));
-        let book_store = Arc::new(BookStore::new_with_roots(
-            book_files.clone(),
-            thumbnail_files,
-            repository.clone(),
-            Path::new("/tmp/context-books"),
-            Path::new("/tmp/context-book-thumbnails"),
-        ));
-        let book_path_leases = BookPathLeaseCoordinator::new();
 
-        let context = Context::new_with_book_path_leases(
+        Context::new(
             media_store,
             search,
             messenger,
             task_manager,
             repository,
             checker,
-            book_checker.clone(),
             local_message_exchange,
-            book_store.clone(),
-            book_files.clone(),
+            book_runtime,
             None,
-            book_path_leases.clone(),
-        );
+        )
+    }
 
-        assert!(Arc::ptr_eq(&context.get_book_store(), &book_store));
-        assert!(Arc::ptr_eq(&context.get_book_file_storer(), &book_files));
-        assert!(Arc::ptr_eq(&context.get_book_checker(), &book_checker));
-        let leased_path = Path::new("/tmp/context-books/leased.epub");
-        let _processing = book_path_leases.acquire_processing(leased_path).await;
-        assert!(context
-            .get_book_path_leases()
-            .try_acquire_reconciling(leased_path)
+    #[tokio::test]
+    async fn context_exposes_injected_available_book_runtime() {
+        let base = temp_context_root("context-available-books");
+        let books = base.join("books");
+        let covers = base.join("covers");
+        let repository: Repository =
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let exchange = LocalMessageExchange::new();
+        let runtime =
+            BookRuntime::initialize(repository.clone(), exchange.new_sender(), &books, &covers)
+                .await;
+        let available = runtime.available().unwrap();
+        let leases = available.ingestion.leases.clone();
+
+        let context = test_context(repository, runtime).await;
+
+        assert!(Arc::ptr_eq(
+            &context.get_available_book_runtime().unwrap(),
+            &available
+        ));
+        assert!(Arc::ptr_eq(
+            &context.get_book_checker(),
+            &available.checker
+        ));
+        let leased_path = books.join("leased.epub");
+        let _processing = leases.acquire_processing(&leased_path).await;
+        assert!(available
+            .ingestion
+            .leases
+            .try_acquire_reconciling(&leased_path)
             .is_none());
+        drop(_processing);
+        drop(context);
+        drop(available);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unavailable_context_exposes_shared_no_op_book_checker() {
+        let repository: Repository =
+            Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let runtime = BookRuntime::Unavailable {
+            message: Arc::from(BOOK_LIBRARY_UNAVAILABLE),
+        };
+        let context = test_context(repository, runtime).await;
+
+        let first = context.get_book_checker();
+        let second = context.get_book_checker();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.check_book_information().await.is_ok());
     }
 }

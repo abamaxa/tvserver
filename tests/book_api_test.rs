@@ -115,8 +115,8 @@ async fn start_server_with_repository(
 ) -> Result<(JoinHandle<Result<()>>, Repository)> {
     env::set_var(MOVIE_DIR, MOVIE_ROOT);
 
-    let (book_store, book_file_storer) =
-        get_book_services_at(repository.clone(), book_root, book_thumbnail_root);
+    let book_runtime =
+        get_book_services_at(repository.clone(), book_root, book_thumbnail_root).await;
     let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
     let context = get_context_with_book_services(
         get_media_store(),
@@ -124,8 +124,7 @@ async fn start_server_with_repository(
         get_task_manager(),
         repository.clone(),
         get_checker(),
-        book_store,
-        book_file_storer,
+        book_runtime,
     )
     .await?;
 

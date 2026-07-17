@@ -1,4 +1,5 @@
 pub mod api;
+mod book_runtime;
 mod context;
 mod tvserver;
 #[cfg(feature = "webserver")]
@@ -9,6 +10,10 @@ mod app;
 mod tauri_api;
 
 pub use api::{register, SharedState};
+pub use book_runtime::{
+    AvailableBookRuntime, BookIngestionRuntime, BookRuntime, BookStaticRoots,
+    BOOK_LIBRARY_UNAVAILABLE,
+};
 pub use context::{Context, create_context};
 pub use tvserver::TVServer;
 

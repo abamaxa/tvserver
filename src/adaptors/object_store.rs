@@ -71,6 +71,16 @@ impl FileSystemStore {
         Self::new_with_move_filesystem(root, Arc::new(CapabilityMoveFileSystem))
     }
 
+    pub fn try_new(root: &str) -> Result<Self> {
+        let store = Self::new_with_move_filesystem(root, Arc::new(CapabilityMoveFileSystem));
+        store.open_root()?;
+        Ok(store)
+    }
+
+    pub(crate) fn retained_root(&self) -> Result<Arc<Dir>> {
+        Ok(Arc::new(self.open_root()?.try_clone()?))
+    }
+
     fn new_with_move_filesystem(root: &str, move_filesystem: Arc<dyn MoveFileSystem>) -> Self {
         let store = Self {
             root: root.to_string(),
