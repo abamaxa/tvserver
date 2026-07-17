@@ -1116,6 +1116,16 @@ fn strict_entry_or_skip<T>(entry: io::Result<T>) -> Option<T> {
     }
 }
 
+fn strict_entry_name_or_skip(name: Result<String>) -> Option<String> {
+    match name {
+        Ok(name) => Some(name),
+        Err(error) => {
+            tracing::warn!("Skipping strict directory entry with invalid name: {error}");
+            None
+        }
+    }
+}
+
 #[async_trait]
 impl FileStore for FileSystemStore {
     async fn create_folder(&self, path: &Path) -> Result<()> {
@@ -1187,12 +1197,9 @@ impl FileStore for FileSystemStore {
                 let Some(entry) = strict_entry_or_skip(entry) else {
                     continue;
                 };
-                let name = match directory_entry_name(entry.file_name()) {
-                    Ok(name) => name,
-                    Err(error) => {
-                        tracing::warn!("Skipping strict directory entry with invalid name: {error}");
-                        continue;
-                    }
+                let Some(name) = strict_entry_name_or_skip(directory_entry_name(entry.file_name()))
+                else {
+                    continue;
                 };
                 let file_type = match entry.file_type() {
                     Ok(file_type) => file_type,
@@ -2735,11 +2742,20 @@ mod tests {
     async fn strict_listing_skips_non_utf8_entry_and_keeps_valid_sibling() {
         use std::os::unix::ffi::OsStringExt;
 
-        let base = std::env::temp_dir().join(format!(
+        struct TempDir(PathBuf);
+
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp_dir = TempDir(std::env::temp_dir().join(format!(
             "tvserver-list-non-utf8-{}-{}",
             std::process::id(),
             rand::random::<u64>()
-        ));
+        )));
+        let base = &temp_dir.0;
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join("valid.pdf"), b"book").unwrap();
         if let Err(error) = std::fs::write(
@@ -2748,7 +2764,6 @@ mod tests {
         ) {
             // Some Unix filesystems (including the macOS test volume) reject non-UTF-8 names.
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            std::fs::remove_dir_all(base).unwrap();
             return;
         }
         let store = FileSystemStore::new(base.to_str().unwrap());
@@ -2756,7 +2771,20 @@ mod tests {
         let listing = store.list_folder_no_follow("").await.unwrap();
 
         assert_eq!(listing, (Vec::new(), vec!["valid.pdf".to_string()]));
-        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn strict_listing_skips_invalid_name_and_keeps_later_names() {
+        let names: Vec<_> = [
+            Ok("before".to_string()),
+            Err(anyhow::anyhow!("directory entry name is not valid UTF-8")),
+            Ok("after".to_string()),
+        ]
+        .into_iter()
+        .filter_map(strict_entry_name_or_skip)
+        .collect();
+
+        assert_eq!(names, ["before", "after"]);
     }
 
     #[test]
