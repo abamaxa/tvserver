@@ -110,8 +110,18 @@ impl BookCheck {
                 );
                 continue;
             };
-            if self.store.regular_file_exists_no_follow(&full_path).await? {
-                continue;
+            match self.store.regular_file_exists_no_follow(&full_path).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(
+                        book = %book.file_name,
+                        checksum = book.checksum,
+                        path = %full_path.display(),
+                        "cannot safely inspect recorded book path; preserving row: {error}"
+                    );
+                    continue;
+                }
             }
             if let Err(error) = self
                 .repo
@@ -244,7 +254,7 @@ mod tests {
         relocation: Mutex<Option<(Repository, BookDetails)>>,
         directory_swap: Mutex<Option<(String, PathBuf, PathBuf)>>,
         traversal_hook: Option<Arc<TraversalHook>>,
-        inspection_error: bool,
+        inspection_error_path: Option<PathBuf>,
         legacy_calls: AtomicU64,
         strict_calls: AtomicU64,
     }
@@ -357,7 +367,7 @@ mod tests {
         }
 
         async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool> {
-            if self.inspection_error {
+            if self.inspection_error_path.as_deref() == Some(path) {
                 anyhow::bail!("forced exact-path inspection failure");
             }
             self.inner.regular_file_exists_no_follow(path).await
@@ -433,7 +443,9 @@ mod tests {
             .unwrap();
         tokio::fs::write(&book_path, b"epub").await.unwrap();
 
-        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let repository: Repository = Arc::new(
+            SqlRepository::new(":memory:", None).await.unwrap(),
+        );
         let storer: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
         let (sender, mut receiver) = mpsc::channel(8);
         let checker = BookCheck::new_with_root(storer, repository, sender, root.path());
@@ -701,7 +713,7 @@ mod tests {
             relocation: Mutex::new(None),
             directory_swap: Mutex::new(None),
             traversal_hook: Some(hook.clone()),
-            inspection_error: false,
+            inspection_error_path: None,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
@@ -730,26 +742,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_path_inspection_error_preserves_row_and_pending_events() {
+    async fn inspection_error_preserves_row_and_allows_sibling_reconciliation() {
         let root = TestDir::new("inspection-error");
-        let new_path = root.path().join("new.pdf");
-        tokio::fs::write(&new_path, b"book").await.unwrap();
-        let (sender, mut receiver) = mpsc::channel(8);
-        let repository: Repository = Arc::new(
-            SqlRepository::new(":memory:", Some(sender.clone()))
-                .await
-                .unwrap(),
+        let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let blocked_path = root.path().join("blocked.pdf");
+        let mut blocked = BookDetails::new(
+            "blocked.pdf".to_string(),
+            "".to_string(),
+            &blocked_path,
+            BookFormat::Pdf,
         );
-        let mut orphan = BookDetails::new(
-            "missing.epub".to_string(),
-            "Missing".to_string(),
-            &root.path().join("Missing/missing.epub"),
-            BookFormat::Epub,
+        blocked.checksum = 205;
+        blocked.state = BookState::Ready;
+        repository.save_book(&blocked).await.unwrap();
+        let mut missing = BookDetails::new(
+            "missing.pdf".to_string(),
+            "".to_string(),
+            &root.path().join("missing.pdf"),
+            BookFormat::Pdf,
         );
-        orphan.checksum = 205;
-        orphan.state = BookState::Ready;
-        repository.save_book(&orphan).await.unwrap();
-        receiver.try_recv().unwrap();
+        missing.checksum = 206;
+        missing.state = BookState::Ready;
+        repository.save_book(&missing).await.unwrap();
         let inner: FileStorer = Arc::new(FileSystemStore::new(root.path().to_str().unwrap()));
         let storer: FileStorer = Arc::new(ControlledListStore {
             inner,
@@ -757,25 +771,19 @@ mod tests {
             relocation: Mutex::new(None),
             directory_swap: Mutex::new(None),
             traversal_hook: None,
-            inspection_error: true,
+            inspection_error_path: Some(blocked_path),
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
+        let (sender, _receiver) = mpsc::channel(8);
         let checker = BookCheck::new_with_root(storer, repository.clone(), sender, root.path());
 
-        let error = checker.check_book_information().await.unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("forced exact-path inspection failure"));
-        assert_eq!(
-            repository.retrieve_book(205).await.unwrap().file_name,
-            "missing.epub"
-        );
-        assert!(
-            receiver.try_recv().is_err(),
-            "pending scanner event must not be published"
-        );
+        checker.check_book_information().await.unwrap();
+        assert!(repository.retrieve_book(blocked.checksum).await.is_ok());
+        assert!(matches!(
+            repository.retrieve_book(missing.checksum).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 
     #[tokio::test]
@@ -803,7 +811,7 @@ mod tests {
             relocation: Mutex::new(None),
             directory_swap: Mutex::new(None),
             traversal_hook: None,
-            inspection_error: false,
+            inspection_error_path: None,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
@@ -840,7 +848,7 @@ mod tests {
             relocation: Mutex::new(Some((repository.clone(), relocated))),
             directory_swap: Mutex::new(None),
             traversal_hook: None,
-            inspection_error: false,
+            inspection_error_path: None,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
@@ -922,7 +930,7 @@ mod tests {
                 outside.path().to_path_buf(),
             ))),
             traversal_hook: None,
-            inspection_error: false,
+            inspection_error_path: None,
             legacy_calls: AtomicU64::new(0),
             strict_calls: AtomicU64::new(0),
         });
