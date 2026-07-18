@@ -302,6 +302,27 @@ async fn serve_unavailable_book_static() -> StatusCode {
 mod security_tests {
     use super::*;
 
+    fn script_sources_are_self_only(policy: &str) -> bool {
+        let mut script_src_count = 0;
+
+        for directive in policy.split(';') {
+            let mut tokens = directive.split_ascii_whitespace();
+            let Some(name) = tokens.next() else {
+                continue;
+            };
+            if !name.eq_ignore_ascii_case("script-src") {
+                continue;
+            }
+
+            script_src_count += 1;
+            if tokens.next() != Some("'self'") || tokens.next().is_some() {
+                return false;
+            }
+        }
+
+        script_src_count == 1
+    }
+
     #[test]
     fn reader_csp_blocks_scripts_and_objects_without_blocking_reader_assets() {
         let response = with_security_headers(Response::new(Body::empty()));
@@ -319,7 +340,13 @@ mod security_tests {
         ] {
             assert!(policy.contains(directive), "missing {directive}");
         }
-        assert!(!policy.contains("'unsafe-eval'"));
-        assert!(!policy.contains("script-src 'self' blob:"));
+        assert!(script_sources_are_self_only(policy));
+    }
+
+    #[test]
+    fn reader_csp_blocks_scripts_with_duplicate_mixed_case_directives() {
+        assert!(!script_sources_are_self_only(
+            "SCRIPT-SRC https://evil; script-src 'self'"
+        ));
     }
 }
