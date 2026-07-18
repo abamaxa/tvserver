@@ -136,12 +136,13 @@ impl BookRuntime {
             &book_root,
             leases.clone(),
         ));
-        let store = Arc::new(BookStore::new_with_roots(
+        let store = Arc::new(BookStore::new_with_roots_and_leases(
             book_storer.clone(),
             thumbnail_storer,
             repository,
             &book_root,
             &thumbnail_root,
+            leases.clone(),
         ));
 
         Ok(AvailableBookRuntime {

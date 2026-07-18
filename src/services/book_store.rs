@@ -11,6 +11,7 @@ use crate::domain::{
         is_default_book_thumbnail, BookCollectionDetails, BookCollectionItem,
         DEFAULT_BOOK_THUMBNAIL,
     },
+    services::BookPathLeaseCoordinator,
     traits::{FileStorer, Repository},
 };
 
@@ -21,6 +22,7 @@ pub struct BookStore {
     repo: Repository,
     book_root: PathBuf,
     thumbnail_root: PathBuf,
+    leases: BookPathLeaseCoordinator,
 }
 
 impl BookStore {
@@ -38,12 +40,31 @@ impl BookStore {
         book_root: impl AsRef<Path>,
         thumbnail_root: impl AsRef<Path>,
     ) -> Self {
+        Self::new_with_roots_and_leases(
+            store,
+            thumbnail_store,
+            repo,
+            book_root,
+            thumbnail_root,
+            BookPathLeaseCoordinator::new(),
+        )
+    }
+
+    pub fn new_with_roots_and_leases(
+        store: FileStorer,
+        thumbnail_store: FileStorer,
+        repo: Repository,
+        book_root: impl AsRef<Path>,
+        thumbnail_root: impl AsRef<Path>,
+        leases: BookPathLeaseCoordinator,
+    ) -> Self {
         Self {
             store,
             thumbnail_store,
             repo,
             book_root: book_root.as_ref().to_path_buf(),
             thumbnail_root: thumbnail_root.as_ref().to_path_buf(),
+            leases,
         }
     }
 
@@ -140,6 +161,7 @@ impl BookStore {
         let file_name = safe_file_name(&book.file_name, "book file")?;
 
         let book_path = self.book_root.join(collection).join(file_name);
+        let _reconciling = self.leases.acquire_reconciling(&book_path).await;
         ensure_path_within_root(&book_path, &self.book_root, "book file").await?;
         ensure_regular_file(&book_path, "book file").await?;
         let staged_book_path = staging_path(&book_path, "book-delete")?;
@@ -403,7 +425,8 @@ mod tests {
                 BookDetails, BookFormat, BookState, CollectionItem, VideoDetails,
                 DEFAULT_BOOK_THUMBNAIL,
             },
-            traits::{Databaser, FileStorer, Repository},
+            services::{BookCheck, BookPathLeaseCoordinator},
+            traits::{BookChecker, Databaser, FileStorer, Repository},
         },
     };
 
@@ -467,11 +490,22 @@ mod tests {
     struct RelocatingDeleteRepository {
         inner: Repository,
         relocated: BookDetails,
+        delete_entered: Option<Arc<tokio::sync::Semaphore>>,
+        delete_release: Option<Arc<tokio::sync::Semaphore>>,
     }
 
     impl RelocatingDeleteRepository {
         async fn relocate(&self) -> Result<(), sqlx::Error> {
             self.inner.save_book(&self.relocated).await.map(|_| ())
+        }
+
+        async fn wait_before_conditional_delete(&self) {
+            if let (Some(entered), Some(release)) =
+                (self.delete_entered.as_ref(), self.delete_release.as_ref())
+            {
+                entered.add_permits(1);
+                release.acquire().await.unwrap().forget();
+            }
         }
     }
 
@@ -512,6 +546,7 @@ mod tests {
             file_name: &str,
         ) -> Result<u64, sqlx::Error> {
             self.relocate().await?;
+            self.wait_before_conditional_delete().await;
             self.inner
                 .delete_book_if_path_matches(checksum, collection, file_name)
                 .await
@@ -872,6 +907,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_lease_prevents_orphan_reconciliation_from_restoring_the_book() {
+        let layout = TestLayout::new("delete-orphan-reconciliation-race");
+        let book_path = layout.book_root.join("Fiction/Dune.epub");
+        tokio::fs::create_dir_all(book_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&book_path, b"book").await.unwrap();
+
+        let inner: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+        let book = sample_book(35, "Fiction", "Dune.epub");
+        inner.save_book(&book).await.unwrap();
+        let delete_entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let delete_release = Arc::new(tokio::sync::Semaphore::new(0));
+        let repository: Repository = Arc::new(RelocatingDeleteRepository {
+            inner: inner.clone(),
+            relocated: book.clone(),
+            delete_entered: Some(delete_entered.clone()),
+            delete_release: Some(delete_release.clone()),
+        });
+        let book_files: FileStorer = Arc::new(FileSystemStore::new(
+            layout
+                .book_root
+                .to_str()
+                .expect("book root should be UTF-8"),
+        ));
+        let thumbnail_files: FileStorer = Arc::new(FileSystemStore::new(
+            layout
+                .thumbnail_root
+                .to_str()
+                .expect("thumbnail root should be UTF-8"),
+        ));
+        let leases = BookPathLeaseCoordinator::new();
+        let store = BookStore::new_with_roots_and_leases(
+            book_files.clone(),
+            thumbnail_files,
+            repository.clone(),
+            &layout.book_root,
+            &layout.thumbnail_root,
+            leases.clone(),
+        );
+        let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+        let checker = BookCheck::new_with_root_and_leases(
+            book_files,
+            repository,
+            sender,
+            &layout.book_root,
+            leases,
+        );
+
+        let deletion = tokio::spawn(async move { store.delete(book.checksum).await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), delete_entered.acquire())
+            .await
+            .expect("delete should reach the conditional database operation")
+            .unwrap()
+            .forget();
+
+        checker.check_book_information().await.unwrap();
+
+        assert!(inner.retrieve_book(35).await.is_ok());
+        delete_release.add_permits(1);
+        deletion.await.unwrap().unwrap();
+        assert!(!book_path.exists());
+        assert!(matches!(
+            inner.retrieve_book(35).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+    }
+
+    #[tokio::test]
     async fn delete_restores_staged_files_when_the_book_is_relocated_concurrently() {
         let layout = TestLayout::new("delete-concurrent-relocation");
         let original_path = layout.book_root.join("Fiction/Dune.epub");
@@ -900,6 +1004,8 @@ mod tests {
         let repository: Repository = Arc::new(RelocatingDeleteRepository {
             inner: inner.clone(),
             relocated,
+            delete_entered: None,
+            delete_release: None,
         });
         let book_files: FileStorer = Arc::new(FileSystemStore::new(
             layout
