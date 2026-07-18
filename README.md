@@ -64,16 +64,13 @@ defaults to a lowercase `books` directory beside `MOVIE_DIR`. Book covers are wr
 be extracted, the bundled `assets/book/default-book.jpg` is materialized there as
 `default-book.jpg`. This shared fallback is preserved when books are deleted.
 
-PDF metadata extraction is Rust-native and does not require Pdfium. First-page PDF thumbnail
-rendering is optional, is disabled in default builds, and can be enabled with the Cargo feature
-`pdf-thumbnails`. When enabled, the renderer attempts to load a target-compatible Pdfium library
-from the current directory (for a packaged library) and then from the system. If Pdfium cannot be
-loaded or a page cannot be rendered, metadata extraction still succeeds and the book uses
-`default-book.jpg`.
+The backend does not parse PDF metadata or render PDF pages. PDF files remain ingestible and
+downloadable: the original filename provides the fallback title, authors and page count remain
+empty, and the book uses `default-book.jpg`. Rich PDF metadata supplied by a frontend is not yet
+part of the backend API.
 
-Default builds, including Android builds without `pdf-thumbnails`, do not require Pdfium or desktop
-command-line PDF tools. To use `pdf-thumbnails` on Android, package a Pdfium library that is
-compatible with the Android target.
+EPUB metadata and cover extraction remain available in the backend and use bounded archive,
+document, and image-processing limits.
 
 The canonical frontend REST contract location is `docs/api/openapi.yaml`.
 

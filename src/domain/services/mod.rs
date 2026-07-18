@@ -11,10 +11,8 @@ pub mod copy_server;
 
 pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum, get_video_metadata};
 pub use book_metadata::{
-    extract_epub_metadata, extract_pdf_metadata, extract_pdf_metadata_with_renderer,
-    generate_book_metadata,
-    BookMetadataExtraction, BookMetadataExtractionError, DefaultPdfThumbnailRenderer,
-    PdfThumbnailRenderer,
+    extract_epub_metadata, extract_pdf_metadata, generate_book_metadata,
+    BookMetadataExtraction, BookMetadataExtractionError,
 };
 pub(crate) use book_metadata::generate_book_metadata_with_cancellation;
 pub use media_check::MediaCheck;

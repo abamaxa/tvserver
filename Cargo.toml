@@ -79,7 +79,6 @@ strip = true # Ensures debug symbols are removed.
 vlc = []
 ai-descriptions = []
 webserver = []
-pdf-thumbnails = []
 # Default features - include Tauri dependencies when webserver is not enabled
 default = ["tauri", "tauri-plugin-log", "log", "tauri-build"]
 

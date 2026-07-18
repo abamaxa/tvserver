@@ -1071,37 +1071,10 @@ fn thumbnail_lock(path: &Path) -> anyhow::Result<Arc<tokio::sync::Mutex<()>>> {
     Ok(lock)
 }
 
-pub trait PdfThumbnailRenderer {
-    fn render_thumbnail(&self, pdf_path: &Path) -> Result<image::DynamicImage, String>;
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultPdfThumbnailRenderer;
-
-impl PdfThumbnailRenderer for DefaultPdfThumbnailRenderer {
-    fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
-        Err("PDF thumbnail rendering is disabled".to_string())
-    }
-}
-
 pub fn extract_pdf_metadata(
     pdf_path: &Path,
     thumbnail_dir: &Path,
-    thumbnail_key: &str,
-) -> Result<BookMetadataExtraction, BookMetadataExtractionError> {
-    extract_pdf_metadata_with_renderer(
-        pdf_path,
-        thumbnail_dir,
-        thumbnail_key,
-        &DefaultPdfThumbnailRenderer,
-    )
-}
-
-pub fn extract_pdf_metadata_with_renderer<R: PdfThumbnailRenderer + ?Sized>(
-    pdf_path: &Path,
-    thumbnail_dir: &Path,
     _thumbnail_key: &str,
-    _renderer: &R,
 ) -> Result<BookMetadataExtraction, BookMetadataExtractionError> {
     ensure_default_book_thumbnail(thumbnail_dir)
         .map_err(|error| BookMetadataExtractionError::Pdf(error.to_string()))?;
@@ -2253,15 +2226,6 @@ mod tests {
         zip.finish().unwrap();
     }
 
-    struct CountingRenderer(AtomicUsize);
-
-    impl PdfThumbnailRenderer for CountingRenderer {
-        fn render_thumbnail(&self, _pdf_path: &Path) -> Result<image::DynamicImage, String> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Err("renderer must not run".to_string())
-        }
-    }
-
     fn write_untrusted_pdf(path: &Path, marker: &[u8]) {
         fs::write(path, marker).unwrap();
     }
@@ -2272,16 +2236,14 @@ mod tests {
         let pdf_path = temp.path().join("Untrusted Manual.pdf");
         fs::write(&pdf_path, b"not a PDF and deliberately unparseable").unwrap();
         let covers = temp.path().join("covers");
-        let renderer = CountingRenderer(AtomicUsize::new(0));
 
-        let result = extract_pdf_metadata_with_renderer(&pdf_path, &covers, "unsafe", &renderer)
+        let result = extract_pdf_metadata(&pdf_path, &covers, "unsafe")
             .expect("safe PDF fallback should not parse input bytes");
 
         assert_eq!(result.title.as_deref(), Some("Untrusted Manual"));
         assert!(result.authors.is_empty());
         assert_eq!(result.page_count, None);
         assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
-        assert_eq!(renderer.0.load(Ordering::SeqCst), 0);
         assert_eq!(
             fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
             crate::domain::models::default_book_thumbnail_bytes()
@@ -2297,15 +2259,9 @@ mod tests {
             b"%PDF-1.7 embedded Title=The PDF Title Author=Ada Author Pages=2",
         );
         let covers = temp.path().join("covers");
-        let renderer = CountingRenderer(AtomicUsize::new(0));
 
-        let result = extract_pdf_metadata_with_renderer(
-            &pdf_path,
-            &covers,
-            "pdf-42",
-            &renderer,
-        )
-        .expect("PDF bytes must not be parsed");
+        let result = extract_pdf_metadata(&pdf_path, &covers, "pdf-42")
+            .expect("PDF bytes must not be parsed");
 
         assert_eq!(result.title.as_deref(), Some("metadata"));
         assert!(result.authors.is_empty());
@@ -2320,7 +2276,6 @@ mod tests {
             result.warnings,
             ["PDF metadata parsing is disabled for untrusted input"]
         );
-        assert_eq!(renderer.0.load(Ordering::SeqCst), 0);
         assert_eq!(
             fs::read(covers.join(DEFAULT_BOOK_THUMBNAIL)).unwrap(),
             crate::domain::models::default_book_thumbnail_bytes()
@@ -2332,13 +2287,11 @@ mod tests {
         let temp = TestDir::new();
         let pdf_path = temp.path().join("the.hidden_library.pdf");
         write_untrusted_pdf(&pdf_path, b"opaque PDF bytes");
-        let renderer = CountingRenderer(AtomicUsize::new(0));
 
-        let result = extract_pdf_metadata_with_renderer(
+        let result = extract_pdf_metadata(
             &pdf_path,
             &temp.path().join("covers"),
             "pdf-fallback",
-            &renderer,
         )
         .unwrap();
 
@@ -2347,7 +2300,6 @@ mod tests {
         assert_eq!(result.description, None);
         assert_eq!(result.page_count, None);
         assert_eq!(result.thumbnail, DEFAULT_BOOK_THUMBNAIL);
-        assert_eq!(renderer.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]
