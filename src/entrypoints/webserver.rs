@@ -23,9 +23,10 @@ use crate::services::{setup_logging, TVSERVER_LOG};
 use anyhow::anyhow;
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, State},
-    http::{header, StatusCode},
+    extract::{Path as AxumPath, Request, State},
+    http::{header, HeaderName, HeaderValue, StatusCode},
     middleware,
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -40,6 +41,28 @@ use tower_http::{
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
+
+const READER_CONTENT_SECURITY_POLICY: &str = concat!(
+    "default-src 'self'; ",
+    "base-uri 'none'; object-src 'none'; frame-ancestors 'none'; ",
+    "script-src 'self'; style-src 'self' 'unsafe-inline' blob:; ",
+    "img-src 'self' data: blob:; font-src 'self' data: blob:; ",
+    "media-src 'self' blob:; frame-src blob:; worker-src 'self' blob:; ",
+    "connect-src 'self' ws: wss:; form-action 'self'; ",
+    "navigate-to 'self' http: https: mailto: tel:"
+);
+
+fn with_security_headers(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(READER_CONTENT_SECURITY_POLICY),
+    );
+    response
+}
+
+async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    with_security_headers(next.run(request).await)
+}
 
 pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
     setup_logging(TVSERVER_LOG);
@@ -113,7 +136,8 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(false)),
-        ))
+        )
+        .layer(middleware::from_fn(security_headers)))
 }
 
 #[derive(Clone)]
@@ -272,4 +296,30 @@ async fn serve_book_thumbnail(
 
 async fn serve_unavailable_book_static() -> StatusCode {
     StatusCode::SERVICE_UNAVAILABLE
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn reader_csp_blocks_scripts_and_objects_without_blocking_reader_assets() {
+        let response = with_security_headers(Response::new(Body::empty()));
+        let policy = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        for directive in [
+            "default-src 'self'",
+            "script-src 'self'",
+            "worker-src 'self' blob:",
+            "frame-src blob:",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+        ] {
+            assert!(policy.contains(directive), "missing {directive}");
+        }
+        assert!(!policy.contains("'unsafe-eval'"));
+        assert!(!policy.contains("script-src 'self' blob:"));
+    }
 }
