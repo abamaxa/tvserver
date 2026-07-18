@@ -106,7 +106,7 @@ impl BookCheck {
             let Some(_reconciling) = self.leases.try_acquire_reconciling(&full_path) else {
                 tracing::debug!(
                     path = %full_path.display(),
-                    "Skipping orphan reconciliation while book ingestion is active"
+                    "Skipping orphan reconciliation because another operation owns the book path"
                 );
                 continue;
             };

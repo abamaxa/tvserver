@@ -950,7 +950,7 @@ mod tests {
         let (sender, _receiver) = tokio::sync::mpsc::channel(8);
         let checker = BookCheck::new_with_root_and_leases(
             book_files,
-            repository,
+            inner.clone(),
             sender,
             &layout.book_root,
             leases,
@@ -963,11 +963,14 @@ mod tests {
             .unwrap()
             .forget();
 
-        checker.check_book_information().await.unwrap();
-
-        assert!(inner.retrieve_book(35).await.is_ok());
+        let reconciliation_result = checker.check_book_information().await;
+        let row_was_preserved_while_deletion_paused = inner.retrieve_book(35).await.is_ok();
         delete_release.add_permits(1);
-        deletion.await.unwrap().unwrap();
+        let deletion_result = deletion.await;
+
+        reconciliation_result.unwrap();
+        deletion_result.unwrap().unwrap();
+        assert!(row_was_preserved_while_deletion_paused);
         assert!(!book_path.exists());
         assert!(matches!(
             inner.retrieve_book(35).await,

@@ -213,7 +213,12 @@ let repository: Repository = Arc::new(RelocatingDeleteRepository {
 });
 ```
 
-Add the new regression after `delete_removes_book_generated_thumbnail_and_repository_row`:
+Add the new regression after `delete_removes_book_generated_thumbnail_and_repository_row`.
+Only `BookStore` receives the pausing `repository` wrapper; pass `inner.clone()`
+to `BookCheck` so a lease regression lets the checker complete its real
+filesystem/SQLite reconciliation instead of pausing in the test double. Capture
+whether the row exists while deletion is paused, then release and await deletion
+before asserting either result so both paths clean up predictably:
 
 ```rust
 #[tokio::test]
@@ -257,7 +262,7 @@ async fn delete_lease_prevents_orphan_reconciliation_from_restoring_the_book() {
     let (sender, _receiver) = tokio::sync::mpsc::channel(8);
     let checker = BookCheck::new_with_root_and_leases(
         book_files,
-        repository,
+        inner.clone(),
         sender,
         &layout.book_root,
         leases,
@@ -273,11 +278,14 @@ async fn delete_lease_prevents_orphan_reconciliation_from_restoring_the_book() {
     .unwrap()
     .forget();
 
-    checker.check_book_information().await.unwrap();
-
-    assert!(inner.retrieve_book(35).await.is_ok());
+    let reconciliation_result = checker.check_book_information().await;
+    let row_was_preserved_while_deletion_paused = inner.retrieve_book(35).await.is_ok();
     delete_release.add_permits(1);
-    deletion.await.unwrap().unwrap();
+    let deletion_result = deletion.await;
+
+    reconciliation_result.unwrap();
+    deletion_result.unwrap().unwrap();
+    assert!(row_was_preserved_while_deletion_paused);
     assert!(!book_path.exists());
     assert!(matches!(
         inner.retrieve_book(35).await,
@@ -381,7 +389,20 @@ let store = Arc::new(BookStore::new_with_roots_and_leases(
 ));
 ```
 
-- [ ] **Step 6: Run the race test and affected suites and verify GREEN**
+- [ ] **Step 6: Keep the scanner skip wording operationally accurate, then run the race test and affected suites and verify GREEN**
+
+In `src/domain/services/book_check.rs`, retain the non-blocking
+`try_acquire_reconciling` behavior but replace its skip message with:
+
+```rust
+tracing::debug!(
+    path = %full_path.display(),
+    "Skipping orphan reconciliation because another operation owns the book path"
+);
+```
+
+The same lease may be held by ingestion, explicit deletion, or another
+path-scoped operation; the message must not claim ingestion specifically.
 
 Run:
 
