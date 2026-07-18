@@ -137,6 +137,7 @@ git commit -m "feat: add blocking book reconciliation lease"
 
 **Files:**
 - Modify: `src/services/book_store.rs:1-48,137-225,405-590,850-950`
+- Modify: `src/domain/services/book_check.rs:104-111`
 - Modify: `src/entrypoints/book_runtime.rs:129-153`
 - Test: `src/services/book_store.rs`
 
@@ -418,7 +419,7 @@ Expected: the race regression and all affected suites pass.
 - [ ] **Step 7: Commit the deletion lease**
 
 ```bash
-git add src/services/book_store.rs src/entrypoints/book_runtime.rs
+git add src/services/book_store.rs src/domain/services/book_check.rs src/entrypoints/book_runtime.rs
 git commit -m "fix: serialize book deletion with reconciliation"
 ```
 

@@ -59,3 +59,31 @@ review wave.
 - Repository-wide `cargo fmt --check` remains noisy because of unrelated
   pre-existing formatting differences; no formatting changes outside this scope
   were made.
+
+## Bookkeeping Correction Addendum
+
+### Files Changed
+
+- `docs/superpowers/plans/2026-07-18-book-delete-lease-checksum-decision.md`
+  - Adds `src/domain/services/book_check.rs:104-111` to Task 2's Files
+    inventory.
+  - Adds `src/domain/services/book_check.rs` to Task 2 Step 7's `git add`
+    command.
+
+### Verification
+
+| Command | Result |
+| --- | --- |
+| `git diff --check` | PASS — no whitespace errors. |
+
+### Self-Review
+
+- The Task 2 Files inventory now lists every source file its instructions
+  modify.
+- Step 7 now stages the same scanner source file, so the task's commit command
+  matches its documented changes.
+- No Rust source or other implementation scope changed.
+
+### Concerns
+
+- No concerns found.
