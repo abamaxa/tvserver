@@ -203,7 +203,7 @@ async fn progress_migration_adds_only_the_books_column() {
 
 Add a lifecycle test that saves progress, calls `save_book` again with the same checksum and asserts the progress remains, then saves a same-path book with a different checksum and asserts the replacement has `progress == None` while the old checksum returns `RowNotFound`.
 
-REST tests must expect PUT 204, then GET the book and assert nested progress. Removed list/get/delete progress routes must return 404. Tauri core tests must expect `()`.
+REST tests must expect PUT 204, then GET the book and assert nested progress. The fully removed `/api/book-progress` path must return 404; GET and DELETE on the retained PUT path use Axum's standard 405 Method Not Allowed response. Tauri core tests must expect `()`.
 
 - [ ] **Step 2: Verify RED**
 
