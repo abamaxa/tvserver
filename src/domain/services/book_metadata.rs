@@ -2163,12 +2163,10 @@ mod tests {
             algorithm::file_integrity::FileSeal,
             messagebus::{LocalMessageExchange, MessageFilter},
             models::{
-                BookFormat, BookLocator, BookProgress, BookState, CollectionItem, VideoDetails,
+                BookFormat, BookState, CollectionItem, SaveBookProgressRequest, VideoDetails,
             },
             traits::{
-                Databaser, DeleteBookProgressOutcome, FileStore, FileStorer,
-                GetBookProgressOutcome, Repository, SaveBookProgressOutcome, StagedFile,
-                StoreObject,
+                Databaser, FileStore, FileStorer, Repository, StagedFile, StoreObject,
             },
         },
     };
@@ -4079,33 +4077,12 @@ mod tests {
             self.inner.list_all_videos().await
         }
 
-        async fn list_book_progress(&self) -> Result<Vec<BookProgress>, sqlx::Error> {
-            self.inner.list_book_progress().await
-        }
-
-        async fn get_book_progress(
-            &self,
-            checksum: i64,
-        ) -> Result<GetBookProgressOutcome, sqlx::Error> {
-            self.inner.get_book_progress(checksum).await
-        }
-
         async fn save_book_progress(
             &self,
             checksum: i64,
-            progress: &BookLocator,
-            progression: Option<f64>,
-        ) -> Result<SaveBookProgressOutcome, sqlx::Error> {
-            self.inner
-                .save_book_progress(checksum, progress, progression)
-                .await
-        }
-
-        async fn delete_book_progress(
-            &self,
-            checksum: i64,
-        ) -> Result<DeleteBookProgressOutcome, sqlx::Error> {
-            self.inner.delete_book_progress(checksum).await
+            progress: &SaveBookProgressRequest,
+        ) -> Result<bool, sqlx::Error> {
+            self.inner.save_book_progress(checksum, progress).await
         }
     }
 

@@ -156,317 +156,59 @@ impl Drop for TempRoot {
     }
 }
 
-async fn assert_json_error(
-    response: reqwest::Response,
-    status: StatusCode,
-    message: &str,
-) -> Result<()> {
-    assert_eq!(response.status(), status);
-    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
-    let result: Response = response.json().await?;
-    assert!(result.message.is_empty());
-    assert_eq!(result.errors, [message]);
-    Ok(())
-}
-
 #[tokio::test]
-async fn book_progress_lifecycle_round_trips_lists_replaces_and_resets() -> Result<()> {
-    let (server, repository) = start_server(57214).await?;
+async fn book_progress_put_returns_no_content_and_is_read_through_the_book() -> Result<()> {
+    let (server, repository) = start_server(57219).await?;
     repository
-        .save_book(&sample_book(i64::MAX, "", "largest.epub"))
-        .await?;
-    repository
-        .save_book(&sample_book(2, "", "second.pdf"))
+        .save_book(&sample_book(42, "", "embedded.epub"))
         .await?;
     let client = reqwest::Client::builder().no_proxy().build()?;
 
-    let empty = client
-        .get(format!("http://localhost:57214/api/book/{}/progress", i64::MAX))
-        .send()
-        .await?;
-    assert_eq!(empty.status(), StatusCode::NO_CONTENT);
-    assert!(empty.bytes().await?.is_empty());
-
-    let largest_response = client
-        .put(format!("http://localhost:57214/api/book/{}/progress", i64::MAX))
+    let saved = client
+        .put("http://localhost:57219/api/book/42/progress")
         .json(&serde_json::json!({
-            "locator": { "type": "epub-cfi", "value": "epubcfi(/6/4!/4/2/8)" },
-            "progression": 0.42
-        }))
-        .send()
-        .await?;
-    assert_eq!(largest_response.status(), StatusCode::OK);
-    let largest: Value = largest_response.json().await?;
-    assert_eq!(largest["checksum"], i64::MAX.to_string());
-    assert_eq!(largest["locator"]["type"], "epub-cfi");
-    assert_eq!(largest["locator"]["value"], "epubcfi(/6/4!/4/2/8)");
-    assert_eq!(largest["progression"], 0.42);
-    assert!(largest["updatedOn"]
-        .as_str()
-        .is_some_and(|value| !value.is_empty()));
-
-    let second_response = client
-        .put("http://localhost:57214/api/book/2/progress")
-        .json(&serde_json::json!({
-            "locator": { "type": "pdf-page", "value": "7" }
-        }))
-        .send()
-        .await?;
-    assert_eq!(second_response.status(), StatusCode::OK);
-
-    let list_response = client
-        .get("http://localhost:57214/api/book-progress")
-        .send()
-        .await?;
-    assert_eq!(list_response.status(), StatusCode::OK);
-    let listed: Value = list_response.json().await?;
-    assert_eq!(listed.as_array().unwrap().len(), 2);
-    assert_eq!(listed[0]["checksum"], "2");
-    assert_eq!(
-        listed[0]["locator"],
-        serde_json::json!({ "type": "pdf-page", "value": "7" })
-    );
-    assert!(listed[0].get("progression").is_none());
-    assert_eq!(listed[1]["checksum"], i64::MAX.to_string());
-
-    let replacement_response = client
-        .put(format!("http://localhost:57214/api/book/{}/progress", i64::MAX))
-        .json(&serde_json::json!({
-            "locator": { "type": "pdf-page", "value": "99" }
-        }))
-        .send()
-        .await?;
-    assert_eq!(replacement_response.status(), StatusCode::OK);
-    let replacement: Value = replacement_response.json().await?;
-    assert_eq!(
-        replacement["locator"],
-        serde_json::json!({ "type": "pdf-page", "value": "99" })
-    );
-    assert!(replacement.get("progression").is_none());
-
-    let retrieved_response = client
-        .get(format!("http://localhost:57214/api/book/{}/progress", i64::MAX))
-        .send()
-        .await?;
-    assert_eq!(retrieved_response.status(), StatusCode::OK);
-    let retrieved: Value = retrieved_response.json().await?;
-    assert_eq!(retrieved, replacement);
-
-    for _ in 0..2 {
-        let reset = client
-            .delete(format!("http://localhost:57214/api/book/{}/progress", i64::MAX))
-            .send()
-            .await?;
-        assert_eq!(reset.status(), StatusCode::NO_CONTENT);
-        assert!(reset.bytes().await?.is_empty());
-    }
-    let after_reset = client
-        .get(format!("http://localhost:57214/api/book/{}/progress", i64::MAX))
-        .send()
-        .await?;
-    assert_eq!(after_reset.status(), StatusCode::NO_CONTENT);
-
-    Ok(server.abort())
-}
-
-#[tokio::test]
-async fn book_progress_rejects_invalid_input_and_unknown_books_with_json_errors() -> Result<()> {
-    let (server, repository) = start_server(57215).await?;
-    repository
-        .save_book(&sample_book(7, "", "valid.epub"))
-        .await?;
-    let client = reqwest::Client::builder().no_proxy().build()?;
-
-    for method in [Method::GET, Method::PUT, Method::DELETE] {
-        for checksum in ["not-a-number", "9223372036854775808", "%FF"] {
-            assert_json_error(
-                client
-                    .request(
-                        method.clone(),
-                        format!("http://localhost:57215/api/book/{checksum}/progress"),
-                    )
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(r#"{"locator":{"type":"pdf-page","value":"1"}}"#)
-                    .send()
-                    .await?,
-                StatusCode::BAD_REQUEST,
-                "invalid book checksum",
-            )
-            .await?;
-        }
-    }
-
-    for method in [Method::GET, Method::PUT, Method::DELETE] {
-        assert_json_error(
-            client
-                .request(method, "http://localhost:57215/api/book/404/progress")
-                .header(CONTENT_TYPE, "application/json")
-                .body(r#"{"locator":{"type":"pdf-page","value":"1"}}"#)
-                .send()
-                .await?,
-            StatusCode::NOT_FOUND,
-            "book not found",
-        )
-        .await?;
-    }
-
-    for (body, message) in [
-        (
-            serde_json::json!({ "locator": { "type": "future", "value": "1" } }),
-            "invalid book locator type",
-        ),
-        (
-            serde_json::json!({ "locator": { "type": "pdf-page", "value": "  " } }),
-            "book locator value must not be blank",
-        ),
-        (
-            serde_json::json!({ "locator": { "type": "pdf-page", "value": "1" }, "progression": 1.01 }),
-            "book progression must be finite and between 0 and 1",
-        ),
-    ] {
-        assert_json_error(
-            client
-                .put("http://localhost:57215/api/book/7/progress")
-                .json(&body)
-                .send()
-                .await?,
-            StatusCode::BAD_REQUEST,
-            message,
-        )
-        .await?;
-    }
-
-    for body in [
-        r#"{"locator":{"type":"pdf-page","value":"1"}"#.to_string(),
-        r#"{"locator":{"type":"pdf-page","value":"1"},"progression":"half"}"#.to_string(),
-    ] {
-        assert_json_error(
-            client
-                .put("http://localhost:57215/api/book/7/progress")
-                .header(CONTENT_TYPE, "application/json")
-                .body(body)
-                .send()
-                .await?,
-            StatusCode::BAD_REQUEST,
-            "invalid request body",
-        )
-        .await?;
-    }
-
-    let oversized = format!(
-        r#"{{"locator":{{"type":"pdf-page","value":"{}"}}}}"#,
-        "x".repeat(2 * 1024 * 1024)
-    );
-    assert_json_error(
-        client
-            .put("http://localhost:57215/api/book/7/progress")
-            .header(CONTENT_TYPE, "application/json")
-            .body(oversized)
-            .send()
-            .await?,
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "request body too large",
-    )
-    .await?;
-
-    Ok(server.abort())
-}
-
-#[tokio::test]
-async fn book_progress_cascades_after_full_book_deletion() -> Result<()> {
-    let temp_root = TempRoot::new("progress-cascade", 57216)?;
-    let book_root = temp_root.0.join("books");
-    let book_thumbnail_root = book_root.join(".thumbnails");
-    let book_path = book_root.join("Delete/delete-progress.epub");
-    fs::create_dir_all(book_path.parent().unwrap()).await?;
-    fs::write(&book_path, b"delete progress fixture").await?;
-    let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
-    repository
-        .save_book(&sample_book(16, "Delete", "delete-progress.epub"))
-        .await?;
-    let (server, _) =
-        start_server_with_repository(57216, repository, &book_root, &book_thumbnail_root).await?;
-    let client = reqwest::Client::builder().no_proxy().build()?;
-
-    client
-        .put("http://localhost:57216/api/book/16/progress")
-        .json(&serde_json::json!({
-            "locator": { "type": "epub-cfi", "value": "epubcfi(/6/2)" },
+            "locator": { "type": "epub-cfi", "value": "epubcfi(/6/4)" },
             "progression": 0.5
         }))
         .send()
-        .await?
-        .error_for_status()?;
-    client
-        .delete("http://localhost:57216/api/book/16")
-        .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+    assert!(saved.bytes().await?.is_empty());
 
-    let listed: Value = client
-        .get("http://localhost:57216/api/book-progress")
+    let book: Value = client
+        .get("http://localhost:57219/api/book/42")
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(listed, serde_json::json!([]));
-    assert_json_error(
-        client
-            .get("http://localhost:57216/api/book/16/progress")
-            .send()
-            .await?,
-        StatusCode::NOT_FOUND,
-        "book not found",
-    )
-    .await?;
+    assert_eq!(
+        book["progress"]["locator"],
+        serde_json::json!({ "type": "epub-cfi", "value": "epubcfi(/6/4)" })
+    );
+    assert_eq!(book["progress"]["progression"], 0.5);
+    assert!(book["progress"]["updatedOn"]
+        .as_str()
+        .is_some_and(|value| value.ends_with('Z')));
 
-    Ok(server.abort())
-}
-
-#[tokio::test]
-async fn book_progress_repository_errors_are_sanitized() -> Result<()> {
-    let temp_root = TempRoot::new("progress-repository-error", 57217)?;
-    let database_path = temp_root.0.join("books.sqlite");
-    let database_url = format!("sqlite://{}", database_path.display());
-    let repository: Repository = Arc::new(SqlRepository::new(&database_url, None).await?);
-    repository
-        .save_book(&sample_book(17, "", "repository-error.epub"))
-        .await?;
-    let mut connection = SqliteConnection::connect(&database_url).await?;
-    sqlx::query("DROP TABLE book_progress")
-        .execute(&mut connection)
-        .await?;
-    connection.close().await?;
-    let (server, _) = start_server_with_repository(
-        57217,
-        repository,
-        Path::new(BOOK_ROOT),
-        Path::new(BOOK_THUMBNAIL_ROOT),
-    )
-    .await?;
-    let client = reqwest::Client::builder().no_proxy().build()?;
-
-    for (method, path) in [
-        (Method::GET, "/api/book-progress"),
-        (Method::GET, "/api/book/17/progress"),
-        (Method::PUT, "/api/book/17/progress"),
-        (Method::DELETE, "/api/book/17/progress"),
+    for (method, path, expected) in [
+        (Method::GET, "/api/book-progress", StatusCode::NOT_FOUND),
+        (
+            Method::GET,
+            "/api/book/42/progress",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            Method::DELETE,
+            "/api/book/42/progress",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
     ] {
         let response = client
-            .request(method, format!("http://localhost:57217{path}"))
-            .header(CONTENT_TYPE, "application/json")
-            .body(r#"{"locator":{"type":"pdf-page","value":"1"}}"#)
+            .request(method, format!("http://localhost:57219{path}"))
             .send()
             .await?;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{path}");
-        let bytes = response.bytes().await?;
-        let result: Response = serde_json::from_slice(&bytes)?;
-        assert_eq!(result.errors, ["internal server error"], "{path}");
-        assert!(
-            !String::from_utf8_lossy(&bytes).contains("no such table"),
-            "{path}"
-        );
+        assert_eq!(response.status(), expected, "{path}");
     }
 
     Ok(server.abort())

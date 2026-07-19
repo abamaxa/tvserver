@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::messages::{MediaItem, RemoteMessage, TaskState};
 use super::models::{
-    BookDetails, BookLocator, BookProgress, CollectionItem, DownloadableItem, SearchResults,
+    BookDetails, CollectionItem, DownloadableItem, SaveBookProgressRequest, SearchResults,
     VideoDetails,
 };
 use anyhow;
@@ -299,52 +299,11 @@ pub trait Databaser: Sync + Send {
     async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
     async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error>;
-    async fn list_book_progress(&self) -> Result<Vec<BookProgress>, sqlx::Error> {
-        Err(book_progress_not_implemented())
-    }
-    async fn get_book_progress(
-        &self,
-        _checksum: i64,
-    ) -> Result<GetBookProgressOutcome, sqlx::Error> {
-        Err(book_progress_not_implemented())
-    }
     async fn save_book_progress(
         &self,
-        _checksum: i64,
-        _progress: &BookLocator,
-        _progression: Option<f64>,
-    ) -> Result<SaveBookProgressOutcome, sqlx::Error> {
-        Err(book_progress_not_implemented())
-    }
-    async fn delete_book_progress(
-        &self,
-        _checksum: i64,
-    ) -> Result<DeleteBookProgressOutcome, sqlx::Error> {
-        Err(book_progress_not_implemented())
-    }
-}
-
-#[derive(Debug)]
-pub enum GetBookProgressOutcome {
-    BookNotFound,
-    NoProgress,
-    Progress(BookProgress),
-}
-
-#[derive(Debug)]
-pub enum SaveBookProgressOutcome {
-    BookNotFound,
-    Saved(BookProgress),
-}
-
-#[derive(Debug)]
-pub enum DeleteBookProgressOutcome {
-    BookNotFound,
-    Deleted,
-}
-
-fn book_progress_not_implemented() -> sqlx::Error {
-    sqlx::Error::Protocol("book progress storage is not implemented".into())
+        checksum: i64,
+        progress: &SaveBookProgressRequest,
+    ) -> Result<bool, sqlx::Error>;
 }
 
 pub type Repository = Arc<dyn Databaser>;

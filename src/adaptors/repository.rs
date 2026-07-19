@@ -9,12 +9,10 @@ use crate::domain::algorithm::get_thumbnails_url;
 use crate::domain::config::get_database_migration_dir;
 use crate::domain::messages::{BookEvent, LocalMessage, LocalMessageSender, VideoEvent};
 use crate::domain::models::{
-    BookDetails, BookFormat, BookLocator, BookLocatorType, BookMetadata, BookProgress,
-    CollectionItem, SeriesDetails, VideoDetails, VideoMetadata,
+    BookDetails, BookFormat, BookMetadata, BookReadingProgress, CollectionItem,
+    SaveBookProgressRequest, SeriesDetails, VideoDetails, VideoMetadata,
 };
-use crate::domain::traits::{
-    Databaser, DeleteBookProgressOutcome, GetBookProgressOutcome, SaveBookProgressOutcome,
-};
+use crate::domain::traits::Databaser;
 use itertools::Itertools;
 
 const MEMORY_DB_URL: &str = ":memory:";
@@ -28,8 +26,7 @@ impl SqlRepository {
     pub async fn new(url: &str, sender: Option<LocalMessageSender>) -> Result<Self, Error> {
         let options = url
             .parse::<SqliteConnectOptions>()?
-            .create_if_missing(url != MEMORY_DB_URL)
-            .foreign_keys(true);
+            .create_if_missing(url != MEMORY_DB_URL);
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
 
         SqlRepository::do_migrations(&pool).await?;
@@ -104,6 +101,9 @@ impl SqlRepository {
             .get::<Option<String>, _>("metadata")
             .and_then(|value| serde_json::from_str::<BookMetadata>(&value).ok())
             .unwrap_or_default();
+        let progress = row
+            .get::<Option<String>, _>("progress")
+            .and_then(|value| serde_json::from_str::<BookReadingProgress>(&value).ok());
         let format = match row.get::<String, _>("format").as_str() {
             "epub" => BookFormat::Epub,
             _ => BookFormat::Pdf,
@@ -124,7 +124,7 @@ impl SqlRepository {
             thumbnail: row.get("thumbnail"),
             metadata,
             checksum: row.get("checksum"),
-            progress: None,
+            progress,
             search_phrase: row.get("search_phrase"),
             state: row.get::<i32, _>("state").into(),
             created_on: row.get("created_on"),
@@ -133,30 +133,14 @@ impl SqlRepository {
         }
     }
 
-    fn book_progress_from_record(row: &SqliteRow) -> BookProgress {
-        let locator_type = match row.get::<String, _>("locator_type").as_str() {
-            "epub-cfi" => BookLocatorType::EpubCfi,
-            _ => BookLocatorType::PdfPage,
-        };
-
-        BookProgress {
-            checksum: row.get("checksum"),
-            locator: BookLocator {
-                locator_type,
-                value: row.get("locator_value"),
-            },
-            progression: row.get("progression"),
-            updated_on: row.get("updated_on"),
-        }
-    }
 }
 
 #[async_trait]
 impl Databaser for SqlRepository {
     async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let checksum_row = sqlx::query_scalar::<_, i64>(
-            "SELECT checksum FROM books WHERE checksum = ?",
+        let checksum_progress = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT progress FROM books WHERE checksum = ?",
         )
         .bind(details.checksum)
         .fetch_optional(&mut *tx)
@@ -168,7 +152,7 @@ impl Databaser for SqlRepository {
         .bind(&details.file_name)
         .fetch_optional(&mut *tx)
         .await?;
-        let is_update = checksum_row.is_some() || path_row.is_some();
+        let is_update = checksum_progress.is_some() || path_row.is_some();
 
         if let Some(path_checksum) = path_row {
             if path_checksum != details.checksum {
@@ -250,10 +234,14 @@ impl Databaser for SqlRepository {
         tx.commit().await?;
 
         if let Some(sender) = &self.sender {
+            let mut event_details = details.clone();
+            event_details.progress = checksum_progress
+                .flatten()
+                .and_then(|value| serde_json::from_str::<BookReadingProgress>(&value).ok());
             let message = if is_update {
-                LocalMessage::Book(BookEvent::new_book_changed_event(details.clone()))
+                LocalMessage::Book(BookEvent::new_book_changed_event(event_details))
             } else {
-                LocalMessage::Book(BookEvent::new_book_added_event(details.clone()))
+                LocalMessage::Book(BookEvent::new_book_added_event(event_details))
             };
 
             if let Err(error) = sender.send(message).await {
@@ -345,136 +333,26 @@ impl Databaser for SqlRepository {
         Ok(rows.iter().map(Self::book_from_record).collect())
     }
 
-    async fn list_book_progress(&self) -> Result<Vec<BookProgress>, sqlx::Error> {
-        let rows = sqlx::query(
-            r#"
-            SELECT checksum, locator_type, locator_value, progression, updated_on
-            FROM book_progress
-            ORDER BY checksum
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows
-            .iter()
-            .map(Self::book_progress_from_record)
-            .collect())
-    }
-
-    async fn get_book_progress(
-        &self,
-        checksum: i64,
-    ) -> Result<GetBookProgressOutcome, sqlx::Error> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                progress.checksum,
-                progress.locator_type,
-                progress.locator_value,
-                progress.progression,
-                progress.updated_on
-            FROM books AS book
-            LEFT JOIN book_progress AS progress ON progress.checksum = book.checksum
-            WHERE book.checksum = ?
-            "#,
-        )
-        .bind(checksum)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(match row {
-            None => GetBookProgressOutcome::BookNotFound,
-            Some(row) if row.get::<Option<i64>, _>("checksum").is_none() => {
-                GetBookProgressOutcome::NoProgress
-            }
-            Some(row) => GetBookProgressOutcome::Progress(Self::book_progress_from_record(&row)),
-        })
-    }
-
     async fn save_book_progress(
         &self,
         checksum: i64,
-        progress: &BookLocator,
-        progression: Option<f64>,
-    ) -> Result<SaveBookProgressOutcome, sqlx::Error> {
-        let locator_type = match progress.locator_type {
-            BookLocatorType::EpubCfi => "epub-cfi",
-            BookLocatorType::PdfPage => "pdf-page",
+        progress: &SaveBookProgressRequest,
+    ) -> Result<bool, sqlx::Error> {
+        let stored = BookReadingProgress {
+            locator: progress.locator.clone(),
+            progression: progress.progression,
+            updated_on: chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };
-        let result = sqlx::query(
-            r#"
-            INSERT INTO book_progress (
-                checksum, locator_type, locator_value, progression, updated_on
-            )
-            SELECT
-                checksum, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            FROM books
-            WHERE checksum = ?
-            ON CONFLICT(checksum) DO UPDATE SET
-                locator_type = excluded.locator_type,
-                locator_value = excluded.locator_value,
-                progression = excluded.progression,
-                updated_on = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            RETURNING checksum, locator_type, locator_value, progression, updated_on
-            "#,
-        )
-        .bind(locator_type)
-        .bind(&progress.value)
-        .bind(progression)
-        .bind(checksum)
-        .fetch_optional(&self.pool)
-        .await;
-
-        let row = match result {
-            Ok(row) => row,
-            Err(error)
-                if error
-                    .as_database_error()
-                    .is_some_and(|error| error.is_foreign_key_violation()) =>
-            {
-                return Ok(SaveBookProgressOutcome::BookNotFound);
-            }
-            Err(error) => return Err(error),
-        };
-
-        Ok(match row {
-            Some(row) => {
-                SaveBookProgressOutcome::Saved(Self::book_progress_from_record(&row))
-            }
-            None => SaveBookProgressOutcome::BookNotFound,
-        })
-    }
-
-    async fn delete_book_progress(
-        &self,
-        checksum: i64,
-    ) -> Result<DeleteBookProgressOutcome, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        let deleted = sqlx::query("DELETE FROM book_progress WHERE checksum = ?")
+        let encoded = serde_json::to_string(&stored).map_err(|error| {
+            sqlx::Error::Protocol(format!("failed to encode book progress: {error}"))
+        })?;
+        let result = sqlx::query("UPDATE books SET progress = ? WHERE checksum = ?")
+            .bind(encoded)
             .bind(checksum)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        let outcome = if deleted > 0 {
-            DeleteBookProgressOutcome::Deleted
-        } else {
-            let book_exists = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM books WHERE checksum = ?)",
-            )
-            .bind(checksum)
-            .fetch_one(&mut *tx)
+            .execute(&self.pool)
             .await?;
-
-            if book_exists {
-                DeleteBookProgressOutcome::Deleted
-            } else {
-                DeleteBookProgressOutcome::BookNotFound
-            }
-        };
-        tx.commit().await?;
-
-        Ok(outcome)
+        Ok(result.rows_affected() == 1)
     }
 
     async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error> {
@@ -980,46 +858,16 @@ impl Databaser for SqlRepository {
 mod tests {
     use chrono::Local;
     use serde_json::json;
-    use std::path::PathBuf;
 
     use crate::domain::messages::BookEventType;
     use crate::domain::models::{
-        BookDetails, BookFormat, BookLocator, BookLocatorType, BookMetadata, BookState, VideoState,
-    };
-    use crate::domain::traits::{
-        DeleteBookProgressOutcome, GetBookProgressOutcome, SaveBookProgressOutcome,
+        BookDetails, BookFormat, BookLocator, BookLocatorType, BookMetadata, BookState,
+        SaveBookProgressRequest, VideoState,
     };
     use tokio::sync::mpsc;
 
     use super::*;
 
-    struct TestDatabaseFile {
-        path: PathBuf,
-    }
-
-    impl TestDatabaseFile {
-        fn new() -> Self {
-            Self {
-                path: std::env::temp_dir().join(format!(
-                    "lots-of-videos-book-progress-{}-{}.sqlite",
-                    std::process::id(),
-                    rand::random::<u64>()
-                )),
-            }
-        }
-
-        fn url(&self) -> String {
-            format!("sqlite://{}", self.path.display())
-        }
-    }
-
-    impl Drop for TestDatabaseFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-            let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
-            let _ = std::fs::remove_file(format!("{}-wal", self.path.display()));
-        }
-    }
 
     fn sample_book(checksum: i64, collection: &str, file_name: &str, title: &str) -> BookDetails {
         let now = Local::now().naive_local();
@@ -1054,630 +902,109 @@ mod tests {
         }
     }
 
-    async fn insert_book_rows(db: &SqlRepository, checksums: &[i64]) {
-        for checksum in checksums {
-            sqlx::query(
-                r#"
-                INSERT INTO books (
-                    checksum, file_name, collection, title, format, thumbnail
-                ) VALUES (?, ?, '', 'Test book', 'epub', '')
-                "#,
-            )
-            .bind(checksum)
-            .bind(format!("{checksum}.epub"))
-            .execute(&db.pool)
-            .await
-            .unwrap();
+    fn progress_request(value: &str, progression: Option<f64>) -> SaveBookProgressRequest {
+        SaveBookProgressRequest {
+            locator: BookLocator {
+                locator_type: BookLocatorType::EpubCfi,
+                value: value.to_string(),
+            },
+            progression,
         }
     }
 
-    async fn assert_progress_insert_fails(
-        db: &SqlRepository,
-        checksum: Option<i64>,
-        locator_type: Option<&str>,
-        locator_value: Option<&str>,
-        progression: Option<f64>,
-        updated_on: Option<&str>,
-    ) {
-        let error = sqlx::query(
-            r#"
-            INSERT INTO book_progress (
-                checksum, locator_type, locator_value, progression, updated_on
-            ) VALUES (?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(checksum)
-        .bind(locator_type)
-        .bind(locator_value)
-        .bind(progression)
-        .bind(updated_on)
-        .execute(&db.pool)
-        .await
-        .expect_err("invalid progress row must violate a database constraint");
-
-        assert!(matches!(error, sqlx::Error::Database(_)), "{error}");
-    }
-
-    fn epub_locator(value: &str) -> BookLocator {
-        BookLocator {
-            locator_type: BookLocatorType::EpubCfi,
-            value: value.to_string(),
-        }
-    }
-
-    fn pdf_locator(value: &str) -> BookLocator {
-        BookLocator {
-            locator_type: BookLocatorType::PdfPage,
-            value: value.to_string(),
-        }
-    }
-
-    fn assert_rfc3339_utc(timestamp: &str) {
-        chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
-        assert!(timestamp.ends_with('Z'), "timestamp must be UTC: {timestamp}");
-    }
-
     #[tokio::test]
-    async fn book_progress_round_trips_epub_and_opaque_pdf_locators_in_checksum_order() {
+    async fn book_progress_is_embedded_in_book_rows() {
         let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let epub_book = sample_book(30, "Books", "Novel.epub", "Novel");
-        let mut pdf_book = sample_book(10, "Books", "Manual.pdf", "Manual");
-        pdf_book.format = BookFormat::Pdf;
-        db.save_book(&epub_book).await.unwrap();
-        db.save_book(&pdf_book).await.unwrap();
-
-        let epub = epub_locator("epubcfi(/6/14!/4/2/8:12)");
-        let opaque_pdf = pdf_locator("page-label:iv?zoom=fit-width#annotation=chapter%201");
-        let SaveBookProgressOutcome::Saved(saved_epub) = db
-            .save_book_progress(epub_book.checksum, &epub, Some(0.375))
-            .await
-            .unwrap()
-        else {
-            panic!("existing EPUB book must accept progress");
-        };
-        let SaveBookProgressOutcome::Saved(saved_pdf) = db
-            .save_book_progress(pdf_book.checksum, &opaque_pdf, None)
-            .await
-            .unwrap()
-        else {
-            panic!("existing PDF book must accept progress");
-        };
-
-        assert_eq!(saved_epub.locator, epub);
-        assert_eq!(saved_epub.progression, Some(0.375));
-        assert_eq!(saved_pdf.locator, opaque_pdf);
-        assert_eq!(saved_pdf.progression, None);
-        assert_rfc3339_utc(&saved_epub.updated_on);
-        assert_rfc3339_utc(&saved_pdf.updated_on);
-        assert!(
-            serde_json::to_value(&saved_pdf).unwrap()["updatedOn"]
-                .as_str()
-                .unwrap()
-                .ends_with('Z')
-        );
-
-        let listed = db.list_book_progress().await.unwrap();
-        assert_eq!(
-            listed.iter().map(|progress| progress.checksum).collect::<Vec<_>>(),
-            vec![pdf_book.checksum, epub_book.checksum]
-        );
-        assert_eq!(listed[0], saved_pdf);
-        assert_eq!(listed[1], saved_epub);
-
-        let GetBookProgressOutcome::Progress(retrieved_pdf) = db
-            .get_book_progress(pdf_book.checksum)
-            .await
-            .unwrap()
-        else {
-            panic!("saved PDF progress must be retrievable");
-        };
-        assert_eq!(retrieved_pdf.locator, opaque_pdf);
-    }
-
-    #[tokio::test]
-    async fn book_progress_save_is_last_write_wins_and_refreshes_server_timestamp() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(40, "Books", "Mutable.epub", "Mutable");
+        let book = sample_book(42, "Shelf", "book.epub", "Book");
         db.save_book(&book).await.unwrap();
+        let request = progress_request("epubcfi(/6/4)", Some(0.5));
 
-        let SaveBookProgressOutcome::Saved(first) = db
-            .save_book_progress(book.checksum, &epub_locator("epubcfi(/6/2)"), Some(0.1))
-            .await
-            .unwrap()
-        else {
-            panic!("first progress save must succeed");
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let second_locator = pdf_locator("opaque:value/that-is-not-a-page-number");
-        let SaveBookProgressOutcome::Saved(second) = db
-            .save_book_progress(book.checksum, &second_locator, Some(0.9))
-            .await
-            .unwrap()
-        else {
-            panic!("second progress save must succeed");
-        };
-
-        assert_eq!(second.locator, second_locator);
-        assert_eq!(second.progression, Some(0.9));
-        assert_rfc3339_utc(&first.updated_on);
-        assert_rfc3339_utc(&second.updated_on);
-        assert!(
-            chrono::DateTime::parse_from_rfc3339(&second.updated_on).unwrap()
-                > chrono::DateTime::parse_from_rfc3339(&first.updated_on).unwrap(),
-            "later save must receive a fresh server timestamp"
-        );
-        let GetBookProgressOutcome::Progress(retrieved) =
-            db.get_book_progress(book.checksum).await.unwrap()
-        else {
-            panic!("saved progress must be retrievable");
-        };
-        assert_eq!(retrieved, second);
+        assert!(db.save_book_progress(42, &request).await.unwrap());
+        let stored = db.retrieve_book(42).await.unwrap().progress.unwrap();
+        assert_eq!(stored.locator, request.locator);
+        assert_eq!(stored.progression, Some(0.5));
+        assert!(stored.updated_on.ends_with('Z'));
     }
 
     #[tokio::test]
-    async fn book_progress_round_trips_i64_max_checksum() {
+    async fn progress_migration_adds_only_the_books_column() {
         let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(i64::MAX, "Books", "Largest.epub", "Largest");
-        db.save_book(&book).await.unwrap();
-
-        let SaveBookProgressOutcome::Saved(saved) = db
-            .save_book_progress(book.checksum, &epub_locator("epubcfi(/6/2)"), None)
-            .await
-            .unwrap()
-        else {
-            panic!("i64::MAX checksum book must accept progress");
-        };
-
-        assert_eq!(saved.checksum, i64::MAX);
-        assert_eq!(
-            serde_json::to_value(saved).unwrap()["checksum"],
-            i64::MAX.to_string()
-        );
-    }
-
-    #[tokio::test]
-    async fn book_progress_unknown_book_save_returns_not_found() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-
-        assert!(matches!(
-            db.save_book_progress(404, &epub_locator("epubcfi(/6/2)"), Some(0.2))
-                .await
-                .unwrap(),
-            SaveBookProgressOutcome::BookNotFound
-        ));
-        assert!(db.list_book_progress().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn book_progress_get_distinguishes_missing_book_and_existing_without_progress() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(50, "Books", "Unread.epub", "Unread");
-        db.save_book(&book).await.unwrap();
-
-        assert!(matches!(
-            db.get_book_progress(book.checksum).await.unwrap(),
-            GetBookProgressOutcome::NoProgress
-        ));
-        assert!(matches!(
-            db.get_book_progress(404).await.unwrap(),
-            GetBookProgressOutcome::BookNotFound
-        ));
-    }
-
-    #[tokio::test]
-    async fn book_progress_delete_distinguishes_missing_book_and_idempotent_existing_reset() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(60, "Books", "Reset.epub", "Reset");
-        db.save_book(&book).await.unwrap();
-
-        assert!(matches!(
-            db.delete_book_progress(book.checksum).await.unwrap(),
-            DeleteBookProgressOutcome::Deleted
-        ));
-        db.save_book_progress(book.checksum, &epub_locator("epubcfi(/6/2)"), Some(0.1))
-            .await
-            .unwrap();
-        assert!(matches!(
-            db.delete_book_progress(book.checksum).await.unwrap(),
-            DeleteBookProgressOutcome::Deleted
-        ));
-        assert!(matches!(
-            db.delete_book_progress(book.checksum).await.unwrap(),
-            DeleteBookProgressOutcome::Deleted
-        ));
-        assert!(matches!(
-            db.delete_book_progress(404).await.unwrap(),
-            DeleteBookProgressOutcome::BookNotFound
-        ));
-        assert!(matches!(
-            db.get_book_progress(book.checksum).await.unwrap(),
-            GetBookProgressOutcome::NoProgress
-        ));
-    }
-
-    #[tokio::test]
-    async fn book_progress_cascades_when_book_is_deleted() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(70, "Books", "Delete.epub", "Delete");
-        db.save_book(&book).await.unwrap();
-        db.save_book_progress(book.checksum, &epub_locator("epubcfi(/6/2)"), Some(0.2))
-            .await
-            .unwrap();
-
-        assert_eq!(db.delete_book(book.checksum).await.unwrap(), 1);
-        assert!(matches!(
-            db.get_book_progress(book.checksum).await.unwrap(),
-            GetBookProgressOutcome::BookNotFound
-        ));
-        assert!(db.list_book_progress().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn book_progress_cascades_when_conditional_book_delete_matches_path() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(71, "Books", "Conditional.epub", "Conditional");
-        db.save_book(&book).await.unwrap();
-        db.save_book_progress(book.checksum, &epub_locator("epubcfi(/6/4)"), Some(0.4))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            db.delete_book_if_path_matches(book.checksum, &book.collection, &book.file_name)
-                .await
-                .unwrap(),
-            1
-        );
-        assert!(matches!(
-            db.get_book_progress(book.checksum).await.unwrap(),
-            GetBookProgressOutcome::BookNotFound
-        ));
-        assert!(db.list_book_progress().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn book_progress_cascades_path_mismatch_preserves_book_and_progress() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(72, "Books", "Preserved.epub", "Preserved");
-        db.save_book(&book).await.unwrap();
-        let locator = epub_locator("epubcfi(/6/6)");
-        db.save_book_progress(book.checksum, &locator, Some(0.6))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            db.delete_book_if_path_matches(book.checksum, "Other", &book.file_name)
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(db.retrieve_book(book.checksum).await.unwrap().title, book.title);
-        let GetBookProgressOutcome::Progress(progress) =
-            db.get_book_progress(book.checksum).await.unwrap()
-        else {
-            panic!("path mismatch must preserve progress");
-        };
-        assert_eq!(progress.locator, locator);
-    }
-
-    #[tokio::test]
-    async fn book_progress_cascades_same_checksum_book_save_preserves_progress() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let book = sample_book(73, "Books", "Original.epub", "Original");
-        db.save_book(&book).await.unwrap();
-        let locator = epub_locator("epubcfi(/6/8)");
-        db.save_book_progress(book.checksum, &locator, Some(0.8))
-            .await
-            .unwrap();
-        let replacement = sample_book(
-            book.checksum,
-            "Relocated",
-            "Replacement.epub",
-            "Replacement",
-        );
-
-        db.save_book(&replacement).await.unwrap();
-
-        let GetBookProgressOutcome::Progress(progress) =
-            db.get_book_progress(book.checksum).await.unwrap()
-        else {
-            panic!("same checksum must preserve progress");
-        };
-        assert_eq!(progress.locator, locator);
-        assert_eq!(progress.progression, Some(0.8));
-    }
-
-    #[tokio::test]
-    async fn book_progress_cascades_same_path_new_checksum_removes_progress_without_transfer() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        let original = sample_book(74, "Books", "Reingested.epub", "Original");
-        db.save_book(&original).await.unwrap();
-        db.save_book_progress(
-            original.checksum,
-            &epub_locator("epubcfi(/6/10)"),
-            Some(0.95),
-        )
-        .await
-        .unwrap();
-        let replacement = sample_book(
-            75,
-            &original.collection,
-            &original.file_name,
-            "Reingested",
-        );
-
-        db.save_book(&replacement).await.unwrap();
-
-        assert!(matches!(
-            db.retrieve_book(original.checksum).await,
-            Err(sqlx::Error::RowNotFound)
-        ));
-        assert_eq!(
-            db.retrieve_book(replacement.checksum).await.unwrap().title,
-            replacement.title
-        );
-        assert!(matches!(
-            db.get_book_progress(original.checksum).await.unwrap(),
-            GetBookProgressOutcome::BookNotFound
-        ));
-        assert!(matches!(
-            db.get_book_progress(replacement.checksum).await.unwrap(),
-            GetBookProgressOutcome::NoProgress
-        ));
-        assert!(db.list_book_progress().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn book_progress_migration_has_expected_structure() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-
-        let columns = sqlx::query("PRAGMA table_info(book_progress)")
+        let names: Vec<String> = sqlx::query("PRAGMA table_info(books)")
             .fetch_all(&db.pool)
             .await
             .unwrap()
-            .into_iter()
-            .map(|row| {
-                (
-                    row.get::<String, _>("name"),
-                    row.get::<String, _>("type"),
-                    row.get::<i64, _>("notnull"),
-                    row.get::<Option<String>, _>("dflt_value"),
-                    row.get::<i64, _>("pk"),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            columns,
-            vec![
-                ("checksum".into(), "INTEGER".into(), 1, None, 1),
-                ("locator_type".into(), "TEXT".into(), 1, None, 0),
-                ("locator_value".into(), "TEXT".into(), 1, None, 0),
-                ("progression".into(), "REAL".into(), 0, None, 0),
-                ("updated_on".into(), "TEXT".into(), 1, None, 0),
-            ]
-        );
-
-        let foreign_keys = sqlx::query("PRAGMA foreign_key_list(book_progress)")
-            .fetch_all(&db.pool)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|row| {
-                (
-                    row.get::<String, _>("table"),
-                    row.get::<String, _>("from"),
-                    row.get::<String, _>("to"),
-                    row.get::<String, _>("on_update"),
-                    row.get::<String, _>("on_delete"),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            foreign_keys,
-            vec![(
-                "books".into(),
-                "checksum".into(),
-                "checksum".into(),
-                "NO ACTION".into(),
-                "CASCADE".into(),
-            )]
-        );
-
-        let table_sql = sqlx::query_scalar::<_, String>(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'book_progress'",
+            .iter()
+            .map(|row| row.get("name"))
+            .collect();
+        assert!(names.contains(&"progress".to_string()));
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='book_progress'",
         )
         .fetch_one(&db.pool)
         .await
         .unwrap();
-        assert_eq!(
-            table_sql.split_whitespace().join(" "),
-            "CREATE TABLE book_progress ( checksum INTEGER PRIMARY KEY NOT NULL REFERENCES books(checksum) ON DELETE CASCADE, locator_type TEXT NOT NULL CHECK (locator_type IN ('epub-cfi', 'pdf-page')), locator_value TEXT NOT NULL CHECK (length(trim(locator_value, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288))) > 0), progression REAL CHECK (progression IS NULL OR (progression >= 0.0 AND progression <= 1.0)), updated_on TEXT NOT NULL )"
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn book_progress_lifecycle_preserves_same_checksum_and_resets_replaced_path() {
+        let (sender, mut receiver) = mpsc::channel(3);
+        let db = SqlRepository::new(MEMORY_DB_URL, Some(sender)).await.unwrap();
+        let original = sample_book(73, "Books", "Original.epub", "Original");
+        db.save_book(&original).await.unwrap();
+        receiver.try_recv().unwrap();
+        let request = progress_request("epubcfi(/6/8)", Some(0.8));
+        assert!(db
+            .save_book_progress(original.checksum, &request)
+            .await
+            .unwrap());
+
+        let same_checksum = sample_book(
+            original.checksum,
+            "Relocated",
+            "Replacement.epub",
+            "Replacement",
         );
-    }
-
-    #[tokio::test]
-    async fn book_progress_migration_enforces_all_column_constraints() {
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        insert_book_rows(&db, &[1, 2, 3, 4]).await;
-
-        for (checksum, locator_type, locator_value, progression) in [
-            (1, "epub-cfi", "epubcfi(/6/2)", None),
-            (2, "pdf-page", "1", Some(0.0)),
-            (3, "pdf-page", "2", Some(1.0)),
-        ] {
-            sqlx::query(
-                r#"
-                INSERT INTO book_progress (
-                    checksum, locator_type, locator_value, progression, updated_on
-                ) VALUES (?, ?, ?, ?, '2026-07-19T12:00:00Z')
-                "#,
-            )
-            .bind(checksum)
-            .bind(locator_type)
-            .bind(locator_value)
-            .bind(progression)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        }
-
-        assert_progress_insert_fails(
-            &db,
-            Some(1),
-            Some("epub-cfi"),
-            Some("duplicate"),
-            None,
-            Some("2026-07-19T12:00:00Z"),
-        )
-        .await;
-        for invalid in [
-            (Some(4), None, Some("location"), None, Some("now")),
-            (Some(4), Some("epub"), Some("location"), None, Some("now")),
-            (Some(4), Some("epub-cfi"), None, None, Some("now")),
-            (Some(4), Some("epub-cfi"), Some(""), None, Some("now")),
-            (Some(4), Some("epub-cfi"), Some("   "), None, Some("now")),
-            (
-                Some(4),
-                Some("epub-cfi"),
-                Some("location"),
-                Some(-0.01),
-                Some("now"),
-            ),
-            (
-                Some(4),
-                Some("epub-cfi"),
-                Some("location"),
-                Some(1.01),
-                Some("now"),
-            ),
-            (Some(4), Some("epub-cfi"), Some("location"), None, None),
-        ] {
-            assert_progress_insert_fails(
-                &db, invalid.0, invalid.1, invalid.2, invalid.3, invalid.4,
-            )
-            .await;
-        }
-    }
-
-    #[tokio::test]
-    async fn book_progress_migration_rejects_all_rust_trim_whitespace_locators() {
-        const RUST_WHITESPACE: &[char] = &[
-            '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}',
-            '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
-            '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
-            '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}',
-            '\u{3000}',
-        ];
-
-        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
-        insert_book_rows(&db, &[1]).await;
-
-        for locator_value in ["\t", "\r", "\n", "\r\n"] {
-            assert_progress_insert_fails(
-                &db,
-                Some(1),
-                Some("epub-cfi"),
-                Some(locator_value),
-                None,
-                Some("now"),
-            )
-            .await;
-        }
-
-        let detected_whitespace = (0..=char::MAX as u32)
-            .filter_map(char::from_u32)
-            .filter(|character| character.is_whitespace())
-            .collect::<Vec<_>>();
-        assert_eq!(detected_whitespace, RUST_WHITESPACE);
-
-        for character in RUST_WHITESPACE {
-            let locator_value = character.to_string();
-            assert_progress_insert_fails(
-                &db,
-                Some(1),
-                Some("epub-cfi"),
-                Some(&locator_value),
-                None,
-                Some("now"),
-            )
-            .await;
-        }
-
-        let all_whitespace = RUST_WHITESPACE.iter().collect::<String>();
-        assert_progress_insert_fails(
-            &db,
-            Some(1),
-            Some("epub-cfi"),
-            Some(&all_whitespace),
-            None,
-            Some("now"),
-        )
-        .await;
-
-        let opaque_locator = "\u{2003}opaque:\tvalue\u{3000}";
-        sqlx::query(
-            r#"
-            INSERT INTO book_progress (
-                checksum, locator_type, locator_value, progression, updated_on
-            ) VALUES (?, 'epub-cfi', ?, NULL, 'now')
-            "#,
-        )
-        .bind(1)
-        .bind(opaque_locator)
-        .execute(&db.pool)
-        .await
-        .unwrap();
+        db.save_book(&same_checksum).await.unwrap();
+        let changed = receiver.try_recv().unwrap();
+        let LocalMessage::Book(changed) = changed else {
+            panic!("same-checksum save must emit a book event");
+        };
+        assert_eq!(changed.event_type, BookEventType::BookEventChanged);
         assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT locator_value FROM book_progress WHERE checksum = 1"
-            )
-            .fetch_one(&db.pool)
-            .await
-            .unwrap(),
-            opaque_locator
+            changed.book.unwrap().progress.unwrap().locator,
+            request.locator
         );
-    }
-
-    #[tokio::test]
-    async fn book_progress_migration_enables_foreign_keys_on_each_pooled_connection() {
-        let database_file = TestDatabaseFile::new();
-        let db = SqlRepository::new(&database_file.url(), None)
-            .await
-            .unwrap();
-        let mut first = db.pool.acquire().await.unwrap();
-        let mut second = db.pool.acquire().await.unwrap();
-
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
-                .fetch_one(&mut *first)
+            db.retrieve_book(original.checksum)
                 .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
-                .fetch_one(&mut *second)
-                .await
-                .unwrap(),
-            1
+                .unwrap()
+                .progress
+                .unwrap()
+                .locator,
+            request.locator
         );
 
-        let error = sqlx::query(
-            r#"
-            INSERT INTO book_progress (
-                checksum, locator_type, locator_value, progression, updated_on
-            ) VALUES (404, 'epub-cfi', 'epubcfi(/6/2)', NULL, '2026-07-19T12:00:00Z')
-            "#,
-        )
-        .execute(&mut *second)
-        .await
-        .expect_err("orphan progress must be rejected");
-        assert!(
-            error
-                .as_database_error()
-                .is_some_and(|error| error.is_foreign_key_violation()),
-            "expected a foreign-key violation, got {error}"
+        let same_path_new_checksum = sample_book(
+            74,
+            &same_checksum.collection,
+            &same_checksum.file_name,
+            "Reingested",
         );
+        db.save_book(&same_path_new_checksum).await.unwrap();
+        assert!(db
+            .retrieve_book(same_path_new_checksum.checksum)
+            .await
+            .unwrap()
+            .progress
+            .is_none());
+        assert!(matches!(
+            db.retrieve_book(original.checksum).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
+
+
 
     #[tokio::test]
     async fn migrations_create_books_table_and_indexes() {
