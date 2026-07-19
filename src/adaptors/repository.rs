@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use serde_json;
-use sqlx::migrate::{MigrateDatabase, MigrateError, Migrator};
-use sqlx::sqlite::{SqlitePool, SqliteRow};
-use sqlx::{Error, Row, Sqlite};
+use sqlx::migrate::{MigrateError, Migrator};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
+use sqlx::{Error, Row};
 
 use crate::domain::algorithm::get_thumbnails_url;
 use crate::domain::config::get_database_migration_dir;
@@ -24,11 +24,11 @@ pub struct SqlRepository {
 
 impl SqlRepository {
     pub async fn new(url: &str, sender: Option<LocalMessageSender>) -> Result<Self, Error> {
-        if url != MEMORY_DB_URL && !Sqlite::database_exists(&url).await.unwrap_or(false) {
-            Sqlite::create_database(&url).await?;
-        }
-
-        let pool = SqlitePool::connect(&url).await?;
+        let options = url
+            .parse::<SqliteConnectOptions>()?
+            .create_if_missing(url != MEMORY_DB_URL)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new().connect_with(options).await?;
 
         SqlRepository::do_migrations(&pool).await?;
 
@@ -831,12 +831,41 @@ impl Databaser for SqlRepository {
 mod tests {
     use chrono::Local;
     use serde_json::json;
+    use std::path::PathBuf;
 
     use crate::domain::messages::BookEventType;
     use crate::domain::models::{BookDetails, BookFormat, BookMetadata, BookState, VideoState};
     use tokio::sync::mpsc;
 
     use super::*;
+
+    struct TestDatabaseFile {
+        path: PathBuf,
+    }
+
+    impl TestDatabaseFile {
+        fn new() -> Self {
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "lots-of-videos-book-progress-{}-{}.sqlite",
+                    std::process::id(),
+                    rand::random::<u64>()
+                )),
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("sqlite://{}", self.path.display())
+        }
+    }
+
+    impl Drop for TestDatabaseFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
+            let _ = std::fs::remove_file(format!("{}-wal", self.path.display()));
+        }
+    }
 
     fn sample_book(checksum: i64, collection: &str, file_name: &str, title: &str) -> BookDetails {
         let now = Local::now().naive_local();
@@ -868,6 +897,224 @@ mod tests {
             updated_on: now,
             dir_path: None,
         }
+    }
+
+    async fn insert_book_rows(db: &SqlRepository, checksums: &[i64]) {
+        for checksum in checksums {
+            sqlx::query(
+                r#"
+                INSERT INTO books (
+                    checksum, file_name, collection, title, format, thumbnail
+                ) VALUES (?, ?, '', 'Test book', 'epub', '')
+                "#,
+            )
+            .bind(checksum)
+            .bind(format!("{checksum}.epub"))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn assert_progress_insert_fails(
+        db: &SqlRepository,
+        checksum: Option<i64>,
+        locator_type: Option<&str>,
+        locator_value: Option<&str>,
+        progression: Option<f64>,
+        updated_on: Option<&str>,
+    ) {
+        let error = sqlx::query(
+            r#"
+            INSERT INTO book_progress (
+                checksum, locator_type, locator_value, progression, updated_on
+            ) VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(checksum)
+        .bind(locator_type)
+        .bind(locator_value)
+        .bind(progression)
+        .bind(updated_on)
+        .execute(&db.pool)
+        .await
+        .expect_err("invalid progress row must violate a database constraint");
+
+        assert!(matches!(error, sqlx::Error::Database(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn book_progress_migration_has_expected_structure() {
+        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+
+        let columns = sqlx::query("PRAGMA table_info(book_progress)")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("name"),
+                    row.get::<String, _>("type"),
+                    row.get::<i64, _>("notnull"),
+                    row.get::<Option<String>, _>("dflt_value"),
+                    row.get::<i64, _>("pk"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            columns,
+            vec![
+                ("checksum".into(), "INTEGER".into(), 1, None, 1),
+                ("locator_type".into(), "TEXT".into(), 1, None, 0),
+                ("locator_value".into(), "TEXT".into(), 1, None, 0),
+                ("progression".into(), "REAL".into(), 0, None, 0),
+                ("updated_on".into(), "TEXT".into(), 1, None, 0),
+            ]
+        );
+
+        let foreign_keys = sqlx::query("PRAGMA foreign_key_list(book_progress)")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("table"),
+                    row.get::<String, _>("from"),
+                    row.get::<String, _>("to"),
+                    row.get::<String, _>("on_update"),
+                    row.get::<String, _>("on_delete"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            foreign_keys,
+            vec![(
+                "books".into(),
+                "checksum".into(),
+                "checksum".into(),
+                "NO ACTION".into(),
+                "CASCADE".into(),
+            )]
+        );
+
+        let table_sql = sqlx::query_scalar::<_, String>(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'book_progress'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            table_sql.split_whitespace().join(" "),
+            "CREATE TABLE book_progress ( checksum INTEGER PRIMARY KEY NOT NULL REFERENCES books(checksum) ON DELETE CASCADE, locator_type TEXT NOT NULL CHECK (locator_type IN ('epub-cfi', 'pdf-page')), locator_value TEXT NOT NULL CHECK (length(trim(locator_value)) > 0), progression REAL CHECK (progression IS NULL OR (progression >= 0.0 AND progression <= 1.0)), updated_on TEXT NOT NULL )"
+        );
+    }
+
+    #[tokio::test]
+    async fn book_progress_migration_enforces_all_column_constraints() {
+        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+        insert_book_rows(&db, &[1, 2, 3, 4]).await;
+
+        for (checksum, locator_type, locator_value, progression) in [
+            (1, "epub-cfi", "epubcfi(/6/2)", None),
+            (2, "pdf-page", "1", Some(0.0)),
+            (3, "pdf-page", "2", Some(1.0)),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO book_progress (
+                    checksum, locator_type, locator_value, progression, updated_on
+                ) VALUES (?, ?, ?, ?, '2026-07-19T12:00:00Z')
+                "#,
+            )
+            .bind(checksum)
+            .bind(locator_type)
+            .bind(locator_value)
+            .bind(progression)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        assert_progress_insert_fails(
+            &db,
+            Some(1),
+            Some("epub-cfi"),
+            Some("duplicate"),
+            None,
+            Some("2026-07-19T12:00:00Z"),
+        )
+        .await;
+        for invalid in [
+            (Some(4), None, Some("location"), None, Some("now")),
+            (Some(4), Some("epub"), Some("location"), None, Some("now")),
+            (Some(4), Some("epub-cfi"), None, None, Some("now")),
+            (Some(4), Some("epub-cfi"), Some(""), None, Some("now")),
+            (Some(4), Some("epub-cfi"), Some("   "), None, Some("now")),
+            (
+                Some(4),
+                Some("epub-cfi"),
+                Some("location"),
+                Some(-0.01),
+                Some("now"),
+            ),
+            (
+                Some(4),
+                Some("epub-cfi"),
+                Some("location"),
+                Some(1.01),
+                Some("now"),
+            ),
+            (Some(4), Some("epub-cfi"), Some("location"), None, None),
+        ] {
+            assert_progress_insert_fails(
+                &db, invalid.0, invalid.1, invalid.2, invalid.3, invalid.4,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn book_progress_migration_enables_foreign_keys_on_each_pooled_connection() {
+        let database_file = TestDatabaseFile::new();
+        let db = SqlRepository::new(&database_file.url(), None)
+            .await
+            .unwrap();
+        let mut first = db.pool.acquire().await.unwrap();
+        let mut second = db.pool.acquire().await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut *first)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut *second)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let error = sqlx::query(
+            r#"
+            INSERT INTO book_progress (
+                checksum, locator_type, locator_value, progression, updated_on
+            ) VALUES (404, 'epub-cfi', 'epubcfi(/6/2)', NULL, '2026-07-19T12:00:00Z')
+            "#,
+        )
+        .execute(&mut *second)
+        .await
+        .expect_err("orphan progress must be rejected");
+        assert!(
+            error
+                .as_database_error()
+                .is_some_and(|error| error.is_foreign_key_violation()),
+            "expected a foreign-key violation, got {error}"
+        );
     }
 
     #[tokio::test]
