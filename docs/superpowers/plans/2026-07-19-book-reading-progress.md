@@ -1,529 +1,645 @@
-# Book Reading Progress Implementation Plan
+# Embedded Book Reading Progress Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Persist one format-neutral reading-progress record per book and expose matching REST and Tauri list/get/save/delete operations.
+**Goal:** Replace the separate reading-progress subsystem with an optional JSON-backed `progress` field on every book while retaining one narrow save operation.
 
-**Architecture:** Add raw transport DTOs and validated domain types in a focused model module, then centralize checksum parsing, validation, and typed repository-outcome mapping in a stateless `BookProgressService`. Extend `Databaser` and `SqlRepository` with atomic progress operations; REST and Tauri remain thin transport adapters over the shared service.
+**Architecture:** SQLite stores the nested progress object in `books.progress`; existing book list/detail queries deserialize it into `BookDetails`. REST and Tauri keep only save operations, while React reads progress from `BookDetails`, updates cached books optimistically, and removes the parallel progress fetch/store.
 
-**Tech Stack:** Rust 2021, Tokio, SQLx/SQLite migrations, Serde, Chrono, Axum 0.8, Tauri 2, OpenAPI 3.1, `oas3`, and `roas`.
+**Tech Stack:** Rust 2021, SQLx/SQLite, Serde, Axum 0.8, Tauri 2, OpenAPI 3.1, React 18, TypeScript, Redux Toolkit, Jest.
 
 ## Global Constraints
 
-- The existing generated frontend changes under `client/newapp` are unrelated user work; do not modify, stage, or commit them.
-- The internal checksum is `i64`; every progress API response serializes it as a decimal string and backend boundary tests use `9223372036854775807` (`i64::MAX`).
-- `SaveBookProgressRequest` contains only `locator` and optional `progression`; clients cannot set `checksum` or `updatedOn`.
-- Transport locator type is a raw `String`; `BookProgressService` converts it to the closed `BookLocatorType::{EpubCfi, PdfPage}` domain enum with wire values `epub-cfi` and `pdf-page`.
-- Locator values are opaque but must contain at least one non-whitespace character; do not parse or normalize PDF page values.
-- Optional progression must be finite and within inclusive `0..=1`.
-- `updatedOn` is server-authored RFC 3339 UTC and serializes with a `Z` suffix.
-- Book existence and each per-book progress read/write/delete outcome must be decided atomically in the repository; never add a service-level existence query followed by another operation.
-- Foreign keys must be enabled on every pooled SQLite connection before migrations run; one post-connect `PRAGMA foreign_keys = ON` is insufficient.
-- Re-ingestion with the same checksum preserves progress; same-path/different-checksum replacement deletes the old row so progress cascades and never transfers through an updated checksum.
-- REST PUT checks runtime availability before interpreting captured JSON extraction errors, so unavailable runtime returns `503` even for malformed, type-invalid, or oversized payloads.
-- Unexpected repository details are logged but never exposed through REST responses.
+- Backend paths are relative to the `tvserver`/`src-tauri` repository; paths beginning with `../` are in the parent `lots-of-videos` repository.
+- Update backend PR #65 on `codex/book-reading-progress`; do not replace it.
+- Use isolated worktrees because both existing checkouts contain unrelated user changes.
+- Rewrite undeployed `migrations/20260719000001_book_progress.sql` in place.
+- `BookDetails.progress` is optional and contains locator, optional progression, and server-authored `updatedOn`; it never repeats checksum.
+- Keep only REST PUT and Tauri `save_book_progress`; success returns no value/`204 No Content`.
+- A progress save does not change book-level `updated_on` or emit a metadata event.
+- Same-checksum ingestion preserves progress; same-path/different-checksum replacement discards it.
+- Checksums remain decimal strings at transport boundaries.
+- Do not modify or stage dirty `.github`, generated `client/newapp`, frontend configuration, search-service, temporary database, or unrelated design files.
 
 ---
 
-### Task 1: Raw and Validated Progress Models
+### Task 1: Embed Progress Types in `BookDetails`
 
 **Files:**
-- Create: `src/domain/models/book_progress.rs`
+- Modify: `src/domain/models/book.rs`
 - Modify: `src/domain/models/mod.rs`
+- Test: `src/domain/models/book.rs`
 
 **Interfaces:**
-- Consumes: Serde and Chrono already present in `Cargo.toml`.
-- Produces: `RawBookLocator { locator_type: String, value: String }`, `SaveBookProgressRequest { locator: RawBookLocator, progression: Option<f64> }`, `BookLocatorType`, `BookLocator`, and `BookProgress`.
+- Consumes: existing `BookDetails` custom serializer.
+- Produces: `BookLocatorType`, `BookLocator`, `SaveBookProgressRequest`, `BookReadingProgress`, `SaveBookProgressRequest::validate`, and `BookDetails.progress`.
 
-- [ ] **Step 1: Write failing model contract tests**
+- [ ] **Step 1: Write failing model tests**
 
-Add unit tests in `book_progress.rs` asserting exact camel-case JSON, enum wire values, omitted `progression`, and string serialization of `i64::MAX`:
+Add:
 
 ```rust
 #[test]
-fn progress_serializes_full_width_checksum_and_utc_timestamp() {
-    let progress = BookProgress {
-        checksum: i64::MAX,
+fn serializes_optional_embedded_progress_without_checksum() {
+    let mut book = sample_book();
+    book.progress = Some(BookReadingProgress {
         locator: BookLocator {
             locator_type: BookLocatorType::EpubCfi,
-            value: "epubcfi(/6/4!/4/2/8)".into(),
+            value: "epubcfi(/6/4)".into(),
         },
         progression: Some(0.42),
         updated_on: "2026-07-19T12:00:00.000Z".into(),
-    };
-    assert_eq!(serde_json::to_value(progress).unwrap(), serde_json::json!({
-        "checksum": "9223372036854775807",
-        "locator": { "type": "epub-cfi", "value": "epubcfi(/6/4!/4/2/8)" },
+    });
+    let value = serde_json::to_value(book).unwrap();
+    assert_eq!(value["progress"], serde_json::json!({
+        "locator": {"type": "epub-cfi", "value": "epubcfi(/6/4)"},
         "progression": 0.42,
         "updatedOn": "2026-07-19T12:00:00.000Z"
     }));
+    assert!(value["progress"].get("checksum").is_none());
+}
+
+#[test]
+fn validates_progress_request_boundaries() {
+    let mut request: SaveBookProgressRequest = serde_json::from_value(
+        serde_json::json!({"locator": {"type": "pdf-page", "value": "opaque"}, "progression": 1.0})
+    ).unwrap();
+    assert_eq!(request.validate(), Ok(()));
+    request.locator.value = "\u{2003}".into();
+    assert_eq!(request.validate(), Err("book locator value must not be blank"));
+    request.locator.value = "1".into();
+    request.progression = Some(f64::NAN);
+    assert_eq!(
+        request.validate(),
+        Err("book progression must be finite and between 0 and 1")
+    );
 }
 ```
 
 - [ ] **Step 2: Verify RED**
 
-Run: `cargo test --lib domain::models::book_progress::tests`
+Run: `cargo test --lib domain::models::book::test`
 
-Expected: FAIL because `book_progress` and its types do not exist.
+Expected: compilation fails because the new types and field do not exist.
 
-- [ ] **Step 3: Implement the model types and exports**
-
-Use a dedicated checksum serializer and keep the request raw:
+- [ ] **Step 3: Add the minimal model**
 
 ```rust
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveBookProgressRequest {
-    pub locator: RawBookLocator,
-    pub progression: Option<f64>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct RawBookLocator {
-    #[serde(rename = "type")]
-    pub locator_type: String,
-    pub value: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BookLocatorType { EpubCfi, PdfPage }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BookLocator {
+    #[serde(rename = "type")]
     pub locator_type: BookLocatorType,
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct BookProgress {
-    pub checksum: i64,
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveBookProgressRequest {
+    pub locator: BookLocator,
+    pub progression: Option<f64>,
+}
+
+impl SaveBookProgressRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.locator.value.trim().is_empty() {
+            return Err("book locator value must not be blank");
+        }
+        if self.progression.is_some_and(|value| {
+            !value.is_finite() || !(0.0..=1.0).contains(&value)
+        }) {
+            return Err("book progression must be finite and between 0 and 1");
+        }
+        Ok(())
+    }
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookReadingProgress {
     pub locator: BookLocator,
     pub progression: Option<f64>,
     pub updated_on: String,
 }
 ```
 
-Implement/derive serialization so JSON fields are `locator.type`, `locator.value`, `progression`, `checksum`, and `updatedOn`; `checksum` uses `serializer.collect_str(&value)` and `BookLocatorType` emits only the two wire values. Re-export every type from `src/domain/models/mod.rs`.
+Add `pub progress: Option<BookReadingProgress>` to `BookDetails`, update its serializer count/body, and re-export the types. Keep the old progress module until Task 2 so this commit builds.
 
 - [ ] **Step 4: Verify GREEN**
 
-Run: `cargo test --lib domain::models::book_progress::tests`
+Run: `cargo test --lib domain::models::book::test`
 
-Expected: all model tests PASS.
+Expected: all model tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/domain/models/book_progress.rs src/domain/models/mod.rs
-git commit -m "feat: add book progress models"
+git add src/domain/models/book.rs src/domain/models/mod.rs
+git commit -m "refactor: embed reading progress in books"
 ```
 
-### Task 2: Shared Validation Service and Stable Errors
+### Task 2: Replace the Backend Progress Subsystem
 
 **Files:**
-- Create: `src/domain/services/book_progress.rs`
-- Modify: `src/domain/services/mod.rs`
+- Modify: `migrations/20260719000001_book_progress.sql`
 - Modify: `src/domain/traits.rs`
+- Modify: `src/adaptors/repository.rs`
+- Modify: `src/domain/models/mod.rs`
+- Delete: `src/domain/models/book_progress.rs`
+- Modify: `src/domain/services/mod.rs`
+- Delete: `src/domain/services/book_progress.rs`
+- Modify: `src/domain/services/book_metadata.rs`
+- Modify: `src/services/book_store.rs`
+- Modify: `src/entrypoints/api.rs`
+- Modify: `src/entrypoints/tauri_api.rs`
+- Test: `src/adaptors/repository.rs`
+- Test: `src/entrypoints/tauri_api.rs`
+- Test: `tests/book_api_test.rs`
+- Test: `tests/book_router_test.rs`
 
 **Interfaces:**
-- Consumes: Task 1 model types and `Repository`.
-- Produces: `BookProgressError`, `BookProgressService::new(Repository)`, `list`, `get(&str)`, `save(&str, SaveBookProgressRequest)`, and `delete(&str)`; repository outcome enums named below.
+- Consumes: Task 1 embedded model.
+- Produces: `Databaser::save_book_progress(checksum, &request) -> Result<bool, sqlx::Error>`, REST 204 PUT, and unit-returning Tauri save.
 
-- [ ] **Step 1: Write failing validation tests**
+- [ ] **Step 1: Write failing simplified tests**
 
-Test exact errors for malformed/overflow checksum, unsupported locator type, blank locator, `NaN`, infinities, and values outside `0..=1`; test success for `0`, `1`, omitted progression, EPUB CFI, and opaque nonnumeric PDF values.
-
-```rust
-assert_eq!(service.validate_checksum("9223372036854775808").unwrap_err().to_string(), "invalid book checksum");
-assert_eq!(service.validate_request(raw("future", "x", None)).unwrap_err().to_string(), "invalid book locator type");
-assert_eq!(service.validate_request(raw("pdf-page", "chapter-a", Some(1.0))).unwrap().locator.value, "chapter-a");
-```
-
-- [ ] **Step 2: Verify RED**
-
-Run: `cargo test --lib domain::services::book_progress::tests`
-
-Expected: FAIL because the service and error type do not exist.
-
-- [ ] **Step 3: Add repository outcome interfaces**
-
-Extend `Databaser` with these exact methods and define the enums beside the trait:
+Replace old CRUD/table tests with:
 
 ```rust
-pub enum GetBookProgressOutcome { BookNotFound, NoProgress, Progress(BookProgress) }
-pub enum SaveBookProgressOutcome { BookNotFound, Saved(BookProgress) }
-pub enum DeleteBookProgressOutcome { BookNotFound, Deleted }
+#[tokio::test]
+async fn book_progress_is_embedded_in_book_rows() {
+    let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+    let book = sample_book(42, "Shelf", "book.epub", "Book");
+    db.save_book(&book).await.unwrap();
+    let request = SaveBookProgressRequest {
+        locator: BookLocator {
+            locator_type: BookLocatorType::EpubCfi,
+            value: "epubcfi(/6/4)".into(),
+        },
+        progression: Some(0.5),
+    };
+    assert!(db.save_book_progress(42, &request).await.unwrap());
+    let stored = db.retrieve_book(42).await.unwrap().progress.unwrap();
+    assert_eq!(stored.locator, request.locator);
+    assert_eq!(stored.progression, Some(0.5));
+    assert!(stored.updated_on.ends_with('Z'));
+}
 
-async fn list_book_progress(&self) -> Result<Vec<BookProgress>, sqlx::Error>;
-async fn get_book_progress(&self, checksum: i64) -> Result<GetBookProgressOutcome, sqlx::Error>;
-async fn save_book_progress(&self, checksum: i64, progress: &BookLocator, progression: Option<f64>) -> Result<SaveBookProgressOutcome, sqlx::Error>;
-async fn delete_book_progress(&self, checksum: i64) -> Result<DeleteBookProgressOutcome, sqlx::Error>;
-```
-
-Update the two test-only `Databaser` wrappers in `src/services/book_store.rs` and `src/domain/services/book_metadata.rs` to delegate all four methods to `inner` so the trait remains object-safe and compilation remains complete.
-
-- [ ] **Step 4: Implement validation and orchestration**
-
-Use stable variants/messages:
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum BookProgressError {
-    #[error("invalid book checksum")] InvalidChecksum,
-    #[error("book not found")] BookNotFound,
-    #[error("invalid book locator type")] InvalidLocatorType,
-    #[error("book locator value must not be blank")] BlankLocatorValue,
-    #[error("book progression must be finite and between 0 and 1")] InvalidProgression,
-    #[error("book progress repository failure")] Repository(#[source] sqlx::Error),
+#[tokio::test]
+async fn progress_migration_adds_only_the_books_column() {
+    let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+    let names: Vec<String> = sqlx::query("PRAGMA table_info(books)")
+        .fetch_all(&db.pool).await.unwrap().iter().map(|row| row.get("name")).collect();
+    assert!(names.contains(&"progress".to_string()));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='book_progress'"
+    ).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(count, 0);
 }
 ```
 
-Map typed repository outcomes to `Option<BookProgress>`, `BookProgress`, or `()` without any preflight existence query. Add `source()`/pattern access needed by REST logging while keeping SQL text out of `Display`.
+Add a lifecycle test that saves progress, calls `save_book` again with the same checksum and asserts the progress remains, then saves a same-path book with a different checksum and asserts the replacement has `progress == None` while the old checksum returns `RowNotFound`.
 
-- [ ] **Step 5: Verify GREEN**
-
-Run: `cargo test --lib domain::services::book_progress::tests`
-
-Expected: all validation/service tests PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/domain/services/book_progress.rs src/domain/services/mod.rs src/domain/traits.rs src/services/book_store.rs src/domain/services/book_metadata.rs
-git commit -m "feat: add book progress service"
-```
-
-### Task 3: Migration and Per-Connection Foreign Keys
-
-**Files:**
-- Create: `migrations/20260719000001_book_progress.sql`
-- Modify: `src/adaptors/repository.rs`
-
-**Interfaces:**
-- Consumes: existing `books(checksum)` table.
-- Produces: constrained `book_progress` table and a pool whose every connection enforces foreign keys before migrations.
-
-- [ ] **Step 1: Write failing migration and pooled-connection tests**
-
-In `repository.rs`, add tests that inspect `PRAGMA table_info(book_progress)`, `PRAGMA foreign_key_list(book_progress)`, the table SQL from `sqlite_master`, and acquire at least two file-backed pooled connections to assert `PRAGMA foreign_keys = 1` on each. Directly inserting checksum `404` into `book_progress` must fail with a foreign-key violation.
+REST tests must expect PUT 204, then GET the book and assert nested progress. Removed list/get/delete progress routes must return 404. Tauri core tests must expect `()`.
 
 - [ ] **Step 2: Verify RED**
 
-Run: `cargo test --lib adaptors::repository::tests::book_progress_migration`
+Run:
 
-Expected: FAIL because the table is absent or foreign keys are disabled.
+```bash
+cargo test --lib adaptors::repository::tests::book_progress -- --test-threads=1
+cargo test --lib entrypoints::tauri_api::tests::book_progress
+cargo test --no-default-features --features webserver --test book_api_test book_progress -- --test-threads=1
+cargo test --no-default-features --features webserver --test book_router_test book_progress
+```
 
-- [ ] **Step 3: Add the constrained migration**
+Expected: failures identify the old table/routes/results and missing column.
+
+- [ ] **Step 3: Rewrite persistence**
+
+Migration contents:
 
 ```sql
-CREATE TABLE book_progress (
-    checksum INTEGER PRIMARY KEY NOT NULL REFERENCES books(checksum) ON DELETE CASCADE,
-    locator_type TEXT NOT NULL CHECK (locator_type IN ('epub-cfi', 'pdf-page')),
-    locator_value TEXT NOT NULL CHECK (length(trim(locator_value)) > 0),
-    progression REAL CHECK (progression IS NULL OR (progression >= 0.0 AND progression <= 1.0)),
-    updated_on TEXT NOT NULL
-);
+ALTER TABLE books ADD COLUMN progress TEXT;
 ```
 
-- [ ] **Step 4: Configure every pooled connection before migration**
-
-Replace `SqlitePool::connect` with parsed `SqliteConnectOptions` and `SqlitePoolOptions::connect_with`:
+Decode beside metadata:
 
 ```rust
-let options = url.parse::<SqliteConnectOptions>()?.create_if_missing(url != MEMORY_DB_URL).foreign_keys(true);
-let pool = SqlitePoolOptions::new().connect_with(options).await?;
-SqlRepository::do_migrations(&pool).await?;
+let progress = row
+    .get::<Option<String>, _>("progress")
+    .and_then(|value| serde_json::from_str::<BookReadingProgress>(&value).ok());
 ```
 
-Preserve existing database-creation behavior or remove it only when `create_if_missing` provides identical file-backed semantics.
+Set `BookDetails.progress`. Remove the old row mapper, four CRUD methods/outcome enums, fallback helper, and foreign-key-only pool configuration.
 
-- [ ] **Step 5: Verify GREEN**
+- [ ] **Step 4: Implement the one repository method**
 
-Run: `cargo test --lib adaptors::repository::tests::book_progress_migration`
-
-Expected: migration, per-connection PRAGMA, and orphan-rejection tests PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add migrations/20260719000001_book_progress.sql src/adaptors/repository.rs
-git commit -m "feat: persist book reading progress"
-```
-
-### Task 4: Atomic Repository CRUD and Book Lifecycle
-
-**Files:**
-- Modify: `src/adaptors/repository.rs`
-- Modify: `src/services/book_store.rs`
-
-**Interfaces:**
-- Consumes: Task 2 repository outcome signatures and Task 3 table.
-- Produces: deterministic list, atomic tri-state get/delete, conditional upsert, and correct cascade behavior through both deletion paths and re-ingestion.
-
-- [ ] **Step 1: Write failing CRUD tests**
-
-Add repository tests for EPUB/PDF round trips, checksum ordering, last-write-wins, changed server timestamp, `i64::MAX`, unknown-book save, existing/no-progress get and delete, unknown-book delete, and opaque PDF locators. Assert `DateTime::parse_from_rfc3339` succeeds and the stored/serialized suffix is `Z`.
-
-- [ ] **Step 2: Verify RED**
-
-Run: `cargo test --lib adaptors::repository::tests::book_progress`
-
-Expected: FAIL because progress repository methods are not implemented.
-
-- [ ] **Step 3: Implement atomic SQL operations**
-
-Use `ORDER BY checksum` for list. Implement get with one `LEFT JOIN` from `books` to `book_progress`. Implement save as one conditional statement using `INSERT ... SELECT ... FROM books WHERE checksum = ? ON CONFLICT(checksum) DO UPDATE ... RETURNING ...`; if no row returns, emit `SaveBookProgressOutcome::BookNotFound`. Generate `updated_on` in SQL using `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`. Implement delete in one transaction that first conditionally deletes and then distinguishes existing book/no-progress from missing book without a race.
-
-- [ ] **Step 4: Verify CRUD GREEN**
-
-Run: `cargo test --lib adaptors::repository::tests::book_progress`
-
-Expected: all focused CRUD tests PASS.
-
-- [ ] **Step 5: Write failing lifecycle tests**
-
-Add tests proving:
+Trait:
 
 ```rust
-// delete_book and matching delete_book_if_path_matches remove progress;
-// a path mismatch preserves both rows;
-// save_book with the same checksum preserves progress;
-// save_book with the same path and a new checksum deletes old progress and creates no progress for the new checksum.
+async fn save_book_progress(
+    &self,
+    checksum: i64,
+    progress: &SaveBookProgressRequest,
+) -> Result<bool, sqlx::Error>;
 ```
 
-- [ ] **Step 6: Verify lifecycle RED**
-
-Run: `cargo test --lib adaptors::repository::tests::book_progress_cascades`
-
-Expected: the same-path/different-checksum case FAILS because current `ON CONFLICT(collection, file_name)` updates the checksum.
-
-- [ ] **Step 7: Fix same-path/different-checksum replacement**
-
-Inside the existing `save_book` transaction, when `path_row == Some(old_checksum)` and `old_checksum != details.checksum`, explicitly `DELETE FROM books WHERE checksum = ?` before the insert. Remove primary-key mutation from the path-conflict branch so the subsequent insert creates the new identity; preserve same-checksum update behavior and existing event semantics.
-
-- [ ] **Step 8: Verify lifecycle GREEN**
-
-Run: `cargo test --lib adaptors::repository::tests::book_progress_cascades`
-
-Expected: all cascade and re-ingestion tests PASS.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add src/adaptors/repository.rs src/services/book_store.rs
-git commit -m "feat: add atomic book progress repository"
-```
-
-### Task 5: REST Progress Operations
-
-**Files:**
-- Modify: `src/entrypoints/api.rs`
-- Modify: `tests/book_api_test.rs`
-- Modify: `tests/book_router_test.rs`
-
-**Interfaces:**
-- Consumes: `BookProgressService` and Task 1 request/response types.
-- Produces: `GET /api/book-progress` and GET/PUT/DELETE `/api/book/{checksum}/progress`.
-
-- [ ] **Step 1: Write failing REST integration tests**
-
-Cover list `200`, get `200`/`204`, save `200`, delete/reset `204`, malformed and overflow checksum `400`, unknown book `404`, invalid locator/progression `400`, oversized payload `413`, unavailable runtime `503`, sanitized repository `500`, string `i64::MAX`, and cascade after full book deletion. Assert the existing `Response::error` JSON shape for failures.
-
-- [ ] **Step 2: Verify RED**
-
-Run: `cargo test --no-default-features --features webserver --test book_api_test book_progress`
-
-Expected: FAIL with missing routes (`404`) or missing handler symbols.
-
-- [ ] **Step 3: Register routes and thin handlers**
-
-Register:
+Implementation:
 
 ```rust
-.route("/api/book-progress", get(list_book_progress))
-.route("/api/book/{checksum}/progress", get(get_book_progress).put(save_book_progress).delete(delete_book_progress))
+let stored = BookReadingProgress {
+    locator: progress.locator.clone(),
+    progression: progress.progression,
+    updated_on: chrono::Utc::now()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+};
+let encoded = serde_json::to_string(&stored)
+    .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+let result = sqlx::query("UPDATE books SET progress = ? WHERE checksum = ?")
+    .bind(encoded).bind(checksum).execute(&self.pool).await?;
+Ok(result.rows_affected() == 1)
 ```
 
-Create a `BookProgressService` from `state.get_repository()` only after `get_available_book_runtime()` succeeds. Map `Invalid*` to `400`, `BookNotFound` to `404`, and repository failure to logged/sanitized `500`. Return JSON for list/get/save, empty `204` for no progress and successful delete.
+Delegate this signature from the two test wrappers. Keep `progress` out of all `save_book` insert/conflict assignments.
 
-- [ ] **Step 4: Capture PUT extraction rejection after runtime check**
-
-Use this handler shape:
+- [ ] **Step 5: Replace REST with one ordinary PUT**
 
 ```rust
 async fn save_book_progress(
     State(state): State<SharedState>,
-    checksum: Result<Path<String>, PathRejection>,
-    payload: Result<Json<SaveBookProgressRequest>, JsonRejection>,
-) -> AxumResponse
+    Path(checksum): Path<String>,
+    Json(progress): Json<SaveBookProgressRequest>,
+) -> AxumResponse {
+    if state.get_available_book_runtime().is_none() {
+        return book_library_unavailable_response().into_response();
+    }
+    let checksum = match parse_book_checksum(&checksum) {
+        Ok(value) => value,
+        Err(response) => return response.into_response(),
+    };
+    if let Err(message) = progress.validate() {
+        return std_error(BAD_REQUEST, message.to_string()).into_response();
+    }
+    match state.get_repository().save_book_progress(checksum, &progress).await {
+        Ok(true) => NO_CONTENT.into_response(),
+        Ok(false) => std_error(NOT_FOUND, BOOK_NOT_FOUND_MESSAGE.to_string()).into_response(),
+        Err(error) => {
+            tracing::error!("Failed to save book progress: {}", error);
+            std_error(INTERNAL_SERVER_ERROR, INTERNAL_ERROR_MESSAGE.to_string()).into_response()
+        }
+    }
+}
 ```
 
-Check runtime first; then checksum; then map JSON syntax/data rejection to JSON `400` and `BytesRejection::LengthLimitError`/payload-too-large rejection to JSON `413`.
+Remove list/get/delete routes and handlers, the service, and custom JSON rejection precedence.
 
-- [ ] **Step 5: Verify REST GREEN**
+- [ ] **Step 6: Replace Tauri with one save command**
 
-Run: `cargo test --no-default-features --features webserver --test book_api_test book_progress`
+```rust
+async fn save_book_progress_core(
+    repository: &Repository,
+    checksum: &str,
+    progress: SaveBookProgressRequest,
+) -> Result<(), String> {
+    let checksum = parse_book_checksum(checksum)?;
+    progress.validate().map_err(str::to_string)?;
+    match repository.save_book_progress(checksum, &progress).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(BOOK_NOT_FOUND_MESSAGE.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+```
 
-Expected: all focused REST tests PASS.
+Register only `save_book_progress`. Delete old model/service files and exports.
 
-- [ ] **Step 6: Add precedence router tests**
+- [ ] **Step 7: Verify GREEN**
 
-In `book_router_test.rs`, send malformed, type-invalid, and body-limit-exceeding PUT bodies against an unavailable `BookRuntime`; each must return JSON `503` containing exactly `book library unavailable`.
+Run all four Step 2 commands.
 
-- [ ] **Step 7: Verify precedence GREEN**
-
-Run: `cargo test --no-default-features --features webserver --test book_router_test book_progress`
-
-Expected: all progress router precedence tests PASS.
+Expected: every selected suite passes and no separate table/read/delete route remains.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/entrypoints/api.rs tests/book_api_test.rs tests/book_router_test.rs
-git commit -m "feat: expose book progress REST API"
+git add migrations/20260719000001_book_progress.sql src tests
+git commit -m "refactor: store progress on book records"
 ```
 
-### Task 6: Tauri Command Parity
-
-**Files:**
-- Modify: `src/entrypoints/tauri_api.rs`
-
-**Interfaces:**
-- Consumes: `BookProgressService`, `BookProgress`, and `SaveBookProgressRequest`.
-- Produces: four public Tauri commands and testable core functions with the signatures from the design.
-
-- [ ] **Step 1: Write failing command-core tests**
-
-Test list, optional get, typed save, unit delete, replacement/reset, malformed/unknown checksum, unsupported raw type, progression validation, unavailable runtime, stable domain messages, and `i64::MAX` serialization.
-
-- [ ] **Step 2: Verify RED**
-
-Run: `cargo test --lib entrypoints::tauri_api::tests::book_progress`
-
-Expected: FAIL because progress command cores do not exist.
-
-- [ ] **Step 3: Implement core functions and commands**
-
-Add core functions taking `&BookProgressService` and commands:
-
-```rust
-#[tauri::command]
-pub async fn list_book_progress(state: tauri::State<'_, SharedState>) -> Result<Vec<BookProgress>, String>;
-#[tauri::command]
-pub async fn get_book_progress(state: tauri::State<'_, SharedState>, checksum: String) -> Result<Option<BookProgress>, String>;
-#[tauri::command]
-pub async fn save_book_progress(state: tauri::State<'_, SharedState>, checksum: String, progress: SaveBookProgressRequest) -> Result<BookProgress, String>;
-#[tauri::command]
-pub async fn delete_book_progress(state: tauri::State<'_, SharedState>, checksum: String) -> Result<(), String>;
-```
-
-Each command calls `require_available_books` before constructing the service and maps `BookProgressError::to_string()` directly.
-
-- [ ] **Step 4: Register all four commands**
-
-Add `list_book_progress`, `get_book_progress`, `save_book_progress`, and `delete_book_progress` to `tauri::generate_handler!`. Add a source-level registration test that reads `tauri_api.rs` and asserts every exact command name appears inside the handler list, providing compile-time macro coverage when the default Tauri build compiles.
-
-- [ ] **Step 5: Verify GREEN**
-
-Run: `cargo test --lib entrypoints::tauri_api::tests::book_progress`
-
-Expected: all focused Tauri tests PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/entrypoints/tauri_api.rs
-git commit -m "feat: expose book progress Tauri commands"
-```
-
-### Task 7: OpenAPI Contract
+### Task 3: Simplify OpenAPI
 
 **Files:**
 - Modify: `docs/api/openapi.yaml`
 - Modify: `tests/openapi_contract_test.rs`
 
 **Interfaces:**
-- Consumes: REST paths and JSON shapes from Tasks 1 and 5.
-- Produces: reusable `BookProgress`, `BookProgressList`, `SaveBookProgressRequest`, `BookLocator`, `EpubCfiLocator`, and `PdfPageLocator` schemas.
+- Consumes: Task 2 REST behavior.
+- Produces: optional nested progress and PUT-only documentation.
 
-- [ ] **Step 1: Extend schema-test helper and write failing contract assertions**
+- [ ] **Step 1: Write failing contract test**
 
-Teach `schema_accepts` to enforce numeric `minimum`/`maximum`, string `minLength`, and `format: date-time` by parsing RFC 3339. Add representative valid EPUB/PDF request and response values, then reject numeric/out-of-`i64` checksums, invalid type, blank locator, out-of-range progression, request `checksum`/`updatedOn`, and response records without server-owned fields.
+```rust
+#[test]
+fn book_progress_is_nested_and_only_put_is_documented() {
+    let document = contract();
+    let path = &document["paths"]["/api/book/{checksum}/progress"];
+    assert!(path.get("get").is_none());
+    assert!(path.get("delete").is_none());
+    assert!(path["put"]["responses"].get("204").is_some());
+    assert!(document["paths"].get("/api/book-progress").is_none());
+    assert_eq!(
+        document["components"]["schemas"]["BookDetails"]["properties"]["progress"]["$ref"],
+        "#/components/schemas/BookReadingProgress"
+    );
+    assert!(document["components"]["schemas"]["BookReadingProgress"]["properties"]
+        .get("checksum").is_none());
+}
+```
 
 - [ ] **Step 2: Verify RED**
 
 Run: `cargo test --no-default-features --features webserver --test openapi_contract_test book_progress`
 
-Expected: FAIL because paths and schemas are missing.
+Expected: old list/get/delete and checksum assertions fail.
 
-- [ ] **Step 3: Add OpenAPI paths and reusable schemas**
+- [ ] **Step 3: Implement contract**
 
-Document `GET /api/book-progress` and GET/PUT/DELETE `/api/book/{checksum}/progress`, including empty `204`, JSON `400/404/413/500/503`, and authentication `401`. Use a signed-i64 decimal-string pattern that rejects values outside `-9223372036854775808..=9223372036854775807` in tests (a reusable `BookChecksumValue` schema may use explicit regex alternation). Define locator as `oneOf` exact object variants with `additionalProperties: false`, `value: { type: string, minLength: 1, pattern: '.*\\S.*' }`; progression has `minimum: 0`, `maximum: 1`; `updatedOn` is required with `format: date-time`.
+Add:
+
+```yaml
+progress:
+  $ref: '#/components/schemas/BookReadingProgress'
+```
+
+to `BookDetails.properties`. Define `BookReadingProgress` with required locator/updatedOn, optional bounded progression, and no checksum. Keep `SaveBookProgressRequest` locator/progression only. Retain PUT with 204/400/401/404/500/503; remove `/api/book-progress`, GET/DELETE, and `BookProgressList`.
 
 - [ ] **Step 4: Verify GREEN**
 
 Run:
 
 ```bash
-cargo test --no-default-features --features webserver --test openapi_contract_test
+cargo test --no-default-features --features webserver --test openapi_contract_test book_progress
+cargo test --no-default-features --features webserver --test openapi_contract_test openapi_contract_typed
 ```
 
-Expected: typed parser, local semantic validator, `roas`, and progress payload tests all PASS.
+Expected: all selected contract tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add docs/api/openapi.yaml tests/openapi_contract_test.rs
-git commit -m "docs: add book progress OpenAPI contract"
+git commit -m "docs: simplify book progress contract"
 ```
 
-### Task 8: Regression Verification and Review
+### Task 4: Collapse Frontend Progress State into Books
 
 **Files:**
-- Verify only; modify files solely to fix failures attributable to Tasks 1-7.
+- Modify: `../src/domain/Books.ts`
+- Modify: `../src/services/Books.ts`
+- Modify: `../src/services/Books.test.ts`
+- Modify: `../src/domain/Store/BookReducer.ts`
+- Modify: `../src/domain/Store/BookReducer.test.ts`
+- Modify: `../src/adaptors/Interfaces.ts`
+- Modify: `../src/adaptors/RestAdaptor.ts`
 
 **Interfaces:**
-- Consumes: completed feature branch.
-- Produces: fresh evidence for every configuration required by the design.
+- Consumes: Task 3 response shape.
+- Produces: `BookDetails.progress`, `cacheBookProgress({checksum, progress})`, and save-only `BookService`.
 
-- [ ] **Step 1: Run formatting and whitespace checks**
+- [ ] **Step 1: Write failing service/reducer tests**
+
+```typescript
+test('reads nested progress and sends only narrow saves', async () => {
+  adaptor.get.mockResolvedValue({ ...book, progress });
+  await expect(service.getBook(book.checksum)).resolves.toMatchObject({ progress });
+  adaptor.put.mockResolvedValue(new Response(null, { status: 204 }));
+  await service.saveProgress(book.checksum, {
+    locator: progress.locator,
+    progression: progress.progression,
+  });
+  expect(adaptor.put).toHaveBeenCalledWith(
+    `book/${encodeURIComponent(book.checksum)}/progress`,
+    { locator: progress.locator, progression: progress.progression },
+  );
+});
+
+test('updates progress in detail and loaded collections', () => {
+  let state = bookReducer(undefined, fetchBookCollection.fulfilled(collection, 'request', ''));
+  state = bookReducer(state, fetchBookDetails.fulfilled(book, 'detail', book.checksum));
+  state = bookReducer(state, cacheBookProgress({ checksum: book.checksum, progress }));
+  expect(state.details[book.checksum].progress).toEqual(progress);
+  expect(state.collections[''].books[0].progress).toEqual(progress);
+});
+```
+
+- [ ] **Step 2: Verify RED**
+
+Run: `npm run jest -- --runInBand src/services/Books.test.ts src/domain/Store/BookReducer.test.ts`
+
+Expected: missing nested field/action failures.
+
+- [ ] **Step 3: Change types and service**
+
+```typescript
+export interface BookReadingProgress extends BookProgressUpdate {
+  updatedOn: string;
+}
+```
+
+Insert `progress?: BookReadingProgress` after `updatedOn` in the existing `BookDetails` interface; keep every existing field unchanged.
+
+`isBookDetails` accepts absent progress or `isReadingProgress`; remove checksum from progress validation. Delete `listProgress`, `getProgress`, and `deleteProgress`. Remove unused `getOptional` from the adaptor interface, HTTP implementation, mocks, and tests.
+
+- [ ] **Step 4: Replace Redux progress state**
+
+Delete the progress map, load state, generation maps, fetch thunk, selectors, and reducers. Copy nested progress in `serializableBook`. Add:
+
+```typescript
+cacheBookProgress: (
+  state,
+  action: PayloadAction<{ checksum: string; progress: BookReadingProgress }>,
+) => {
+  const { checksum, progress } = action.payload;
+  const cached = serializableProgress(progress);
+  if (state.details[checksum]) state.details[checksum].progress = cached;
+  for (const collection of Object.values(state.collections)) {
+    const book = collection.books.find((item) => item.checksum === checksum);
+    if (book) book.progress = cached;
+  }
+},
+```
+
+- [ ] **Step 5: Verify GREEN**
+
+Run the Step 2 command.
+
+Expected: both suites pass without separate progress state or reads.
+
+- [ ] **Step 6: Commit in the isolated parent worktree**
+
+```bash
+git add src/domain/Books.ts src/services/Books.ts src/services/Books.test.ts src/domain/Store/BookReducer.ts src/domain/Store/BookReducer.test.ts src/adaptors/Interfaces.ts src/adaptors/RestAdaptor.ts
+git commit -m "refactor: embed reading progress in books"
+```
+
+### Task 5: Simplify Reader, Library, and Tauri Integration
+
+**Files:**
+- Modify: `../src/reader/ReaderSessionController.ts`
+- Modify: `../src/reader/ReaderSessionController.test.ts`
+- Modify: `../src/components/Books/BookLibraryPage.tsx`
+- Modify: `../src/components/Books/BookLibraryPage.test.tsx`
+- Modify: `../src/components/Books/BookShelf.tsx`
+- Modify: `../src/components/Books/BookCard.tsx`
+- Modify: `../src/components/Books/BookRow.tsx`
+- Modify: `../src/adaptors/TauriRestAdaptor.ts`
+- Modify: `../src/adaptors/TauriRestAdaptor.books.test.ts`
+- Modify: `../e2e/book-contracts.spec.ts`
+- Modify: `../e2e/book-reader.spec.ts`
+- Modify: `../e2e/book-security.spec.ts`
+
+**Interfaces:**
+- Consumes: Task 4 embedded state/action.
+- Produces: one-fetch reader restoration, direct library rendering, and save-only Tauri mapping.
+
+- [ ] **Step 1: Write failing integration tests**
+
+Make `getBook` return a book containing progress; remove `getProgress`; assert:
+
+```typescript
+expect(bookService.getBook).toHaveBeenCalledWith(book.checksum);
+expect(bookService.saveProgress).toHaveBeenCalledWith(book.checksum, {
+  locator: relocation.locator,
+  progression: relocation.progression,
+});
+expect(dispatch).toHaveBeenCalledWith(
+  cacheBookProgress({
+    checksum: book.checksum,
+    progress: expect.objectContaining({ locator: relocation.locator }),
+  }),
+);
+```
+
+Library tests pass only books and expect their own percentages. Tauri tests keep PUT and reject removed progress GET/DELETE mappings.
+
+- [ ] **Step 2: Verify RED**
+
+Run:
+
+```bash
+npm run jest -- --runInBand src/reader/ReaderSessionController.test.ts src/components/Books/BookLibraryPage.test.tsx src/adaptors/TauriRestAdaptor.books.test.ts
+```
+
+Expected: old `getProgress`, parallel props, and removed mappings cause failures.
+
+- [ ] **Step 3: Restore from fetched book**
+
+```typescript
+type ReaderBookService = Pick<BookService, 'getBook' | 'saveProgress'>;
+```
+
+Fetch only `book`, then call `restoreProgress(renderer, book.progress, ...)`. Make `DirtyProgress` hold `checksum` separately from `record: BookReadingProgress`. On relocation:
+
+```typescript
+const progress: BookReadingProgress = {
+  locator: { ...relocation.locator },
+  updatedOn: this.now(),
+  ...(relocation.progression === undefined ? {} : { progression: relocation.progression }),
+};
+this.pendingProgress.set(checksum, {
+  checksum,
+  record: progress,
+  sequence: ++this.progressSequence,
+  sessionVersion: this.openVersion,
+});
+this.dispatch(cacheBookProgress({ checksum, progress }));
+```
+
+Use `dirty.checksum` for saves/map keys. Preserve debounce, close flush, retry, and unsynced warnings.
+
+- [ ] **Step 4: Read progress directly in library**
+
+Remove `fetchBookProgress` and the progress selector/effect from `BookLibraryPage`. Remove progress-map props from shelf/card/row and render:
+
+```tsx
+<BookProgress book={book} progress={book.progress} />
+```
+
+- [ ] **Step 5: Remove obsolete Tauri/E2E routes**
+
+Delete Tauri progress list, optional GET, and DELETE mapping/arguments; keep PUT-to-`save_book_progress`. Remove `getOptional`. Make E2E book fixtures embed progress and intercept only PUT saves.
+
+- [ ] **Step 6: Verify GREEN**
+
+Run the Step 2 command.
+
+Expected: all selected suites pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/reader src/components/Books src/adaptors/TauriRestAdaptor.ts src/adaptors/TauriRestAdaptor.books.test.ts e2e/book-contracts.spec.ts e2e/book-reader.spec.ts e2e/book-security.spec.ts
+git commit -m "refactor: read progress from book records"
+```
+
+### Task 6: Full Verification and Publication
+
+**Files:**
+- Modify: parent repository `src-tauri` pointer after backend push.
+- Verify: both repositories and both PRs.
+
+**Interfaces:**
+- Consumes: Tasks 1–5.
+- Produces: updated backend PR #65 and a frontend draft PR against `spec/ebook-support`.
+
+- [ ] **Step 1: Verify backend format and whitespace**
+
+Run:
 
 ```bash
 cargo fmt --check
-git diff --check
+git diff --check origin/spec/ebook-support...HEAD
 ```
 
-Expected: both exit `0`.
+Expected: exit 0. If full format reports known legacy files only, record exact paths and run `rustfmt --check` on every changed Rust file; do not reformat unrelated code.
 
-- [ ] **Step 2: Run default/Tauri verification**
+- [ ] **Step 2: Run backend matrix**
 
 ```bash
-cargo test --lib
 cargo test --all-targets
-```
-
-Expected: both exit `0`. If the known macOS `system-configuration` panic in `adaptors::http_fetcher::tests` remains, record the exact five failing tests and separately run the same commands with those pre-existing tests skipped; do not claim the full commands pass.
-
-- [ ] **Step 3: Run webserver verification**
-
-```bash
-cargo test --no-default-features --features webserver --lib
-cargo test --no-default-features --features webserver --test book_api_test
-cargo test --no-default-features --features webserver --test book_router_test
-cargo test --no-default-features --features webserver --test openapi_contract_test
 cargo test --no-default-features --features webserver --all-targets
 ```
 
-Expected: every command exits `0`, subject only to an explicitly reported identical pre-existing environment failure.
+Expected: all enabled tests pass. If the five established macOS `http_fetcher` system-configuration panics recur, record the unfiltered output and rerun filtering only those exact test names.
 
-- [ ] **Step 4: Audit scope and requirements**
+- [ ] **Step 3: Run frontend matrix**
 
-Run `git status --short`, `git diff --stat <merge-base>..HEAD`, and inspect every changed file. Confirm all eight spec workstreams are covered and no `client/newapp` file is staged or committed.
+```bash
+npm run prettier:check
+npm run typecheck
+npm run jest -- --runInBand
+npm run build
+```
 
-- [ ] **Step 5: Request whole-branch review**
+Expected: all exit 0; do not run auto-fixing lint over unrelated files.
 
-Use `superpowers:requesting-code-review`, fix every Critical/Important finding through a focused red-green cycle, re-run affected tests, and repeat review until clean.
+- [ ] **Step 4: Audit scope**
 
-- [ ] **Step 6: Finish the branch**
+In each repository run `git status --short`, `git diff --name-only origin/spec/ebook-support...HEAD`, and `git diff --check`. Backend may contain only progress source/tests/docs/migration; frontend may contain only book/reader/adaptor/E2E files plus intentional `src-tauri` pointer.
 
-Use `superpowers:finishing-a-development-branch`; present merge/PR/keep/cleanup options only after fresh verification evidence has been read.
+- [ ] **Step 5: Update backend PR #65**
+
+Push `codex/book-reading-progress`. Verify through GitHub that PR #65 targets `spec/ebook-support`, is mergeable, and has no separate progress table or list/get/delete route.
+
+- [ ] **Step 6: Publish frontend review branch**
+
+Point the isolated frontend worktree's `src-tauri` submodule at the pushed backend head, stage only intended frontend files and `src-tauri`, commit `refactor: simplify book reading progress`, push a `codex/` branch, and open a draft PR against frontend `spec/ebook-support`. Link backend PR #65 and identify the submodule dependency.
+
+- [ ] **Step 7: Verify remotes**
+
+Fetch both PRs through GitHub and confirm base/head SHAs, draft state, changed-file lists, and mergeability. Report exact test evidence and any baseline failures.
