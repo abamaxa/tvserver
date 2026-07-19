@@ -639,14 +639,30 @@ fn openapi_contract_typed_parses_and_meets_project_requirements() {
 }
 
 #[test]
+fn book_progress_is_nested_and_only_put_is_documented() {
+    let document = contract();
+    let path = &document["paths"]["/api/book/{checksum}/progress"];
+    assert!(path.get("get").is_none());
+    assert!(path.get("delete").is_none());
+    assert!(path["put"]["responses"].get("204").is_some());
+    assert!(document["paths"].get("/api/book-progress").is_none());
+    assert_eq!(
+        document["components"]["schemas"]["BookDetails"]["properties"]["progress"]["$ref"],
+        "#/components/schemas/BookReadingProgress"
+    );
+    assert!(document["components"]["schemas"]["BookReadingProgress"]["properties"]
+        .get("checksum")
+        .is_none());
+}
+
+#[test]
 fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
     let document = contract();
     let paths = document["paths"].as_object().unwrap();
     let schemas = document["components"]["schemas"].as_object().unwrap();
 
     for schema in [
-        "BookProgress",
-        "BookProgressList",
+        "BookReadingProgress",
         "SaveBookProgressRequest",
         "BookLocator",
         "EpubCfiLocator",
@@ -655,28 +671,11 @@ fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
         assert!(schemas.contains_key(schema), "missing reusable schema {schema}");
     }
 
-    let expected_responses = [
-        (
-            "/api/book-progress",
-            "get",
-            &["200", "401", "500", "503"] as &[_],
-        ),
-        (
-            "/api/book/{checksum}/progress",
-            "get",
-            &["200", "204", "400", "401", "404", "500", "503"] as &[_],
-        ),
-        (
-            "/api/book/{checksum}/progress",
-            "put",
-            &["200", "400", "401", "404", "413", "500", "503"] as &[_],
-        ),
-        (
-            "/api/book/{checksum}/progress",
-            "delete",
-            &["204", "400", "401", "404", "500", "503"] as &[_],
-        ),
-    ];
+    let expected_responses = [(
+        "/api/book/{checksum}/progress",
+        "put",
+        &["204", "400", "401", "404", "500", "503"] as &[_],
+    )];
     for (path, method, expected) in expected_responses {
         let operation = &paths[path][method];
         assert!(operation["operationId"].is_string(), "missing {method} {path}");
@@ -688,7 +687,7 @@ fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
             .collect();
         assert_eq!(actual, expected.iter().copied().collect(), "{method} {path}");
 
-        for status in ["400", "404", "413", "500", "503"] {
+        for status in ["400", "404", "500", "503"] {
             if operation["responses"].get(status).is_some() {
                 let response = resolved(&document, &operation["responses"][status]);
                 assert_eq!(
@@ -704,36 +703,17 @@ fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
         );
     }
 
-    assert_eq!(
-        paths["/api/book-progress"]["get"]["responses"]["200"]["content"]["application/json"]
-            ["schema"]["$ref"],
-        "#/components/schemas/BookProgressList"
-    );
-    for method in ["get", "put"] {
-        assert_eq!(
-            paths["/api/book/{checksum}/progress"][method]["responses"]["200"]["content"]
-                ["application/json"]["schema"]["$ref"],
-            "#/components/schemas/BookProgress"
-        );
-    }
+    assert!(paths.get("/api/book-progress").is_none());
+    assert!(paths["/api/book/{checksum}/progress"].get("get").is_none());
+    assert!(paths["/api/book/{checksum}/progress"].get("delete").is_none());
+    assert!(paths["/api/book/{checksum}/progress"]["put"]["responses"]["204"]
+        .get("content")
+        .is_none());
     assert_eq!(
         paths["/api/book/{checksum}/progress"]["put"]["requestBody"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/SaveBookProgressRequest"
     );
-    for method in ["get", "delete"] {
-        assert!(paths["/api/book/{checksum}/progress"][method]
-            .get("requestBody")
-            .is_none());
-    }
-    for method in ["get", "delete"] {
-        assert!(
-            paths["/api/book/{checksum}/progress"][method]["responses"]["204"]
-                .get("content")
-                .is_none()
-        );
-    }
-
     let request = &schemas["SaveBookProgressRequest"];
     assert_eq!(request["additionalProperties"], false);
     assert_eq!(request["required"], serde_json::json!(["locator"]));
@@ -745,13 +725,15 @@ fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
         .collect();
     assert_eq!(request_fields, BTreeSet::from(["locator", "progression"]));
 
-    let response = &schemas["BookProgress"];
+    let response = &schemas["BookReadingProgress"];
     assert_eq!(response["additionalProperties"], false);
-    assert_eq!(
-        response["required"],
-        serde_json::json!(["checksum", "locator", "updatedOn"])
-    );
+    assert_eq!(response["required"], serde_json::json!(["locator", "updatedOn"]));
     assert_eq!(response["properties"]["updatedOn"]["format"], "date-time");
+    assert!(response["properties"].get("checksum").is_none());
+    assert_eq!(
+        schemas["BookDetails"]["properties"]["progress"]["$ref"],
+        "#/components/schemas/BookReadingProgress"
+    );
 }
 
 #[test]
@@ -778,28 +760,21 @@ fn book_progress_schemas_accept_valid_epub_and_pdf_payloads() {
     }
 
     let epub_response = serde_json::json!({
-        "checksum": "9223372036854775807",
         "locator": {"type": "epub-cfi", "value": "epubcfi(/6/4!/4/2/8)"},
         "progression": 0.42,
         "updatedOn": "2026-07-19T12:00:00Z"
     });
     let pdf_response = serde_json::json!({
-        "checksum": "-9223372036854775808",
         "locator": {"type": "pdf-page", "value": "7"},
         "updatedOn": "2026-07-19T12:00:00.000Z"
     });
     for response in [&epub_response, &pdf_response] {
         assert!(response["updatedOn"].as_str().unwrap().ends_with('Z'));
         assert!(
-            schema_accepts(&document, &schemas["BookProgress"], response),
+            schema_accepts(&document, &schemas["BookReadingProgress"], response),
             "valid progress response was rejected: {response}"
         );
     }
-    assert!(schema_accepts(
-        &document,
-        &schemas["BookProgressList"],
-        &serde_json::json!([epub_response, pdf_response])
-    ));
 }
 
 #[test]
@@ -811,7 +786,6 @@ fn book_progress_schemas_reject_invalid_payloads() {
         "progression": 0.5
     });
     let valid_response = serde_json::json!({
-        "checksum": "9223372036854775807",
         "locator": {"type": "epub-cfi", "value": "epubcfi(/6/2)"},
         "progression": 0.5,
         "updatedOn": "2026-07-19T12:00:00Z"
@@ -833,25 +807,26 @@ fn book_progress_schemas_reject_invalid_payloads() {
         );
     }
 
-    for field in ["checksum", "locator", "updatedOn"] {
+    for field in ["locator", "updatedOn"] {
         let mut invalid = valid_response.clone();
         invalid.as_object_mut().unwrap().remove(field);
         assert!(
-            !schema_accepts(&document, &schemas["BookProgress"], &invalid),
+            !schema_accepts(&document, &schemas["BookReadingProgress"], &invalid),
             "response without server-owned {field} was accepted"
         );
     }
     for (field, value) in [
-        ("checksum", serde_json::json!(9223372036854775807_u64)),
-        ("checksum", serde_json::json!("9223372036854775808")),
-        ("checksum", serde_json::json!("-9223372036854775809")),
+        ("checksum", serde_json::json!("9223372036854775807")),
+        ("progression", serde_json::json!(null)),
+        ("progression", serde_json::json!(-0.01)),
+        ("progression", serde_json::json!(1.01)),
         ("updatedOn", serde_json::json!("2026-07-19 12:00:00")),
         ("updatedOn", serde_json::json!("2026-07-19T12:00:00+02:00")),
     ] {
         let mut invalid = valid_response.clone();
         invalid[field] = value;
         assert!(
-            !schema_accepts(&document, &schemas["BookProgress"], &invalid),
+            !schema_accepts(&document, &schemas["BookReadingProgress"], &invalid),
             "invalid response field {field} was accepted: {invalid}"
         );
     }

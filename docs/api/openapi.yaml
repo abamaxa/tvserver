@@ -325,54 +325,11 @@ paths:
           $ref: '#/components/responses/ErrorResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
-  /api/book-progress:
-    get:
-      tags: [Books]
-      operationId: listBookProgress
-      summary: List saved reading progress for all books
-      responses:
-        '200':
-          description: Saved reading progress ordered by book checksum
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BookProgressList'
-        '401':
-          $ref: '#/components/responses/UnauthorizedResponse'
-        '500':
-          $ref: '#/components/responses/ErrorResponse'
-        '503':
-          $ref: '#/components/responses/ErrorResponse'
   /api/book/{checksum}/progress:
-    get:
-      tags: [Books]
-      operationId: getBookProgress
-      summary: Retrieve saved reading progress for one book
-      parameters:
-        - $ref: '#/components/parameters/BookChecksum'
-      responses:
-        '200':
-          description: Saved reading progress
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BookProgress'
-        '204':
-          description: The book exists but has no saved reading progress
-        '400':
-          $ref: '#/components/responses/ErrorResponse'
-        '401':
-          $ref: '#/components/responses/UnauthorizedResponse'
-        '404':
-          $ref: '#/components/responses/ErrorResponse'
-        '500':
-          $ref: '#/components/responses/ErrorResponse'
-        '503':
-          $ref: '#/components/responses/ErrorResponse'
     put:
       tags: [Books]
       operationId: saveBookProgress
-      summary: Create or replace saved reading progress for one book
+      summary: Save reading progress for one book
       parameters:
         - $ref: '#/components/parameters/BookChecksum'
       requestBody:
@@ -382,33 +339,8 @@ paths:
             schema:
               $ref: '#/components/schemas/SaveBookProgressRequest'
       responses:
-        '200':
-          description: Persisted reading progress with server-owned fields
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BookProgress'
-        '400':
-          $ref: '#/components/responses/ErrorResponse'
-        '401':
-          $ref: '#/components/responses/UnauthorizedResponse'
-        '404':
-          $ref: '#/components/responses/ErrorResponse'
-        '413':
-          $ref: '#/components/responses/ErrorResponse'
-        '500':
-          $ref: '#/components/responses/ErrorResponse'
-        '503':
-          $ref: '#/components/responses/ErrorResponse'
-    delete:
-      tags: [Books]
-      operationId: deleteBookProgress
-      summary: Delete saved reading progress for one book
-      parameters:
-        - $ref: '#/components/parameters/BookChecksum'
-      responses:
         '204':
-          description: Reading progress is absent after this idempotent reset
+          description: Reading progress was saved.
         '400':
           $ref: '#/components/responses/ErrorResponse'
         '401':
@@ -1463,6 +1395,8 @@ components:
         checksum:
           type: string
           pattern: '^-?[0-9]+$'
+        progress:
+          $ref: '#/components/schemas/BookReadingProgress'
         searchPhrase:
           type: string
         state:
@@ -1567,13 +1501,11 @@ components:
           format: double
           minimum: 0
           maximum: 1
-    BookProgress:
+    BookReadingProgress:
       type: object
       additionalProperties: false
-      required: [checksum, locator, updatedOn]
+      required: [locator, updatedOn]
       properties:
-        checksum:
-          $ref: '#/components/schemas/BookChecksumValue'
         locator:
           $ref: '#/components/schemas/BookLocator'
         progression:
@@ -1586,10 +1518,6 @@ components:
           format: date-time
           pattern: 'Z$'
           description: Server-authored RFC 3339 UTC timestamp with a Z suffix.
-    BookProgressList:
-      type: array
-      items:
-        $ref: '#/components/schemas/BookProgress'
     ClientLogMessage:
       type: object
       additionalProperties: true
