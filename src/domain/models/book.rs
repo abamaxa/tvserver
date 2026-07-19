@@ -149,6 +149,50 @@ impl BookMetadata {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BookLocatorType {
+    EpubCfi,
+    PdfPage,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BookLocator {
+    #[serde(rename = "type")]
+    pub locator_type: BookLocatorType,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveBookProgressRequest {
+    pub locator: BookLocator,
+    pub progression: Option<f64>,
+}
+
+impl SaveBookProgressRequest {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.locator.value.trim().is_empty() {
+            return Err("book locator value must not be blank");
+        }
+        if self.progression.is_some_and(|value| {
+            !value.is_finite() || !(0.0..=1.0).contains(&value)
+        }) {
+            return Err("book progression must be finite and between 0 and 1");
+        }
+        Ok(())
+    }
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookReadingProgress {
+    pub locator: BookLocator,
+    pub progression: Option<f64>,
+    pub updated_on: String,
+}
+
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BookCollectionItem {
@@ -215,6 +259,7 @@ pub struct BookDetails {
     pub metadata: BookMetadata,
     #[serde(deserialize_with = "deserialize_string_to_i64")]
     pub checksum: i64,
+    pub progress: Option<BookReadingProgress>,
     pub search_phrase: Option<String>,
     pub state: BookState,
     pub created_on: NaiveDateTime,
@@ -305,6 +350,9 @@ impl Serialize for BookDetails {
         if !self.metadata.is_empty() {
             field_count += 1;
         }
+        if self.progress.is_some() {
+            field_count += 1;
+        }
         if self.search_phrase.is_some() {
             field_count += 1;
         }
@@ -339,6 +387,9 @@ impl Serialize for BookDetails {
             state.serialize_field("metadata", &self.metadata)?;
         }
         state.serialize_field("checksum", &self.checksum.to_string())?;
+        if let Some(ref progress) = self.progress {
+            state.serialize_field("progress", progress)?;
+        }
         if let Some(ref search_phrase) = self.search_phrase {
             state.serialize_field("searchPhrase", search_phrase)?;
         }
@@ -444,6 +495,42 @@ mod test {
         assert!(value.get("pageCount").is_none());
         assert!(value.get("metadata").is_none());
         assert!(value.get("searchPhrase").is_none());
+    }
+
+    #[test]
+    fn serializes_optional_embedded_progress_without_checksum() {
+        let mut book = sample_book();
+        book.progress = Some(BookReadingProgress {
+            locator: BookLocator {
+                locator_type: BookLocatorType::EpubCfi,
+                value: "epubcfi(/6/4)".into(),
+            },
+            progression: Some(0.42),
+            updated_on: "2026-07-19T12:00:00.000Z".into(),
+        });
+        let value = serde_json::to_value(book).unwrap();
+        assert_eq!(value["progress"], serde_json::json!({
+            "locator": {"type": "epub-cfi", "value": "epubcfi(/6/4)"},
+            "progression": 0.42,
+            "updatedOn": "2026-07-19T12:00:00.000Z"
+        }));
+        assert!(value["progress"].get("checksum").is_none());
+    }
+
+    #[test]
+    fn validates_progress_request_boundaries() {
+        let mut request: SaveBookProgressRequest = serde_json::from_value(
+            serde_json::json!({"locator": {"type": "pdf-page", "value": "opaque"}, "progression": 1.0})
+        ).unwrap();
+        assert_eq!(request.validate(), Ok(()));
+        request.locator.value = "\u{2003}".into();
+        assert_eq!(request.validate(), Err("book locator value must not be blank"));
+        request.locator.value = "1".into();
+        request.progression = Some(f64::NAN);
+        assert_eq!(
+            request.validate(),
+            Err("book progression must be finite and between 0 and 1")
+        );
     }
 
     #[test]
