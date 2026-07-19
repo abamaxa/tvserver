@@ -1,4 +1,5 @@
 mod book;
+mod book_progress;
 mod conversion;
 mod search_results;
 mod video;
@@ -8,6 +9,9 @@ pub use book::{
     default_book_thumbnail_bytes, ensure_default_book_thumbnail, is_default_book_thumbnail,
     BookCollectionDetails, BookCollectionItem, BookDetails, BookFormat, BookMetadata, BookState,
     DEFAULT_BOOK_THUMBNAIL,
+};
+pub use book_progress::{
+    BookLocator, BookLocatorType, BookProgress, RawBookLocator, SaveBookProgressRequest,
 };
 pub use conversion::{Conversion, AVAILABLE_CONVERSIONS};
 pub use search_results::{DownloadableItem, SearchResults, TaskListResults};
