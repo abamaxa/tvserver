@@ -87,7 +87,8 @@ async fn make_unavailable_context() -> Result<Context> {
 }
 
 #[tokio::test]
-async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -> Result<()> {
+async fn unavailable_book_runtime_returns_503_for_book_progress_without_disabling_video_routes(
+) -> Result<()> {
     let _env_lock = ENV_LOCK.lock().await;
     env::set_var(MOVIE_DIR, MOVIE_ROOT);
 
@@ -101,6 +102,9 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
         (reqwest::Method::GET, "/api/books/%FF"),
         (reqwest::Method::GET, "/api/book/1"),
         (reqwest::Method::DELETE, "/api/book/1"),
+        (reqwest::Method::GET, "/api/book-progress"),
+        (reqwest::Method::GET, "/api/book/1/progress"),
+        (reqwest::Method::DELETE, "/api/book/1/progress"),
         (
             reqwest::Method::GET,
             "/api/books/download/Shelf/book.epub",
@@ -115,10 +119,12 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
             .send()
             .await?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
-        let has_json_error = matches!(path, "/api/books" | "/api/books/%FF")
+        let has_json_error = matches!(path, "/api/books" | "/api/books/%FF" | "/api/book-progress")
             || path.starts_with("/api/book/");
         if has_json_error {
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/json", "{path}");
             let body: app_lib::domain::messages::Response = response.json().await?;
+            assert!(body.message.is_empty(), "{path}");
             assert_eq!(body.errors, [BOOK_LIBRARY_UNAVAILABLE], "{path}");
         }
     }
@@ -128,6 +134,39 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
         .send()
         .await?;
     assert_ne!(video.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_progress_put_rejections_yield_to_unavailable_runtime() -> Result<()> {
+    let _env_lock = ENV_LOCK.lock().await;
+    env::set_var(MOVIE_DIR, MOVIE_ROOT);
+
+    let server = common::create_server(make_unavailable_context().await?, 57218).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let oversized = format!(
+        r#"{{"locator":{{"type":"pdf-page","value":"{}"}}}}"#,
+        "x".repeat(2 * 1024 * 1024)
+    );
+
+    for body in [
+        r#"{"locator":{"type":"pdf-page","value":"1"}"#.to_string(),
+        r#"{"locator":{"type":"pdf-page","value":"1"},"progression":"half"}"#.to_string(),
+        oversized,
+    ] {
+        let response = client
+            .put("http://localhost:57218/api/book/1/progress")
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let body: app_lib::domain::messages::Response = response.json().await?;
+        assert!(body.message.is_empty());
+        assert_eq!(body.errors, [BOOK_LIBRARY_UNAVAILABLE]);
+    }
 
     Ok(server.abort())
 }

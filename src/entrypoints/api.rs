@@ -7,8 +7,10 @@ use crate::domain::messages::{
     MediaItem, PlayRequest, PlayerList, Response,
 };
 use crate::domain::models::{
-    BookCollectionDetails, Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS,
+    BookCollectionDetails, Conversion, SaveBookProgressRequest, SearchResults, TaskListResults,
+    AVAILABLE_CONVERSIONS,
 };
+use crate::domain::services::{BookProgressError, BookProgressService};
 use crate::domain::traits::{MediaSharer, Searcher};
 use crate::domain::{SearchEngineType, TaskType};
 use axum::body::Body;
@@ -16,7 +18,10 @@ use axum::routing::any;
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
-    extract::{rejection::PathRejection, ConnectInfo, Path, Query, State},
+    extract::{
+        rejection::{BytesRejection, FailedToBufferBody, JsonRejection, PathRejection},
+        ConnectInfo, Path, Query, State,
+    },
     http::StatusCode,
     response::{IntoResponse, Response as AxumResponse},
     routing::{delete, get, post, patch},
@@ -31,7 +36,9 @@ type StdResponse = (StatusCode, Json<Response>);
 const BAD_REQUEST: StatusCode = StatusCode::BAD_REQUEST;
 const INTERNAL_SERVER_ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 const SERVICE_UNAVAILABLE: StatusCode = StatusCode::SERVICE_UNAVAILABLE;
+const PAYLOAD_TOO_LARGE: StatusCode = StatusCode::PAYLOAD_TOO_LARGE;
 const OK: StatusCode = StatusCode::OK;
+const NO_CONTENT: StatusCode = StatusCode::NO_CONTENT;
 const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
 const BOOK_NOT_FOUND_MESSAGE: &str = "book not found";
 const INTERNAL_ERROR_MESSAGE: &str = "internal server error";
@@ -53,6 +60,13 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/books/{*collection}", get(list_books))
         .route("/api/book/{checksum}", get(get_book))
         .route("/api/book/{checksum}", delete(delete_book))
+        .route("/api/book-progress", get(list_book_progress))
+        .route(
+            "/api/book/{checksum}/progress",
+            get(get_book_progress)
+                .put(save_book_progress)
+                .delete(delete_book_progress),
+        )
         .route("/api/remote", get(list_player))
         .route("/api/remote/control", post(remote_command))
         .route("/api/remote/play", post(remote_play))
@@ -206,6 +220,128 @@ fn parse_book_checksum(checksum: &str) -> Result<i64, StdResponse> {
 
 fn invalid_book_checksum_error() -> StdResponse {
     std_error(BAD_REQUEST, "invalid book checksum".to_string())
+}
+
+fn book_progress_service(state: &SharedState) -> Result<BookProgressService, StdResponse> {
+    state
+        .get_available_book_runtime()
+        .ok_or_else(book_library_unavailable_response)?;
+    Ok(BookProgressService::new(state.get_repository()))
+}
+
+fn book_progress_error_response(operation: &str, error: BookProgressError) -> StdResponse {
+    match error {
+        BookProgressError::InvalidChecksum
+        | BookProgressError::InvalidLocatorType
+        | BookProgressError::BlankLocatorValue
+        | BookProgressError::InvalidProgression => std_error(BAD_REQUEST, error.to_string()),
+        BookProgressError::BookNotFound => std_error(NOT_FOUND, BOOK_NOT_FOUND_MESSAGE.to_string()),
+        BookProgressError::Repository(error) => {
+            tracing::error!("Failed to {}: {}", operation, error);
+            std_error(INTERNAL_SERVER_ERROR, INTERNAL_ERROR_MESSAGE.to_string())
+        }
+    }
+}
+
+fn book_progress_path(
+    checksum: Result<Path<String>, PathRejection>,
+) -> Result<String, StdResponse> {
+    checksum
+        .map(|Path(checksum)| checksum)
+        .map_err(|_| invalid_book_checksum_error())
+}
+
+fn book_progress_json_rejection(error: JsonRejection) -> StdResponse {
+    let too_large = matches!(
+        error,
+        JsonRejection::BytesRejection(BytesRejection::FailedToBufferBody(
+            FailedToBufferBody::LengthLimitError(_)
+        ))
+    );
+    if too_large {
+        std_error(PAYLOAD_TOO_LARGE, "request body too large".to_string())
+    } else {
+        std_error(BAD_REQUEST, "invalid request body".to_string())
+    }
+}
+
+#[debug_handler]
+async fn list_book_progress(State(state): State<SharedState>) -> AxumResponse {
+    let service = match book_progress_service(&state) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
+    };
+
+    match service.list().await {
+        Ok(progress) => Json(progress).into_response(),
+        Err(error) => book_progress_error_response("list book progress", error).into_response(),
+    }
+}
+
+#[debug_handler]
+async fn get_book_progress(
+    State(state): State<SharedState>,
+    checksum: Result<Path<String>, PathRejection>,
+) -> AxumResponse {
+    let service = match book_progress_service(&state) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
+    };
+    let checksum = match book_progress_path(checksum) {
+        Ok(checksum) => checksum,
+        Err(response) => return response.into_response(),
+    };
+
+    match service.get(&checksum).await {
+        Ok(Some(progress)) => Json(progress).into_response(),
+        Ok(None) => NO_CONTENT.into_response(),
+        Err(error) => book_progress_error_response("get book progress", error).into_response(),
+    }
+}
+
+#[debug_handler]
+async fn save_book_progress(
+    State(state): State<SharedState>,
+    checksum: Result<Path<String>, PathRejection>,
+    payload: Result<Json<SaveBookProgressRequest>, JsonRejection>,
+) -> AxumResponse {
+    let service = match book_progress_service(&state) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
+    };
+    let checksum = match book_progress_path(checksum) {
+        Ok(checksum) => checksum,
+        Err(response) => return response.into_response(),
+    };
+    let Json(payload) = match payload {
+        Ok(payload) => payload,
+        Err(error) => return book_progress_json_rejection(error).into_response(),
+    };
+
+    match service.save(&checksum, payload).await {
+        Ok(progress) => Json(progress).into_response(),
+        Err(error) => book_progress_error_response("save book progress", error).into_response(),
+    }
+}
+
+#[debug_handler]
+async fn delete_book_progress(
+    State(state): State<SharedState>,
+    checksum: Result<Path<String>, PathRejection>,
+) -> AxumResponse {
+    let service = match book_progress_service(&state) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
+    };
+    let checksum = match book_progress_path(checksum) {
+        Ok(checksum) => checksum,
+        Err(response) => return response.into_response(),
+    };
+
+    match service.delete(&checksum).await {
+        Ok(()) => NO_CONTENT.into_response(),
+        Err(error) => book_progress_error_response("delete book progress", error).into_response(),
+    }
 }
 
 #[debug_handler]
