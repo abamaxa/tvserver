@@ -1,26 +1,48 @@
-# Book Reading Progress Design
+# Embedded Book Reading Progress Design
 
 ## Summary
 
-Add one server-side reading-progress record per book so web, Tauri desktop, and Android clients can resume from the most recently saved position. Progress is format-neutral, stored independently from book metadata, and exposed through matching REST and Tauri operations.
+Store the current reading position as an optional field of each book record. Book list and detail responses carry progress with the rest of `BookDetails`; clients do not load or cache a second progress resource.
+
+Keep one narrow write operation, `PUT /api/book/{checksum}/progress`, because reader relocations should not submit the complete book record. Remove the separate progress table, service, read/list/delete APIs, Tauri commands, and frontend progress store.
 
 ## Scope
 
 The feature includes:
 
-- persistent progress keyed by book checksum;
+- one optional current position per book;
 - EPUB CFI and PDF page locators;
 - an optional normalized progression value;
-- list, get, save, and delete operations over REST and Tauri;
-- automatic cleanup when a book is deleted;
-- OpenAPI schemas and operations;
-- model, repository, API, Tauri, routing, lifecycle, and contract tests.
+- a server-authored update timestamp;
+- progress embedded in all book list and detail responses;
+- one REST PUT route and one Tauri save command;
+- immediate frontend cache updates after reader relocations.
 
-The feature does not include per-user progress, history, bookmarks, highlights, annotations, or live synchronization between open readers.
+The feature does not include per-user progress, history, bookmarks, highlights, annotations, a separate progress resource, or live synchronization between clients.
 
-## API Models
+## Book Model
 
-Clients save only fields they own:
+Add optional `progress` to `BookDetails`:
+
+```json
+{
+  "fileName": "example.epub",
+  "checksum": "9223372036854775807",
+  "format": "epub",
+  "progress": {
+    "locator": {
+      "type": "epub-cfi",
+      "value": "epubcfi(/6/4!/4/2/8)"
+    },
+    "progression": 0.42,
+    "updatedOn": "2026-07-19T12:00:00Z"
+  }
+}
+```
+
+The nested progress object does not repeat the book checksum. Its owning `BookDetails` already supplies that identity.
+
+Clients save only the fields they own:
 
 ```json
 {
@@ -32,181 +54,148 @@ Clients save only fields they own:
 }
 ```
 
-The server returns the complete record:
+`updatedOn` is assigned by the backend and serialized as RFC 3339 UTC with a `Z` suffix. The request cannot set it.
 
-```json
-{
-  "checksum": "9223372036854775807",
-  "locator": {
-    "type": "epub-cfi",
-    "value": "epubcfi(/6/4!/4/2/8)"
-  },
-  "progression": 0.42,
-  "updatedOn": "2026-07-19T12:00:00Z"
-}
-```
+The locator type is a closed enum with `epub-cfi` and `pdf-page`. Locator values are opaque to the backend but must contain a non-whitespace character. `progression` is optional and, when present, must be finite and within inclusive `0..=1`.
 
-The internal checksum remains an `i64`, but API serialization emits it as a decimal string. Integration tests use `9223372036854775807` (`i64::MAX`) to exercise a value above JavaScript's safe-integer range while remaining valid for the backend. The frontend fixture value `18446744073709551615` is outside signed `i64` and is not a valid backend checksum.
-
-`updatedOn` is always assigned by the server and serialized as RFC 3339 UTC with a `Z` suffix. The save request cannot set either `checksum` or `updatedOn`.
-
-The transport input and validated domain model are separate. REST and Tauri deserialize a raw `SaveBookProgressRequest` whose locator type is a `String`. `BookProgressService` converts that string into the closed `BookLocatorType` domain enum, so unsupported types produce the same stable domain validation error instead of an Axum or Tauri deserialization rejection.
-
-The validated locator type is a closed enum with two initial values:
-
-- `epub-cfi`
-- `pdf-page`
-
-The locator value is opaque to the backend and must contain at least one non-whitespace character. A PDF page is represented by frontend clients as a positive, 1-based page number encoded as a string, but issue #53 deliberately makes the value opaque. The backend therefore does not parse, normalize, or restrict PDF locator values beyond the nonblank rule. `progression` is optional and, when present, must be finite and within the inclusive range `0..=1`.
-
-## Architecture
-
-Add focused raw-request and validated `book_progress` models plus a small stateless `BookProgressService`. The service is shared by REST and Tauri and owns:
-
-- checksum parsing;
-- input validation;
-- conversion from the raw transport DTO to the closed domain enum;
-- interpretation of atomic repository outcomes as book-not-found, no-progress, or saved-progress results;
-- repository orchestration;
-- stable domain errors.
-
-This boundary prevents REST and Tauri validation or error behavior from drifting. It uses the repository already available through the application context and does not require new runtime state.
-
-Extend the repository trait and SQLite implementation with list, get, upsert, and delete progress operations. Repository methods own SQL concerns, combine per-book existence with progress operations atomically, and return typed outcomes with persisted records and server-generated timestamps. They do not expose transport-specific status codes or response wrappers.
+The checksum remains an internal `i64` and a decimal string at transport boundaries. Tests continue to cover `9223372036854775807` so JavaScript never has to represent a full-width checksum as a number.
 
 ## Persistence
 
-Add a migration for a separate `book_progress` table:
+The existing progress migration has never been deployed, so rewrite it rather than add a follow-up migration:
 
-- `checksum INTEGER PRIMARY KEY`, referencing `books(checksum)` with `ON DELETE CASCADE`;
-- `locator_type TEXT NOT NULL`;
-- `locator_value TEXT NOT NULL`;
-- `progression REAL`;
-- `updated_on TEXT NOT NULL`, populated with an RFC 3339 UTC value such as `2026-07-19T12:00:00.000Z`.
+```sql
+ALTER TABLE books ADD COLUMN progress TEXT;
+```
 
-SQL constraints enforce the two supported locator types, a nonblank locator value, and progression within `0..=1`. Application validation provides useful client errors before a database constraint is reached.
+`progress` contains the nested JSON object or SQL `NULL`. This follows the existing JSON-backed `metadata` pattern and avoids a second table, foreign key configuration, joins, and cascade logic.
 
-Foreign keys must be enabled for every pooled SQLite connection. `SqlRepository::new` will build `SqliteConnectOptions` with `foreign_keys(true)` and create the pool with `SqlitePoolOptions::connect_with`, or use an equivalent per-connection hook. Running `PRAGMA foreign_keys = ON` once after pool creation is insufficient and is not an acceptable implementation. A file-backed, multi-connection repository test must acquire multiple pooled connections and verify enforcement on each one. Tests must also verify that both ordinary repository book deletion and the conditional deletion used by `BookStore` cascade to progress.
+Book row mapping deserializes valid progress JSON into `BookDetails.progress`. A missing, null, or malformed value is treated as absent, matching the repository's tolerant metadata decoding.
 
-Saving uses one conditional upsert statement (or one transaction with equivalent locking) that selects the referenced checksum from `books`, inserts or replaces progress, assigns the UTC timestamp, and returns the persisted row. If the book does not exist, no progress row is inserted and the repository returns a typed missing-book outcome that the service maps to `BookNotFound`. A service-level existence query followed by a separate upsert is forbidden because book deletion could race between those operations. Foreign-key violations are also mapped to `BookNotFound` rather than exposed as repository failures.
+Saving progress performs one conditional update by checksum. The repository serializes a validated locator, optional progression, and server timestamp, then executes:
 
-Per-book reads use a single query that distinguishes an unknown book from an existing book with no progress. Deletes similarly return an atomic typed outcome distinguishing an unknown book from an idempotent reset. A later save replaces the locator and progression and assigns a fresh RFC 3339 UTC `updated_on`. Listing orders records by checksum for deterministic output.
+```sql
+UPDATE books SET progress = ? WHERE checksum = ?;
+```
 
-Re-ingestion with the same checksum preserves progress. When the existing book upsert encounters the same path with a different checksum, it must delete the old book row before inserting the replacement. This allows the old progress to cascade and prevents progress from transferring to different content. Updating a book checksum through `ON UPDATE CASCADE` is explicitly forbidden.
+Zero affected rows means the book does not exist. The operation does not change the book-level `updated_on` field and does not emit a book metadata event.
+
+Existing book ingestion must not include `progress` in its insert/update assignments. A same-checksum refresh therefore preserves progress. Same-path/different-checksum replacement deletes the old book row, naturally discarding its embedded progress rather than transferring it to different content.
+
+## Backend Architecture
+
+Keep the locator and progress DTOs in the book model. A small validation method converts the save request into validated values. Do not introduce a standalone progress service or progress-specific read/delete outcome types.
+
+Extend `Databaser` with only the narrow save method needed by the transports. It returns whether a matching book was updated. Existing `list_books`, `list_all_books`, and `retrieve_book` automatically carry progress because they already return `BookDetails`.
+
+REST and Tauri each:
+
+1. verify the book runtime is available;
+2. parse the checksum using the existing book checksum rules;
+3. validate the request model;
+4. invoke the repository save method;
+5. map no matching row to book-not-found.
+
+This limited duplication is preferable to a new service layer for a single write operation.
 
 ## Operations
 
 ### REST
 
-- `GET /api/book-progress`
-  - Returns `200 OK` with all saved records as a JSON array.
-- `GET /api/book/{checksum}/progress`
-  - Returns `200 OK` with the saved record.
-  - Returns `204 No Content` when the book exists but has no progress.
+Keep only:
+
 - `PUT /api/book/{checksum}/progress`
-  - Accepts raw `SaveBookProgressRequest`, converts it in the service, creates or replaces the record atomically with book existence, and returns `200 OK` with the persisted `BookProgress`.
-- `DELETE /api/book/{checksum}/progress`
-  - Removes any saved record and returns `204 No Content`.
-  - The operation is idempotent for an existing book with no saved progress.
+  - accepts locator and optional progression;
+  - returns `204 No Content` after saving;
+  - returns `400 Bad Request` for an invalid checksum, locator, or progression;
+  - returns `404 Not Found` for an unknown book;
+  - returns the existing `503 Service Unavailable` response when the handler reaches an unavailable book runtime;
+  - logs unexpected repository details and returns a sanitized `500 Internal Server Error`.
 
-All per-book operations validate that the referenced book exists. A valid but unknown checksum returns `404 Not Found`; a malformed or overflowing checksum returns `400 Bad Request`. Invalid locator type, blank locator value, non-finite progression, or progression outside `0..=1` returns `400 Bad Request`. REST errors use the existing JSON error response shape. Unexpected repository failures are logged and returned as sanitized `500 Internal Server Error` responses.
+Use ordinary Axum extraction and rejection ordering. There is no custom rule making runtime unavailability take precedence over malformed or oversized JSON.
 
-When the book runtime is unavailable, every progress route returns the existing stable `503 Service Unavailable` book-library response. For PUT, Axum still has to run extractors before entering the handler body, so the payload parameter must be rejection-capturing, such as `Result<Json<SaveBookProgressRequest>, JsonRejection>`. The handler checks runtime availability before inspecting that captured result. This makes `503` take precedence even when JSON is malformed, type-invalid, or over the configured body limit. When the runtime is available, malformed or type-invalid JSON is mapped to the existing JSON error shape with `400`; payload-limit rejection is mapped to the same JSON shape with `413`.
+Remove:
+
+- `GET /api/book-progress`;
+- `GET /api/book/{checksum}/progress`;
+- `DELETE /api/book/{checksum}/progress`.
 
 ### Tauri
 
-Add and register:
+Keep and register only:
 
-- `list_book_progress() -> Result<Vec<BookProgress>, String>`
-- `get_book_progress(checksum: String) -> Result<Option<BookProgress>, String>`
-- `save_book_progress(checksum: String, progress: SaveBookProgressRequest) -> Result<BookProgress, String>`
-- `delete_book_progress(checksum: String) -> Result<(), String>`
+```text
+save_book_progress(checksum: String, progress: SaveBookProgressRequest) -> Result<(), String>
+```
 
-The commands delegate to testable core functions backed by the shared service. Their successful results match REST semantics, and validation or not-found failures use the same stable domain messages.
+Remove the list, get, and delete progress commands. Book list and detail commands return the embedded field through `BookDetails`.
 
-## Data Flow
+## Frontend Architecture
 
-1. A client submits a checksum and, for saves, a locator with optional progression.
-2. REST or Tauri verifies that the book runtime is available.
-3. `BookProgressService` parses the checksum and converts the raw request into validated domain values.
-4. The repository lists progress or executes a per-book operation that atomically includes the book-existence decision.
-5. The service maps the typed repository outcome to a progress value, no-progress result, or stable domain error.
-6. The transport maps the typed result or domain error to its response shape.
+In the React application:
 
-The list operation reads all progress rows directly and performs no per-book lookups, avoiding an N+1 query pattern.
+- add optional `progress: BookReadingProgress` to `BookDetails`;
+- define `BookReadingProgress` as locator, optional progression, and `updatedOn`, without a checksum;
+- validate optional nested progress as part of `BookDetails` response validation;
+- retain `BookService.saveProgress` and remove `listProgress`, `getProgress`, and `deleteProgress`;
+- remove the initial `/book-progress` request;
+- remove the Redux progress map, load state, mutation generations, request generations, and fetch thunk;
+- copy nested progress in `serializableBook`;
+- have book cards and rows read `book.progress` directly instead of accepting a parallel progress map;
+- open the reader with one `getBook` request and restore from `book.progress`;
+- keep debounced/flush-on-close saves through the narrow PUT operation;
+- update cached `BookDetails.progress` values optimistically for the detail record and any loaded collection entries so the library indicator stays current.
 
-## Error Model
+The reader controller keeps the checksum beside its pending save internally; the nested progress model itself does not contain the checksum. Failed saves retain the existing unsynced-position warning behavior.
 
-Use a dedicated error type with stable variants for:
-
-- invalid checksum;
-- book not found;
-- invalid locator type;
-- blank locator value;
-- invalid progression;
-- repository failure.
-
-Messages derived from these variants are shared by REST and Tauri. The underlying database error is retained for logging but is not exposed in REST responses.
+The Tauri REST adaptor keeps only the PUT-to-`save_book_progress` mapping and removes progress list, optional get, and delete mappings.
 
 ## OpenAPI
 
-Update `docs/api/openapi.yaml` with both routes and reusable schemas for:
+Update `docs/api/openapi.yaml` to:
 
-- `BookProgress`;
-- raw `SaveBookProgressRequest`;
-- `BookLocator` and its EPUB CFI and PDF page variants;
-- the list response.
+- add optional `progress` to `BookDetails`;
+- retain reusable schemas for `BookReadingProgress`, `SaveBookProgressRequest`, and the two locator variants;
+- omit checksum from the nested progress schema;
+- document only the PUT progress path with a `204` success response;
+- remove the progress list schema and the list/get/delete operations.
 
-The contract marks checksum as a signed-decimal string, `updatedOn` as a required server-authored RFC 3339 UTC string with `format: date-time`, locator type as exactly one supported variant, locator value as non-empty, and progression as optional with minimum `0` and maximum `1`. PUT documents only the client-owned request fields. The Rust request DTO keeps locator type as a raw string even though OpenAPI correctly advertises the two accepted values. GET-without-progress and DELETE document empty `204` responses.
+The schema preserves the signed-decimal checksum string, closed locator variants, nonblank locator value, optional bounded progression, and UTC `updatedOn` timestamp.
 
-## Implementation and Testing Workstreams
+## Error Handling
 
-Follow test-driven development for every behavior. The detailed implementation plan must break the following workstreams into red-green-refactor tasks with exact files, commands, expected failures, and expected passing results.
+Model validation produces stable messages for blank locators and invalid progression. Unsupported locator types may be rejected by normal Serde/Axum or Tauri deserialization because cross-transport rejection parity is no longer a requirement.
 
-### 1. Transport and Domain Models
+Repository failures are logged without exposing SQL details. A stored malformed progress JSON is ignored on read rather than preventing the containing book from loading.
 
-Create the raw request DTO, validated locator enum/value, response model, shared error type, and service conversion. Tests cover exact EPUB/PDF serialization, conversion of unsupported raw locator strings into stable domain errors, checksum string serialization using `9223372036854775807`, optional progression, inclusive bounds, non-finite values, blank values, and preservation of opaque locator values including non-numeric PDF values.
+## Testing
 
-### 2. Migration and Pooled Connection Enforcement
+Backend tests cover:
 
-Add the constrained table and configure per-connection foreign-key enforcement before migrations run. A file-backed repository test with a pool capable of multiple connections verifies `PRAGMA foreign_keys = 1` on separately acquired connections and proves an orphan progress insert cannot succeed. Migration tests verify the foreign key, checks, columns, and RFC 3339 UTC timestamp storage.
+- request and nested progress serialization for EPUB and PDF;
+- blank locator and progression validation;
+- the nullable `books.progress` migration column;
+- save and replace behavior with a server-authored timestamp;
+- unknown-book saves;
+- progress included in collection and detail responses;
+- same-checksum ingestion preservation and different-checksum replacement cleanup;
+- REST PUT success, invalid input, unknown book, unavailable runtime, and sanitized repository failure;
+- Tauri save registration and core behavior;
+- the simplified OpenAPI contract.
 
-### 3. Repository CRUD and Atomic Outcomes
+Frontend tests cover:
 
-Implement and test list, tri-state get, conditional upsert, and tri-state delete. Tests cover EPUB and PDF round trips, deterministic checksum ordering, last-write-wins replacement, server-authored UTC timestamps, unknown-book atomic save failure, idempotent reset for an existing book, and sanitized handling of unexpected database failures.
+- `BookDetails` validation with absent and present progress;
+- the narrow save request;
+- reducer updates to embedded progress across cached detail and collection records;
+- cards and rows rendering progress from each book;
+- reader restore from the fetched book and continued debounced saving;
+- Tauri adaptor mapping for the single save operation.
 
-### 4. Book Lifecycle and Re-ingestion
-
-Repository and service tests prove progress cascades through both `delete_book` and `delete_book_if_path_matches`; a path mismatch must preserve both book and progress. Re-ingestion tests prove same-checksum updates preserve progress and same-path/different-checksum replacement deletes old progress instead of transferring it to new content.
-
-### 5. REST API
-
-Register the list and per-book routes and implement response mapping. Integration tests cover list `200`; get `200` and no-progress `204`; save `200`; delete `204`; malformed/overflow checksum `400`; unknown book `404`; unsupported locator, blank value, and invalid progression `400`; payload-too-large `413`; unavailable runtime `503`; and sanitized repository `500`. A dedicated router test sends malformed and oversized PUT bodies while the runtime is unavailable and verifies JSON `503` takes precedence. Round-trip responses assert the checksum is the string `"9223372036854775807"`. Full book deletion must make the progress row disappear.
-
-### 6. Tauri Parity
-
-Add the four commands, their testable core functions, and command registration. Tests cover list, optional get, typed save result, unit delete result, replacement, reset, malformed and unknown checksums, raw unsupported locator conversion, progression validation, runtime unavailability, and stable error-message parity with REST domain errors. Compile-time command registration coverage must include all four command names.
-
-### 7. OpenAPI Contract
-
-OpenAPI tests require the new paths and schemas, validate representative EPUB and PDF request/response payloads, reject numeric and out-of-`i64` checksums, reject invalid locators or progression, check request-versus-response field ownership, and assert `updatedOn` is RFC 3339 UTC with `format: date-time`. Extend the local schema test helper or add direct assertions so `minimum`, `maximum`, and `minLength` are actually tested. Both the typed parser and project semantic validator must pass.
-
-### 8. Regression Verification
-
-After focused red-green cycles, run the complete default/Tauri and webserver configurations:
-
-```bash
-cargo test --lib
-cargo test --all-targets
-cargo test --no-default-features --features webserver --lib
-cargo test --no-default-features --features webserver --test book_api_test
-cargo test --no-default-features --features webserver --test book_router_test
-cargo test --no-default-features --features webserver --test openapi_contract_test
-cargo test --no-default-features --features webserver --all-targets
-```
-
-The final verification also runs `cargo fmt --check` and `git diff --check`. No completion claim may be made unless every command finishes successfully, or any environment-specific blocker is reported with its exact failing output.
+Delete tests for separate progress fetching, fetch races, list/get/delete routes, progress-table constraints, foreign keys, and cascade behavior.
 
 ## Worktree Safety
 
-The existing generated frontend changes under `client/newapp` are unrelated user work. Implementation must not modify, stage, or commit those files.
+The backend repository is the `src-tauri` submodule and the frontend is its parent repository. Implementation must commit changes in the correct repository and update the parent submodule pointer intentionally.
+
+Existing dirty `.github`, generated `client/newapp`, frontend configuration, search-service, temporary database, and unrelated design-document changes belong to the user. Do not modify, stage, or commit them.
