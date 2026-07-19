@@ -27,7 +27,6 @@
 
 **Files:**
 - Modify: `src/domain/models/book.rs`
-- Modify: `src/domain/models/mod.rs`
 - Test: `src/domain/models/book.rs`
 
 **Interfaces:**
@@ -127,7 +126,7 @@ pub struct BookReadingProgress {
 }
 ```
 
-Add `pub progress: Option<BookReadingProgress>` to `BookDetails`, update its serializer count/body, and re-export the types. Keep the old progress module until Task 2 so this commit builds.
+Add `pub progress: Option<BookReadingProgress>` to `BookDetails` and update its serializer count/body. Keep the new types private to the `book` module for this intermediate commit; Task 2 removes the old progress module and then re-exports these names without a collision.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -138,7 +137,7 @@ Expected: all model tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/domain/models/book.rs src/domain/models/mod.rs
+git add src/domain/models/book.rs
 git commit -m "refactor: embed reading progress in books"
 ```
 
