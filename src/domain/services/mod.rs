@@ -8,6 +8,7 @@ mod history;
 mod encoding;
 mod media_sharing;
 pub mod copy_server;
+mod book_progress;
 
 pub use video_metadata::{MetaDataError, MetaDataErrorCode, generate_video_metadatas, calculate_checksum, get_video_metadata};
 pub use book_metadata::{
@@ -23,3 +24,4 @@ pub use history::HistoryService;
 pub use encoding::{convert_to_mp4, extract_subtitles, re_encode, should_re_encode, re_encode_video, CodecArgs, AlreadyEncodedError};
 pub use media_sharing::MediaSharing;
 pub use copy_server::CopyServer;
+pub use book_progress::{BookProgressError, BookProgressService};

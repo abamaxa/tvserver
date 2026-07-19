@@ -422,11 +422,14 @@ mod tests {
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
             models::{
-                BookDetails, BookFormat, BookState, CollectionItem, VideoDetails,
-                DEFAULT_BOOK_THUMBNAIL,
+                BookDetails, BookFormat, BookLocator, BookProgress, BookState, CollectionItem,
+                VideoDetails, DEFAULT_BOOK_THUMBNAIL,
             },
             services::{BookCheck, BookPathLeaseCoordinator},
-            traits::{BookChecker, Databaser, FileStorer, Repository},
+            traits::{
+                BookChecker, Databaser, DeleteBookProgressOutcome, FileStorer,
+                GetBookProgressOutcome, Repository, SaveBookProgressOutcome,
+            },
         },
     };
 
@@ -604,6 +607,35 @@ mod tests {
 
         async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error> {
             self.inner.list_all_videos().await
+        }
+
+        async fn list_book_progress(&self) -> Result<Vec<BookProgress>, sqlx::Error> {
+            self.inner.list_book_progress().await
+        }
+
+        async fn get_book_progress(
+            &self,
+            checksum: i64,
+        ) -> Result<GetBookProgressOutcome, sqlx::Error> {
+            self.inner.get_book_progress(checksum).await
+        }
+
+        async fn save_book_progress(
+            &self,
+            checksum: i64,
+            progress: &BookLocator,
+            progression: Option<f64>,
+        ) -> Result<SaveBookProgressOutcome, sqlx::Error> {
+            self.inner
+                .save_book_progress(checksum, progress, progression)
+                .await
+        }
+
+        async fn delete_book_progress(
+            &self,
+            checksum: i64,
+        ) -> Result<DeleteBookProgressOutcome, sqlx::Error> {
+            self.inner.delete_book_progress(checksum).await
         }
     }
 
