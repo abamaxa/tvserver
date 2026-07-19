@@ -1488,7 +1488,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             table_sql.split_whitespace().join(" "),
-            "CREATE TABLE book_progress ( checksum INTEGER PRIMARY KEY NOT NULL REFERENCES books(checksum) ON DELETE CASCADE, locator_type TEXT NOT NULL CHECK (locator_type IN ('epub-cfi', 'pdf-page')), locator_value TEXT NOT NULL CHECK (length(trim(locator_value)) > 0), progression REAL CHECK (progression IS NULL OR (progression >= 0.0 AND progression <= 1.0)), updated_on TEXT NOT NULL )"
+            "CREATE TABLE book_progress ( checksum INTEGER PRIMARY KEY NOT NULL REFERENCES books(checksum) ON DELETE CASCADE, locator_type TEXT NOT NULL CHECK (locator_type IN ('epub-cfi', 'pdf-page')), locator_value TEXT NOT NULL CHECK (length(trim(locator_value, char(9, 10, 11, 12, 13, 32, 133, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239, 8287, 12288))) > 0), progression REAL CHECK (progression IS NULL OR (progression >= 0.0 AND progression <= 1.0)), updated_on TEXT NOT NULL )"
         );
     }
 
@@ -1554,6 +1554,85 @@ mod tests {
             )
             .await;
         }
+    }
+
+    #[tokio::test]
+    async fn book_progress_migration_rejects_all_rust_trim_whitespace_locators() {
+        const RUST_WHITESPACE: &[char] = &[
+            '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}',
+            '\u{0085}', '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}',
+            '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
+            '\u{2009}', '\u{200A}', '\u{2028}', '\u{2029}', '\u{202F}', '\u{205F}',
+            '\u{3000}',
+        ];
+
+        let db = SqlRepository::new(MEMORY_DB_URL, None).await.unwrap();
+        insert_book_rows(&db, &[1]).await;
+
+        for locator_value in ["\t", "\r", "\n", "\r\n"] {
+            assert_progress_insert_fails(
+                &db,
+                Some(1),
+                Some("epub-cfi"),
+                Some(locator_value),
+                None,
+                Some("now"),
+            )
+            .await;
+        }
+
+        let detected_whitespace = (0..=char::MAX as u32)
+            .filter_map(char::from_u32)
+            .filter(|character| character.is_whitespace())
+            .collect::<Vec<_>>();
+        assert_eq!(detected_whitespace, RUST_WHITESPACE);
+
+        for character in RUST_WHITESPACE {
+            let locator_value = character.to_string();
+            assert_progress_insert_fails(
+                &db,
+                Some(1),
+                Some("epub-cfi"),
+                Some(&locator_value),
+                None,
+                Some("now"),
+            )
+            .await;
+        }
+
+        let all_whitespace = RUST_WHITESPACE.iter().collect::<String>();
+        assert_progress_insert_fails(
+            &db,
+            Some(1),
+            Some("epub-cfi"),
+            Some(&all_whitespace),
+            None,
+            Some("now"),
+        )
+        .await;
+
+        let opaque_locator = "\u{2003}opaque:\tvalue\u{3000}";
+        sqlx::query(
+            r#"
+            INSERT INTO book_progress (
+                checksum, locator_type, locator_value, progression, updated_on
+            ) VALUES (?, 'epub-cfi', ?, NULL, 'now')
+            "#,
+        )
+        .bind(1)
+        .bind(opaque_locator)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT locator_value FROM book_progress WHERE checksum = 1"
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            opaque_locator
+        );
     }
 
     #[tokio::test]
