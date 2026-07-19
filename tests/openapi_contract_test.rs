@@ -650,9 +650,11 @@ fn book_progress_is_nested_and_only_put_is_documented() {
         document["components"]["schemas"]["BookDetails"]["properties"]["progress"]["$ref"],
         "#/components/schemas/BookReadingProgress"
     );
-    assert!(document["components"]["schemas"]["BookReadingProgress"]["properties"]
-        .get("checksum")
-        .is_none());
+    assert!(
+        document["components"]["schemas"]["BookReadingProgress"]["properties"]
+            .get("checksum")
+            .is_none()
+    );
 }
 
 #[test]
@@ -705,7 +707,9 @@ fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
 
     assert!(paths.get("/api/book-progress").is_none());
     assert!(paths["/api/book/{checksum}/progress"].get("get").is_none());
-    assert!(paths["/api/book/{checksum}/progress"].get("delete").is_none());
+    assert!(paths["/api/book/{checksum}/progress"]
+        .get("delete")
+        .is_none());
     assert!(paths["/api/book/{checksum}/progress"]["put"]["responses"]["204"]
         .get("content")
         .is_none());
