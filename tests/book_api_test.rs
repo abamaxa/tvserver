@@ -525,9 +525,9 @@ async fn serves_nested_book_downloads_from_book_dir() -> Result<()> {
 
 #[tokio::test]
 async fn serves_book_download_byte_ranges() -> Result<()> {
-    let (server, _) = start_server(57212).await?;
+    let (server, _) = start_server(57214).await?;
     let client = reqwest::Client::builder().no_proxy().build()?;
-    let url = "http://localhost:57212/api/books/download/Nonfiction/Programming/static-book.epub";
+    let url = "http://localhost:57214/api/books/download/Nonfiction/Programming/static-book.epub";
     let full_bytes = b"static epub fixture\n";
 
     let full = client.get(url).send().await?;
