@@ -310,7 +310,7 @@ fn validate_content_schemas(
 fn allows_empty_response_media_type(path: &str, method: &str, status: &str) -> bool {
     matches!(
         (path, method, status),
-        ("/api/books/download/{path}", "get", "200")
+        ("/api/books/download/{path}", "get", "200" | "206" | "416")
             | ("/api/book-thumbnails/{file}", "get", "200")
             | ("/api/stream/{path}", "get", "200" | "206" | "416")
             | ("/api/stream-audio/{audio_index}/{path}", "get", "200")
@@ -1321,6 +1321,8 @@ fn raw_file_responses_use_openapi_31_binary_media_types() {
     let document = contract();
     for (path, status) in [
         ("/api/books/download/{path}", "200"),
+        ("/api/books/download/{path}", "206"),
+        ("/api/books/download/{path}", "416"),
         ("/api/book-thumbnails/{file}", "200"),
         ("/api/stream/{path}", "200"),
         ("/api/stream/{path}", "206"),
@@ -1378,6 +1380,32 @@ fn serve_dir_contract_documents_runtime_responses_and_headers() {
             .get("Content-Range")
             .is_some());
     }
+}
+
+#[test]
+fn book_download_contract_documents_byte_ranges() {
+    let document = contract();
+    let operation = &document["paths"]["/api/books/download/{path}"]["get"];
+    let parameters = operation["parameters"].as_array().unwrap();
+    assert!(parameters.iter().any(|parameter| {
+        parameter["name"] == "Range" && parameter["in"] == "header"
+    }));
+
+    let responses = &operation["responses"];
+    for status in ["200", "206"] {
+        let response = resolved(&document, &responses[status]);
+        assert_eq!(
+            response["headers"]["Accept-Ranges"]["schema"]["const"],
+            "bytes"
+        );
+        assert!(response["headers"].get("Content-Length").is_some());
+    }
+    assert!(resolved(&document, &responses["206"])["headers"]
+        .get("Content-Range")
+        .is_some());
+    assert!(resolved(&document, &responses["416"])["headers"]
+        .get("Content-Range")
+        .is_some());
 }
 
 #[test]
