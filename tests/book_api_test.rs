@@ -23,7 +23,10 @@ use app_lib::{
     },
 };
 use chrono::Local;
-use reqwest::{header::CONTENT_TYPE, Method, StatusCode};
+use reqwest::{
+    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+    Method, StatusCode,
+};
 use serde_json::Value;
 use sqlx::{Connection, SqliteConnection};
 use tokio::{fs, task::JoinHandle};
@@ -516,6 +519,43 @@ async fn serves_nested_book_downloads_from_book_dir() -> Result<()> {
         .send()
         .await?;
     assert_eq!(public_response.status(), StatusCode::UNAUTHORIZED);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn serves_book_download_byte_ranges() -> Result<()> {
+    let (server, _) = start_server(57212).await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57212/api/books/download/Nonfiction/Programming/static-book.epub";
+    let full_bytes = b"static epub fixture\n";
+
+    let full = client.get(url).send().await?;
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full.headers()[ACCEPT_RANGES], "bytes");
+    assert_eq!(full.headers()[CONTENT_LENGTH], full_bytes.len().to_string());
+    assert_eq!(full.bytes().await?.as_ref(), full_bytes);
+
+    for (range, expected_content_range, expected) in [
+        ("bytes=1-3", "bytes 1-3/20", &full_bytes[1..=3]),
+        ("bytes=7-", "bytes 7-19/20", &full_bytes[7..]),
+        ("bytes=-8", "bytes 12-19/20", &full_bytes[12..]),
+    ] {
+        let response = client.get(url).header(RANGE, range).send().await?;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(response.headers()[ACCEPT_RANGES], "bytes", "{range}");
+        assert_eq!(response.headers()[CONTENT_RANGE], expected_content_range, "{range}");
+        assert_eq!(response.headers()[CONTENT_LENGTH], expected.len().to_string(), "{range}");
+        assert_eq!(response.bytes().await?.as_ref(), expected, "{range}");
+    }
+
+    for range in ["bytes=999-", "bytes=0-1,3-4", "bytes=invalid"] {
+        let response = client.get(url).header(RANGE, range).send().await?;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(response.headers()[ACCEPT_RANGES], "bytes", "{range}");
+        assert_eq!(response.headers()[CONTENT_RANGE], "bytes */20", "{range}");
+        assert!(response.bytes().await?.is_empty(), "{range}");
+    }
 
     Ok(server.abort())
 }

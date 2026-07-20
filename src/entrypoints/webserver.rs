@@ -6,36 +6,24 @@
 
 extern crate core;
 
-use std::{
-    ffi::OsString,
-    net::SocketAddr,
-    path::{Component, Path},
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use crate::adaptors::restrict_access;
-use crate::domain::config::{
-    get_client_path, get_movie_dir, get_thumbnail_dir,
-};
+use crate::domain::config::{get_client_path, get_movie_dir, get_thumbnail_dir};
+use crate::entrypoints::capability_file_service::{CapabilityBackend, StaticFilePolicy};
 use crate::entrypoints::register;
 use crate::entrypoints::TVServer;
 use crate::services::{setup_logging, TVSERVER_LOG};
-use anyhow::anyhow;
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Request, State},
-    http::{header, HeaderName, HeaderValue, StatusCode},
+    extract::Request,
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
     routing::get,
     Router,
 };
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
-use cap_std::{
-    fs::{Dir, OpenOptions},
-};
-use tokio_util::io::ReaderStream;
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -62,6 +50,18 @@ fn with_security_headers(mut response: Response) -> Response {
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
     with_security_headers(next.run(request).await)
+}
+
+async fn empty_unsatisfiable_range_body(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+        response.headers_mut().insert(
+            HeaderName::from_static("content-length"),
+            HeaderValue::from_static("0"),
+        );
+        *response.body_mut() = Body::empty();
+    }
+    response
 }
 
 pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
@@ -109,12 +109,22 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
 
     let (book_download_routes, book_thumbnail_routes) = match book_static_roots {
         Some(roots) => (
-            Router::new()
-                .route("/{*path}", get(serve_book_download))
-                .with_state(RetainedRoot::new(roots.downloads)),
-            Router::new()
-                .route("/{file}", get(serve_book_thumbnail))
-                .with_state(RetainedRoot::new(roots.thumbnails)),
+            Router::new().route_service(
+                "/{*path}",
+                ServeDir::with_backend(
+                    "",
+                    CapabilityBackend::new(roots.downloads, StaticFilePolicy::BookDownload),
+                ),
+            )
+            .layer(middleware::from_fn(empty_unsatisfiable_range_body)),
+            Router::new().route_service(
+                "/{file}",
+                ServeDir::with_backend(
+                    "",
+                    CapabilityBackend::new(roots.thumbnails, StaticFilePolicy::BookThumbnail),
+                ),
+            )
+            .layer(middleware::from_fn(empty_unsatisfiable_range_body)),
         ),
         None => (
             Router::new().route("/{*path}", get(serve_unavailable_book_static)),
@@ -138,160 +148,6 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
                 .make_span_with(DefaultMakeSpan::default().include_headers(false)),
         )
         .layer(middleware::from_fn(security_headers)))
-}
-
-#[derive(Clone)]
-struct RetainedRoot {
-    dir: Arc<Dir>,
-}
-
-impl RetainedRoot {
-    fn new(dir: Arc<Dir>) -> Self {
-        Self { dir }
-    }
-}
-
-struct OpenedStaticFile {
-    file: cap_std::fs::File,
-    len: u64,
-}
-
-fn normal_components(path: &str, allow_nested: bool) -> anyhow::Result<Vec<OsString>> {
-    let mut components = Vec::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(component) => components.push(component.to_os_string()),
-            Component::CurDir
-            | Component::ParentDir
-            | Component::Prefix(_)
-            | Component::RootDir => return Err(anyhow!("static file path must be relative")),
-        }
-    }
-    if components.is_empty() || (!allow_nested && components.len() != 1) {
-        return Err(anyhow!("static file path has an invalid component count"));
-    }
-    Ok(components)
-}
-
-fn open_regular_file(root: &Dir, components: &[OsString]) -> anyhow::Result<OpenedStaticFile> {
-    let mut current = root.try_clone()?;
-    for component in &components[..components.len() - 1] {
-        let mut options = OpenOptions::new();
-        options
-            .read(true)
-            .maybe_dir(true)
-            .follow(FollowSymlinks::No);
-        let child = current.open_with(Path::new(component), &options)?;
-        if !child.metadata()?.is_dir() {
-            return Err(anyhow!("static file parent is not a directory"));
-        }
-        current = Dir::from_std_file(child.into_std());
-    }
-
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    let file = current.open_with(
-        Path::new(components.last().expect("validated non-empty components")),
-        &options,
-    )?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(anyhow!("static file is not a regular file"));
-    }
-    Ok(OpenedStaticFile {
-        file,
-        len: metadata.len(),
-    })
-}
-
-fn download_content_type(path: &str) -> anyhow::Result<&'static str> {
-    match Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("pdf") => Ok("application/pdf"),
-        Some("epub") => Ok("application/epub+zip"),
-        _ => Err(anyhow!("unsupported book download extension")),
-    }
-}
-
-fn thumbnail_content_type(path: &str) -> anyhow::Result<&'static str> {
-    match Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("jpg") => Ok("image/jpeg"),
-        _ => Err(anyhow!("unsupported book thumbnail extension")),
-    }
-}
-
-async fn stream_static_file(
-    root: RetainedRoot,
-    path: String,
-    allow_nested: bool,
-    content_type: &'static str,
-) -> Response {
-    let open_path = path.clone();
-    let opened = tokio::task::spawn_blocking(move || {
-        let components = normal_components(&open_path, allow_nested)?;
-        open_regular_file(&root.dir, &components)
-    })
-    .await;
-
-    let opened = match opened {
-        Ok(Ok(opened)) => opened,
-        Ok(Err(error)) => {
-            tracing::warn!("Rejected static book file {}: {}", path, error);
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Err(error) => {
-            tracing::error!("Static book file task failed for {}: {}", path, error);
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    let file = tokio::fs::File::from_std(opened.file.into_std());
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, opened.len)
-        .body(Body::from_stream(ReaderStream::new(file)))
-        .unwrap_or_else(|error| {
-            tracing::error!("Failed to build static book response for {}: {}", path, error);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        })
-}
-
-async fn serve_book_download(
-    State(root): State<RetainedRoot>,
-    AxumPath(path): AxumPath<String>,
-) -> Response {
-    let content_type = match download_content_type(&path) {
-        Ok(content_type) => content_type,
-        Err(error) => {
-            tracing::warn!("Rejected book download {}: {}", path, error);
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    };
-    stream_static_file(root, path, true, content_type).await
-}
-
-async fn serve_book_thumbnail(
-    State(root): State<RetainedRoot>,
-    AxumPath(file): AxumPath<String>,
-) -> Response {
-    let content_type = match thumbnail_content_type(&file) {
-        Ok(content_type) => content_type,
-        Err(error) => {
-            tracing::warn!("Rejected book thumbnail {}: {}", file, error);
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    };
-    stream_static_file(root, file, false, content_type).await
 }
 
 async fn serve_unavailable_book_static() -> StatusCode {
