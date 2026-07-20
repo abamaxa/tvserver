@@ -43,6 +43,10 @@ fn not_found(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, message)
 }
 
+fn hidden_path_error(_: io::Error) -> io::Error {
+    not_found("static file not found")
+}
+
 fn normal_components(path: &Path, policy: StaticFilePolicy) -> io::Result<Vec<OsString>> {
     let mut components = Vec::new();
     for component in path.components() {
@@ -142,8 +146,10 @@ fn open_regular_file(
             .read(true)
             .maybe_dir(true)
             .follow(FollowSymlinks::No);
-        let child = current.open_with(Path::new(component), &options)?;
-        if !child.metadata()?.is_dir() {
+        let child = current
+            .open_with(Path::new(component), &options)
+            .map_err(hidden_path_error)?;
+        if !child.metadata().map_err(hidden_path_error)?.is_dir() {
             return Err(not_found("static file parent is not a directory"));
         }
         current = Dir::from_std_file(child.into_std());
@@ -151,11 +157,13 @@ fn open_regular_file(
 
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
-    let file = current.open_with(
-        Path::new(components.last().expect("validated non-empty components")),
-        &options,
-    )?;
-    let metadata = file.metadata()?;
+    let file = current
+        .open_with(
+            Path::new(components.last().expect("validated non-empty components")),
+            &options,
+        )
+        .map_err(hidden_path_error)?;
+    let metadata = file.metadata().map_err(hidden_path_error)?;
     if !metadata.is_file() {
         return Err(not_found("static file is not a regular file"));
     }
@@ -210,6 +218,34 @@ impl Backend for CapabilityBackend {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    struct TestRoot(PathBuf);
+
+    #[cfg(unix)]
+    impl TestRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tvserver-capability-file-service-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn backend(&self) -> CapabilityBackend {
+            let root = Dir::open_ambient_dir(&self.0, cap_std::ambient_authority()).unwrap();
+            CapabilityBackend::new(Arc::new(root), StaticFilePolicy::BookDownload)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn book_download_policy_accepts_nested_epub_and_pdf_paths() {
         assert_eq!(
@@ -242,5 +278,50 @@ mod tests {
         for path in ["../secret.epub", "/secret.epub"] {
             assert!(normal_components(Path::new(path), StaticFilePolicy::BookDownload).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backend_rejects_symlinked_parent_with_not_found() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestRoot::new();
+        let outside = root.0.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("Dune.epub"), b"book").unwrap();
+        symlink(&outside, root.0.join("Fiction")).unwrap();
+        let backend = root.backend();
+        let path = PathBuf::from("Fiction/Dune.epub");
+
+        assert_eq!(
+            backend.open(path.clone()).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            backend.metadata(path).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backend_rejects_final_symlink_with_not_found() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestRoot::new();
+        let target = root.0.join("target.epub");
+        std::fs::write(&target, b"book").unwrap();
+        symlink(&target, root.0.join("Dune.epub")).unwrap();
+        let backend = root.backend();
+        let path = PathBuf::from("Dune.epub");
+
+        assert_eq!(
+            backend.open(path.clone()).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            backend.metadata(path).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }
