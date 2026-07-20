@@ -7,6 +7,7 @@ use std::{
     io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -24,7 +25,10 @@ use app_lib::{
 };
 use chrono::Local;
 use reqwest::{
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+    header::{
+        ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, IF_MODIFIED_SINCE, IF_RANGE,
+        IF_UNMODIFIED_SINCE, LAST_MODIFIED, RANGE,
+    },
     Method, StatusCode,
 };
 use serde_json::Value;
@@ -556,6 +560,94 @@ async fn serves_book_download_byte_ranges() -> Result<()> {
         assert_eq!(response.headers()[CONTENT_RANGE], "bytes */20", "{range}");
         assert!(response.bytes().await?.is_empty(), "{range}");
     }
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_download_ignores_ranges_on_head() -> Result<()> {
+    let (server, _) = start_server(57222).await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57222/api/books/download/Nonfiction/Programming/static-book.epub";
+    let full_bytes = b"static epub fixture\n";
+
+    let response = client.head(url).header(RANGE, "bytes=1-3").send().await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+    assert_eq!(response.headers()[CONTENT_LENGTH], full_bytes.len().to_string());
+    assert!(response.headers().get(CONTENT_RANGE).is_none());
+    assert!(response.bytes().await?.is_empty());
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_download_conservatively_ignores_if_range() -> Result<()> {
+    let (server, _) = start_server(57223).await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57223/api/books/download/Nonfiction/Programming/static-book.epub";
+    let full_bytes = b"static epub fixture\n";
+
+    let response = client
+        .get(url)
+        .header(RANGE, "bytes=1-3")
+        .header(IF_RANGE, "\"stale-validator\"")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+    assert_eq!(response.headers()[CONTENT_LENGTH], full_bytes.len().to_string());
+    assert!(response.headers().get(CONTENT_RANGE).is_none());
+    assert_eq!(response.bytes().await?.as_ref(), full_bytes);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_download_honors_modification_preconditions() -> Result<()> {
+    let temp_root = TempRoot::new("conditional-download", 57224)?;
+    let book_root = temp_root.0.join("books");
+    let book_thumbnail_root = book_root.join(".thumbnails");
+    let book_path = book_root.join("Test/conditional.epub");
+    fs::create_dir_all(book_path.parent().unwrap()).await?;
+    let full_bytes = b"conditional book fixture";
+    fs::write(&book_path, full_bytes).await?;
+
+    let repository: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
+    let (server, _) =
+        start_server_with_repository(57224, repository, &book_root, &book_thumbnail_root).await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57224/api/books/download/Test/conditional.epub";
+
+    let full = client.get(url).send().await?;
+    assert_eq!(full.status(), StatusCode::OK);
+    let last_modified = full
+        .headers()
+        .get(LAST_MODIFIED)
+        .expect("book response must include Last-Modified")
+        .clone();
+    assert_eq!(full.bytes().await?.as_ref(), full_bytes);
+
+    let not_modified = client
+        .get(url)
+        .header(IF_MODIFIED_SINCE, last_modified.clone())
+        .send()
+        .await?;
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert!(not_modified.bytes().await?.is_empty());
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    fs::write(&book_path, b"updated conditional book fixture").await?;
+
+    let precondition_failed = client
+        .get(url)
+        .header(IF_UNMODIFIED_SINCE, last_modified)
+        .send()
+        .await?;
+    assert_eq!(precondition_failed.status(), StatusCode::PRECONDITION_FAILED);
+    assert!(precondition_failed.bytes().await?.is_empty());
 
     Ok(server.abort())
 }

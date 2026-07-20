@@ -1392,6 +1392,12 @@ fn book_download_contract_documents_byte_ranges() {
         .any(|parameter| { parameter["name"] == "Range" && parameter["in"] == "header" }));
 
     let responses = &operation["responses"];
+    for status in ["200", "206", "304", "412", "416"] {
+        assert!(
+            responses.get(status).is_some(),
+            "book download route must document status {status}"
+        );
+    }
     for status in ["200", "206", "416"] {
         let response = resolved(&document, &responses[status]);
         assert_eq!(response["headers"]["Accept-Ranges"]["schema"]["const"], "bytes");
@@ -1399,7 +1405,16 @@ fn book_download_contract_documents_byte_ranges() {
     for status in ["200", "206"] {
         let response = resolved(&document, &responses[status]);
         assert!(response["headers"].get("Content-Length").is_some());
+        assert!(response["headers"].get("Last-Modified").is_some());
     }
+    assert_eq!(
+        responses["304"]["$ref"],
+        "#/components/responses/ServeDirNotModifiedResponse"
+    );
+    assert_eq!(
+        responses["412"]["$ref"],
+        "#/components/responses/ServeDirPreconditionFailedResponse"
+    );
     assert!(resolved(&document, &responses["206"])["headers"]
         .get("Content-Range")
         .is_some());

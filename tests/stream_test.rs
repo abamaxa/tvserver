@@ -4,19 +4,25 @@ mod common;
 
 use crate::common::{get_context, get_repository, get_task_manager};
 use anyhow::Result;
-use app_lib::entrypoints::register;
+use app_lib::adaptors::{FileSystemStore, SqlRepository};
+use app_lib::domain::config::{get_movie_dir, get_thumbnail_dir, MOVIE_DIR};
+use app_lib::domain::traits::{FileStorer, Repository};
+use app_lib::entrypoints::{register, webserver::build_http_router};
+use app_lib::services::MediaStore;
+use axum::{
+    body::{to_bytes, Body},
+    http::{Request, StatusCode as AxumStatusCode},
+    routing::get,
+    Router,
+};
 use common::{get_checker, get_pirate_search};
-use axum::{routing::get, Router};
 use reqwest::{
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
+    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, IF_RANGE, RANGE},
     StatusCode,
 };
 use std::env;
 use std::sync::Arc;
-use app_lib::adaptors::{FileSystemStore, SqlRepository};
-use app_lib::domain::config::{get_movie_dir, get_thumbnail_dir, MOVIE_DIR};
-use app_lib::domain::traits::{FileStorer, Repository};
-use app_lib::services::MediaStore;
+use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
@@ -79,6 +85,145 @@ async fn test_video_stream_supports_byte_ranges() -> Result<()> {
     }
 
     Ok(server.abort())
+}
+
+#[tokio::test]
+async fn test_video_stream_ignores_ranges_on_head() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+    let store = Arc::new(MediaStore::new(file_storer, repo));
+    let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
+    let context = get_context(
+        store,
+        searcher,
+        get_task_manager(),
+        get_repository().await,
+        get_checker(),
+    )
+    .await?;
+    let server = common::create_server(context, 57191).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57191/api/stream/test.mp4";
+
+    let response = client.head(url).header(RANGE, "bytes=0-9").send().await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+    assert_eq!(response.headers()[CONTENT_LENGTH], "256");
+    assert!(response.headers().get(CONTENT_RANGE).is_none());
+    assert!(response.bytes().await?.is_empty());
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn test_video_stream_conservatively_ignores_if_range() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+    let store = Arc::new(MediaStore::new(file_storer, repo));
+    let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
+    let context = get_context(
+        store,
+        searcher,
+        get_task_manager(),
+        get_repository().await,
+        get_checker(),
+    )
+    .await?;
+    let server = common::create_server(context, 57192).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57192/api/stream/test.mp4";
+    let fixture: Vec<u8> = (0_u8..=255).collect();
+
+    let response = client
+        .get(url)
+        .header(RANGE, "bytes=0-9")
+        .header(IF_RANGE, "\"stale-validator\"")
+        .header("X-Real-IP", "8.8.8.8")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
+    assert_eq!(response.headers()[CONTENT_LENGTH], "256");
+    assert!(response.headers().get(CONTENT_RANGE).is_none());
+    assert_eq!(response.bytes().await?.as_ref(), fixture.as_slice());
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn test_video_stream_router_preserves_prefix_and_normalizes_ranges() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+    let store = Arc::new(MediaStore::new(file_storer, repo));
+    let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
+    let context = get_context(
+        store,
+        searcher,
+        get_task_manager(),
+        get_repository().await,
+        get_checker(),
+    )
+    .await?;
+    let app = build_http_router(context)?;
+    let fixture: Vec<u8> = (0_u8..=255).collect();
+
+    let head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/api/stream/test.mp4")
+                .header("range", "bytes=0-9")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(head.status(), AxumStatusCode::OK);
+    assert_eq!(head.headers()["accept-ranges"], "bytes");
+    assert_eq!(head.headers()["content-length"], "256");
+    assert!(head.headers().get("content-range").is_none());
+    assert!(to_bytes(head.into_body(), usize::MAX).await?.is_empty());
+
+    let if_range = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/stream/test.mp4")
+                .header("range", "bytes=0-9")
+                .header("if-range", "\"stale-validator\"")
+                .header("x-real-ip", "8.8.8.8")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(if_range.status(), AxumStatusCode::OK);
+    assert_eq!(if_range.headers()["content-length"], "256");
+    assert!(if_range.headers().get("content-range").is_none());
+    assert_eq!(
+        to_bytes(if_range.into_body(), usize::MAX).await?.as_ref(),
+        fixture.as_slice()
+    );
+
+    for uri in ["/api/stream", "/api/stream/"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-real-ip", "8.8.8.8")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), AxumStatusCode::NOT_FOUND, "{uri}");
+    }
+
+    Ok(())
 }
 
 #[tokio::test]

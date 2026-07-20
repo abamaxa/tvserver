@@ -17,7 +17,10 @@ use crate::services::{setup_logging, TVSERVER_LOG};
 use axum::{
     body::Body,
     extract::Request,
-    http::{HeaderName, HeaderValue, StatusCode},
+    http::{
+        header::{IF_RANGE, RANGE},
+        HeaderName, HeaderValue, Method, StatusCode,
+    },
     middleware,
     middleware::Next,
     response::Response,
@@ -64,6 +67,16 @@ async fn empty_unsatisfiable_range_body(request: Request<Body>, next: Next) -> R
     response
 }
 
+async fn conservatively_normalize_static_file_request(
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    if request.method() != Method::GET || request.headers().contains_key(IF_RANGE) {
+        request.headers_mut().remove(RANGE);
+    }
+    next.run(request).await
+}
+
 pub async fn run_webserver(port: Option<u16>) -> anyhow::Result<()> {
     setup_logging(TVSERVER_LOG);
 
@@ -99,32 +112,39 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
         .fallback_service(ServeDir::new(get_client_path("newapp")));
 
     // Unprotected routes: streaming and thumbnails (need external access for casting)
+    let video_stream_service = Router::new()
+        .fallback_service(ServeDir::new(&movie_dir))
+        .layer(middleware::from_fn(conservatively_normalize_static_file_request));
+
     let mut unprotected_routes = Router::new()
         .route(
             "/api/stream-audio/{audio_index}/{*path}",
             get(crate::entrypoints::api::stream_audio),
         )
-        .nest_service("/api/stream", ServeDir::new(&movie_dir))
+        .nest_service("/api/stream", video_stream_service)
         .nest_service("/api/thumbnails", ServeDir::new(get_thumbnail_dir(&movie_dir)));
 
     let (book_download_routes, book_thumbnail_routes) = match book_static_roots {
         Some(roots) => (
-            Router::new().route_service(
-                "/{*path}",
-                ServeDir::with_backend(
-                    "",
-                    CapabilityBackend::new(roots.downloads, StaticFilePolicy::BookDownload),
-                ),
-            )
-            .layer(middleware::from_fn(empty_unsatisfiable_range_body)),
-            Router::new().route_service(
-                "/{file}",
-                ServeDir::with_backend(
-                    "",
-                    CapabilityBackend::new(roots.thumbnails, StaticFilePolicy::BookThumbnail),
-                ),
-            )
-            .layer(middleware::from_fn(empty_unsatisfiable_range_body)),
+            Router::new()
+                .route_service(
+                    "/{*path}",
+                    ServeDir::with_backend(
+                        "",
+                        CapabilityBackend::new(roots.downloads, StaticFilePolicy::BookDownload),
+                    ),
+                )
+                .layer(middleware::from_fn(empty_unsatisfiable_range_body))
+                .layer(middleware::from_fn(conservatively_normalize_static_file_request)),
+            Router::new()
+                .route_service(
+                    "/{file}",
+                    ServeDir::with_backend(
+                        "",
+                        CapabilityBackend::new(roots.thumbnails, StaticFilePolicy::BookThumbnail),
+                    ),
+                )
+                .layer(middleware::from_fn(empty_unsatisfiable_range_body)),
         ),
         None => (
             Router::new().route("/{*path}", get(serve_unavailable_book_static)),

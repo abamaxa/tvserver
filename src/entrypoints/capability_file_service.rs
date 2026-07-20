@@ -83,7 +83,7 @@ impl CapabilityBackend {
 #[derive(Clone, Debug)]
 pub(super) struct CapabilityMetadata {
     len: u64,
-    modified: SystemTime,
+    modified: Option<SystemTime>,
 }
 
 impl Metadata for CapabilityMetadata {
@@ -92,7 +92,9 @@ impl Metadata for CapabilityMetadata {
     }
 
     fn modified(&self) -> io::Result<SystemTime> {
-        Ok(self.modified)
+        self.modified.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Unsupported, "modification time is unavailable")
+        })
     }
 
     fn len(&self) -> u64 {
@@ -171,7 +173,7 @@ fn open_regular_file(
         file,
         CapabilityMetadata {
             len: metadata.len(),
-            modified: metadata.modified()?.into_std(),
+            modified: metadata.modified().ok().map(|modified| modified.into_std()),
         },
     ))
 }
@@ -278,6 +280,21 @@ mod tests {
         for path in ["../secret.epub", "/secret.epub"] {
             assert!(normal_components(Path::new(path), StaticFilePolicy::BookDownload).is_err());
         }
+    }
+
+    #[test]
+    fn metadata_without_modified_time_retains_length_and_reports_modified_error() {
+        let metadata = CapabilityMetadata {
+            len: 42,
+            modified: None,
+        };
+
+        assert_eq!(metadata.len(), 42);
+        assert!(!metadata.is_dir());
+        assert_eq!(
+            metadata.modified().unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
     }
 
     #[cfg(unix)]

@@ -377,6 +377,9 @@ paths:
               schema:
                 type: string
                 const: bytes
+            Last-Modified:
+              schema:
+                type: string
             Content-Length:
               schema:
                 type: integer
@@ -391,6 +394,9 @@ paths:
               schema:
                 type: string
                 const: bytes
+            Last-Modified:
+              schema:
+                type: string
             Content-Length:
               schema:
                 type: integer
@@ -401,10 +407,14 @@ paths:
           content:
             application/pdf: {}
             application/epub+zip: {}
+        '304':
+          $ref: '#/components/responses/ServeDirNotModifiedResponse'
         '400':
           $ref: '#/components/responses/BadRequestTextResponse'
         '404':
           description: Missing, unsupported, or rejected path; the response has no body.
+        '412':
+          $ref: '#/components/responses/ServeDirPreconditionFailedResponse'
         '416':
           description: Requested range is invalid, unsatisfiable, or contains multiple ranges.
           headers:
