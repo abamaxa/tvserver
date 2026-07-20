@@ -1387,17 +1387,17 @@ fn book_download_contract_documents_byte_ranges() {
     let document = contract();
     let operation = &document["paths"]["/api/books/download/{path}"]["get"];
     let parameters = operation["parameters"].as_array().unwrap();
-    assert!(parameters.iter().any(|parameter| {
-        parameter["name"] == "Range" && parameter["in"] == "header"
-    }));
+    assert!(parameters
+        .iter()
+        .any(|parameter| { parameter["name"] == "Range" && parameter["in"] == "header" }));
 
     let responses = &operation["responses"];
+    for status in ["200", "206", "416"] {
+        let response = resolved(&document, &responses[status]);
+        assert_eq!(response["headers"]["Accept-Ranges"]["schema"]["const"], "bytes");
+    }
     for status in ["200", "206"] {
         let response = resolved(&document, &responses[status]);
-        assert_eq!(
-            response["headers"]["Accept-Ranges"]["schema"]["const"],
-            "bytes"
-        );
         assert!(response["headers"].get("Content-Length").is_some());
     }
     assert!(resolved(&document, &responses["206"])["headers"]
