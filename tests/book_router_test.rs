@@ -87,7 +87,8 @@ async fn make_unavailable_context() -> Result<Context> {
 }
 
 #[tokio::test]
-async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -> Result<()> {
+async fn unavailable_book_runtime_returns_503_for_book_progress_without_disabling_video_routes(
+) -> Result<()> {
     let _env_lock = ENV_LOCK.lock().await;
     env::set_var(MOVIE_DIR, MOVIE_ROOT);
 
@@ -118,9 +119,44 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
         let has_json_error = matches!(path, "/api/books" | "/api/books/%FF")
             || path.starts_with("/api/book/");
         if has_json_error {
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/json", "{path}");
             let body: app_lib::domain::messages::Response = response.json().await?;
+            assert!(body.message.is_empty(), "{path}");
             assert_eq!(body.errors, [BOOK_LIBRARY_UNAVAILABLE], "{path}");
         }
+    }
+
+    let save_progress = client
+        .put("http://localhost:57213/api/book/1/progress")
+        .json(&serde_json::json!({
+            "locator": { "type": "pdf-page", "value": "1" }
+        }))
+        .send()
+        .await?;
+    assert_eq!(save_progress.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    for (method, path, expected) in [
+        (
+            reqwest::Method::GET,
+            "/api/book-progress",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            reqwest::Method::GET,
+            "/api/book/1/progress",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/api/book/1/progress",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ] {
+        let response = client
+            .request(method, format!("http://localhost:57213{path}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), expected, "{path}");
     }
 
     let video = client
@@ -128,6 +164,33 @@ async fn unavailable_book_runtime_returns_503_without_disabling_video_routes() -
         .send()
         .await?;
     assert_ne!(video.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_progress_put_uses_ordinary_json_rejection_precedence() -> Result<()> {
+    let _env_lock = ENV_LOCK.lock().await;
+    env::set_var(MOVIE_DIR, MOVIE_ROOT);
+
+    let server = common::create_server(make_unavailable_context().await?, 57218).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let malformed = client
+        .put("http://localhost:57218/api/book/1/progress")
+        .header(CONTENT_TYPE, "application/json")
+        .body(r#"{"locator":{"type":"pdf-page","value":"1"}"#)
+        .send()
+        .await?;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let valid = client
+        .put("http://localhost:57218/api/book/1/progress")
+        .json(&serde_json::json!({
+            "locator": { "type": "pdf-page", "value": "1" }
+        }))
+        .send()
+        .await?;
+    assert_eq!(valid.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     Ok(server.abort())
 }

@@ -7,7 +7,8 @@ use crate::domain::messages::{
     MediaItem, PlayRequest, PlayerList, Response,
 };
 use crate::domain::models::{
-    BookCollectionDetails, Conversion, SearchResults, TaskListResults, AVAILABLE_CONVERSIONS,
+    BookCollectionDetails, Conversion, SaveBookProgressRequest, SearchResults, TaskListResults,
+    AVAILABLE_CONVERSIONS,
 };
 use crate::domain::traits::{MediaSharer, Searcher};
 use crate::domain::{SearchEngineType, TaskType};
@@ -16,7 +17,9 @@ use axum::routing::any;
 use axum::{
     debug_handler,
     extract::ws::WebSocketUpgrade,
-    extract::{rejection::PathRejection, ConnectInfo, Path, Query, State},
+    extract::{
+        rejection::PathRejection, ConnectInfo, Path, Query, State,
+    },
     http::StatusCode,
     response::{IntoResponse, Response as AxumResponse},
     routing::{delete, get, post, patch},
@@ -32,6 +35,7 @@ const BAD_REQUEST: StatusCode = StatusCode::BAD_REQUEST;
 const INTERNAL_SERVER_ERROR: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 const SERVICE_UNAVAILABLE: StatusCode = StatusCode::SERVICE_UNAVAILABLE;
 const OK: StatusCode = StatusCode::OK;
+const NO_CONTENT: StatusCode = StatusCode::NO_CONTENT;
 const NOT_FOUND: StatusCode = StatusCode::NOT_FOUND;
 const BOOK_NOT_FOUND_MESSAGE: &str = "book not found";
 const INTERNAL_ERROR_MESSAGE: &str = "internal server error";
@@ -53,6 +57,10 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/books/{*collection}", get(list_books))
         .route("/api/book/{checksum}", get(get_book))
         .route("/api/book/{checksum}", delete(delete_book))
+        .route(
+            "/api/book/{checksum}/progress",
+            axum::routing::put(save_book_progress),
+        )
         .route("/api/remote", get(list_player))
         .route("/api/remote/control", post(remote_command))
         .route("/api/remote/play", post(remote_play))
@@ -206,6 +214,32 @@ fn parse_book_checksum(checksum: &str) -> Result<i64, StdResponse> {
 
 fn invalid_book_checksum_error() -> StdResponse {
     std_error(BAD_REQUEST, "invalid book checksum".to_string())
+}
+
+#[debug_handler]
+async fn save_book_progress(
+    State(state): State<SharedState>,
+    Path(checksum): Path<String>,
+    Json(progress): Json<SaveBookProgressRequest>,
+) -> AxumResponse {
+    if state.get_available_book_runtime().is_none() {
+        return book_library_unavailable_response().into_response();
+    }
+    let checksum = match parse_book_checksum(&checksum) {
+        Ok(value) => value,
+        Err(response) => return response.into_response(),
+    };
+    if let Err(message) = progress.validate() {
+        return std_error(BAD_REQUEST, message.to_string()).into_response();
+    }
+    match state.get_repository().save_book_progress(checksum, &progress).await {
+        Ok(true) => NO_CONTENT.into_response(),
+        Ok(false) => std_error(NOT_FOUND, BOOK_NOT_FOUND_MESSAGE.to_string()).into_response(),
+        Err(error) => {
+            tracing::error!("Failed to save book progress: {}", error);
+            std_error(INTERNAL_SERVER_ERROR, INTERNAL_ERROR_MESSAGE.to_string()).into_response()
+        }
+    }
 }
 
 #[debug_handler]

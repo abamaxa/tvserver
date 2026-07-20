@@ -109,11 +109,46 @@ fn schema_accepts(document: &Value, schema: &Value, instance: &Value) -> bool {
         }
     }
 
+    if let (Some(min_length), Some(string)) = (
+        schema.get("minLength").and_then(Value::as_u64),
+        instance.as_str(),
+    ) {
+        if string.chars().count() < min_length as usize {
+            return false;
+        }
+    }
+
+    if schema.get("format").and_then(Value::as_str) == Some("date-time") {
+        let Some(string) = instance.as_str() else {
+            return false;
+        };
+        if chrono::DateTime::parse_from_rfc3339(string).is_err() {
+            return false;
+        }
+    }
+
     if schema.get("format").and_then(Value::as_str) == Some("socket-address") {
         let Some(string) = instance.as_str() else {
             return false;
         };
         if string.parse::<SocketAddr>().is_err() {
+            return false;
+        }
+    }
+
+    if let Some(number) = instance.as_f64() {
+        if schema
+            .get("minimum")
+            .and_then(Value::as_f64)
+            .is_some_and(|minimum| number < minimum)
+        {
+            return false;
+        }
+        if schema
+            .get("maximum")
+            .and_then(Value::as_f64)
+            .is_some_and(|maximum| number > maximum)
+        {
             return false;
         }
     }
@@ -182,6 +217,49 @@ fn schema_accepts(document: &Value, schema: &Value, instance: &Value) -> bool {
     }
 
     true
+}
+
+#[test]
+fn book_progress_schema_helper_enforces_scalar_constraints() {
+    let document = serde_json::json!({});
+
+    let bounded_number = serde_json::json!({"type": "number", "minimum": 0, "maximum": 1});
+    assert!(schema_accepts(&document, &bounded_number, &serde_json::json!(0)));
+    assert!(schema_accepts(&document, &bounded_number, &serde_json::json!(1)));
+    assert!(!schema_accepts(
+        &document,
+        &bounded_number,
+        &serde_json::json!(-0.01)
+    ));
+    assert!(!schema_accepts(
+        &document,
+        &bounded_number,
+        &serde_json::json!(1.01)
+    ));
+
+    let nonempty_string = serde_json::json!({"type": "string", "minLength": 1});
+    assert!(schema_accepts(
+        &document,
+        &nonempty_string,
+        &serde_json::json!("x")
+    ));
+    assert!(!schema_accepts(
+        &document,
+        &nonempty_string,
+        &serde_json::json!("")
+    ));
+
+    let timestamp = serde_json::json!({"type": "string", "format": "date-time"});
+    assert!(schema_accepts(
+        &document,
+        &timestamp,
+        &serde_json::json!("2026-07-19T12:00:00Z")
+    ));
+    assert!(!schema_accepts(
+        &document,
+        &timestamp,
+        &serde_json::json!("2026-07-19 12:00:00")
+    ));
 }
 
 fn valid_component_key(key: &str) -> bool {
@@ -558,6 +636,238 @@ fn openapi_contract_typed_parses_and_meets_project_requirements() {
             ["$ref"],
         "#/components/schemas/MediaItem"
     );
+}
+
+#[test]
+fn book_progress_is_nested_and_only_put_is_documented() {
+    let document = contract();
+    let path = &document["paths"]["/api/book/{checksum}/progress"];
+    assert!(path.get("get").is_none());
+    assert!(path.get("delete").is_none());
+    assert!(path["put"]["responses"].get("204").is_some());
+    assert!(document["paths"].get("/api/book-progress").is_none());
+    assert_eq!(
+        document["components"]["schemas"]["BookDetails"]["properties"]["progress"]["$ref"],
+        "#/components/schemas/BookReadingProgress"
+    );
+    assert!(
+        document["components"]["schemas"]["BookReadingProgress"]["properties"]
+            .get("checksum")
+            .is_none()
+    );
+}
+
+#[test]
+fn book_progress_operations_document_runtime_responses_and_payload_ownership() {
+    let document = contract();
+    let paths = document["paths"].as_object().unwrap();
+    let schemas = document["components"]["schemas"].as_object().unwrap();
+
+    for schema in [
+        "BookReadingProgress",
+        "SaveBookProgressRequest",
+        "BookLocator",
+        "EpubCfiLocator",
+        "PdfPageLocator",
+    ] {
+        assert!(schemas.contains_key(schema), "missing reusable schema {schema}");
+    }
+
+    let expected_responses = [(
+        "/api/book/{checksum}/progress",
+        "put",
+        &["204", "400", "401", "404", "500", "503"] as &[_],
+    )];
+    for (path, method, expected) in expected_responses {
+        let operation = &paths[path][method];
+        assert!(operation["operationId"].is_string(), "missing {method} {path}");
+        let actual: BTreeSet<_> = operation["responses"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(actual, expected.iter().copied().collect(), "{method} {path}");
+
+        for status in ["400", "404", "500", "503"] {
+            if operation["responses"].get(status).is_some() {
+                let response = resolved(&document, &operation["responses"][status]);
+                assert_eq!(
+                    response["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/ErrorResponse",
+                    "{method} {path} response {status} must use the JSON error shape"
+                );
+            }
+        }
+        assert_eq!(
+            operation["responses"]["401"]["$ref"],
+            "#/components/responses/UnauthorizedResponse"
+        );
+    }
+
+    assert!(paths.get("/api/book-progress").is_none());
+    assert!(paths["/api/book/{checksum}/progress"].get("get").is_none());
+    assert!(paths["/api/book/{checksum}/progress"]
+        .get("delete")
+        .is_none());
+    assert!(paths["/api/book/{checksum}/progress"]["put"]["responses"]["204"]
+        .get("content")
+        .is_none());
+    assert_eq!(
+        paths["/api/book/{checksum}/progress"]["put"]["requestBody"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/SaveBookProgressRequest"
+    );
+    let request = &schemas["SaveBookProgressRequest"];
+    assert_eq!(request["additionalProperties"], false);
+    assert_eq!(request["required"], serde_json::json!(["locator"]));
+    let request_fields: BTreeSet<_> = request["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(request_fields, BTreeSet::from(["locator", "progression"]));
+
+    let response = &schemas["BookReadingProgress"];
+    assert_eq!(response["additionalProperties"], false);
+    assert_eq!(response["required"], serde_json::json!(["locator", "updatedOn"]));
+    assert_eq!(response["properties"]["updatedOn"]["format"], "date-time");
+    assert!(response["properties"].get("checksum").is_none());
+    assert_eq!(
+        schemas["BookDetails"]["properties"]["progress"]["$ref"],
+        "#/components/schemas/BookReadingProgress"
+    );
+}
+
+#[test]
+fn book_progress_schemas_accept_valid_epub_and_pdf_payloads() {
+    let document = contract();
+    let schemas = document["components"]["schemas"].as_object().unwrap();
+    let epub_request = serde_json::json!({
+        "locator": {"type": "epub-cfi", "value": "epubcfi(/6/4!/4/2/8)"},
+        "progression": 0.0
+    });
+    let pdf_request = serde_json::json!({
+        "locator": {"type": "pdf-page", "value": "opaque-page-token"},
+        "progression": 1.0
+    });
+    let null_progression_request = serde_json::json!({
+        "locator": {"type": "pdf-page", "value": "7"},
+        "progression": null
+    });
+    for request in [&epub_request, &pdf_request, &null_progression_request] {
+        assert!(
+            schema_accepts(&document, &schemas["SaveBookProgressRequest"], request),
+            "valid save request was rejected: {request}"
+        );
+    }
+
+    let epub_response = serde_json::json!({
+        "locator": {"type": "epub-cfi", "value": "epubcfi(/6/4!/4/2/8)"},
+        "progression": 0.42,
+        "updatedOn": "2026-07-19T12:00:00Z"
+    });
+    let pdf_response = serde_json::json!({
+        "locator": {"type": "pdf-page", "value": "7"},
+        "updatedOn": "2026-07-19T12:00:00.000Z"
+    });
+    for response in [&epub_response, &pdf_response] {
+        assert!(response["updatedOn"].as_str().unwrap().ends_with('Z'));
+        assert!(
+            schema_accepts(&document, &schemas["BookReadingProgress"], response),
+            "valid progress response was rejected: {response}"
+        );
+    }
+}
+
+#[test]
+fn book_progress_schemas_reject_invalid_payloads() {
+    let document = contract();
+    let schemas = document["components"]["schemas"].as_object().unwrap();
+    let valid_request = serde_json::json!({
+        "locator": {"type": "pdf-page", "value": "1"},
+        "progression": 0.5
+    });
+    let valid_response = serde_json::json!({
+        "locator": {"type": "epub-cfi", "value": "epubcfi(/6/2)"},
+        "progression": 0.5,
+        "updatedOn": "2026-07-19T12:00:00Z"
+    });
+
+    for invalid in [
+        serde_json::json!({"locator": {"type": "future", "value": "1"}}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": ""}}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": " \t"}}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": "1", "extra": true}}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": "1"}, "progression": -0.01}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": "1"}, "progression": 1.01}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": "1"}, "checksum": "1"}),
+        serde_json::json!({"locator": {"type": "pdf-page", "value": "1"}, "updatedOn": "2026-07-19T12:00:00Z"}),
+    ] {
+        assert!(
+            !schema_accepts(&document, &schemas["SaveBookProgressRequest"], &invalid),
+            "invalid save request was accepted: {invalid}"
+        );
+    }
+
+    for field in ["locator", "updatedOn"] {
+        let mut invalid = valid_response.clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(
+            !schema_accepts(&document, &schemas["BookReadingProgress"], &invalid),
+            "response without server-owned {field} was accepted"
+        );
+    }
+    for (field, value) in [
+        ("checksum", serde_json::json!("9223372036854775807")),
+        ("progression", serde_json::json!(null)),
+        ("progression", serde_json::json!(-0.01)),
+        ("progression", serde_json::json!(1.01)),
+        ("updatedOn", serde_json::json!("2026-07-19 12:00:00")),
+        ("updatedOn", serde_json::json!("2026-07-19T12:00:00+02:00")),
+    ] {
+        let mut invalid = valid_response.clone();
+        invalid[field] = value;
+        assert!(
+            !schema_accepts(&document, &schemas["BookReadingProgress"], &invalid),
+            "invalid response field {field} was accepted: {invalid}"
+        );
+    }
+    assert!(schema_accepts(
+        &document,
+        &schemas["SaveBookProgressRequest"],
+        &valid_request
+    ));
+}
+
+#[test]
+fn book_progress_checksum_parameter_uses_the_bounded_signed_string_schema() {
+    let document = contract();
+    let checksum = resolved(
+        &document,
+        &document["components"]["parameters"]["BookChecksum"]["schema"],
+    );
+
+    for valid in [
+        serde_json::json!("0"),
+        serde_json::json!("-1"),
+        serde_json::json!("9223372036854775807"),
+        serde_json::json!("-9223372036854775808"),
+    ] {
+        assert!(schema_accepts(&document, checksum, &valid), "rejected {valid}");
+    }
+    for invalid in [
+        serde_json::json!(1),
+        serde_json::json!("9223372036854775808"),
+        serde_json::json!("-9223372036854775809"),
+        serde_json::json!("1.0"),
+    ] {
+        assert!(
+            !schema_accepts(&document, checksum, &invalid),
+            "accepted invalid checksum {invalid}"
+        );
+    }
 }
 
 #[test]

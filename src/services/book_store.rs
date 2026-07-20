@@ -422,11 +422,13 @@ mod tests {
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
             models::{
-                BookDetails, BookFormat, BookState, CollectionItem, VideoDetails,
-                DEFAULT_BOOK_THUMBNAIL,
+                BookDetails, BookFormat, BookState, CollectionItem, SaveBookProgressRequest,
+                VideoDetails, DEFAULT_BOOK_THUMBNAIL,
             },
             services::{BookCheck, BookPathLeaseCoordinator},
-            traits::{BookChecker, Databaser, FileStorer, Repository},
+            traits::{
+                BookChecker, Databaser, FileStorer, Repository,
+            },
         },
     };
 
@@ -604,6 +606,14 @@ mod tests {
 
         async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error> {
             self.inner.list_all_videos().await
+        }
+
+        async fn save_book_progress(
+            &self,
+            checksum: i64,
+            progress: &SaveBookProgressRequest,
+        ) -> Result<bool, sqlx::Error> {
+            self.inner.save_book_progress(checksum, progress).await
         }
     }
 

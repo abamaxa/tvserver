@@ -157,6 +157,129 @@ impl Drop for TempRoot {
 }
 
 #[tokio::test]
+async fn book_progress_put_returns_no_content_and_is_read_through_the_book() -> Result<()> {
+    let (server, repository) = start_server(57219).await?;
+    repository
+        .save_book(&sample_book(42, "", "embedded.epub"))
+        .await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+
+    let saved = client
+        .put("http://localhost:57219/api/book/42/progress")
+        .json(&serde_json::json!({
+            "locator": { "type": "epub-cfi", "value": "epubcfi(/6/4)" },
+            "progression": 0.5
+        }))
+        .send()
+        .await?;
+    assert_eq!(saved.status(), StatusCode::NO_CONTENT);
+    assert!(saved.bytes().await?.is_empty());
+
+    let book: Value = client
+        .get("http://localhost:57219/api/book/42")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        book["progress"]["locator"],
+        serde_json::json!({ "type": "epub-cfi", "value": "epubcfi(/6/4)" })
+    );
+    assert_eq!(book["progress"]["progression"], 0.5);
+    assert!(book["progress"]["updatedOn"]
+        .as_str()
+        .is_some_and(|value| value.ends_with('Z')));
+
+    for (method, path, expected) in [
+        (Method::GET, "/api/book-progress", StatusCode::NOT_FOUND),
+        (
+            Method::GET,
+            "/api/book/42/progress",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            Method::DELETE,
+            "/api/book/42/progress",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+    ] {
+        let response = client
+            .request(method, format!("http://localhost:57219{path}"))
+            .send()
+            .await?;
+        assert_eq!(response.status(), expected, "{path}");
+    }
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_progress_put_rejects_invalid_locator_and_progression() -> Result<()> {
+    let (server, _) = start_server(57220).await?;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+
+    for (body, expected_error) in [
+        (
+            serde_json::json!({
+                "locator": { "type": "epub-cfi", "value": " \t" }
+            }),
+            "book locator value must not be blank",
+        ),
+        (
+            serde_json::json!({
+                "locator": { "type": "pdf-page", "value": "1" },
+                "progression": -0.01
+            }),
+            "book progression must be finite and between 0 and 1",
+        ),
+        (
+            serde_json::json!({
+                "locator": { "type": "pdf-page", "value": "1" },
+                "progression": 1.01
+            }),
+            "book progression must be finite and between 0 and 1",
+        ),
+    ] {
+        let response = client
+            .put("http://localhost:57220/api/book/42/progress")
+            .json(&body)
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let result: Response = response.json().await?;
+        assert!(result.message.is_empty());
+        assert_eq!(result.errors, [expected_error]);
+    }
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn book_progress_put_returns_not_found_for_an_unknown_book() -> Result<()> {
+    let (server, _) = start_server(57221).await?;
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
+        .put("http://localhost:57221/api/book/404/progress")
+        .json(&serde_json::json!({
+            "locator": { "type": "pdf-page", "value": "1" }
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+    let result: Response = response.json().await?;
+    assert!(result.message.is_empty());
+    assert_eq!(result.errors, ["book not found"]);
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
 async fn lists_root_and_nested_book_collections() -> Result<()> {
     let (server, repository) = start_server(57200).await?;
     repository
@@ -317,6 +440,25 @@ async fn repository_errors_return_internal_server_error() -> Result<()> {
     let delete_result: Response = delete_response.json().await?;
     assert_eq!(delete_result.errors, ["internal server error"]);
     assert!(!format!("{delete_result:?}").contains("no such table"));
+
+    let progress_response = client
+        .put("http://localhost:57206/api/book/404/progress")
+        .json(&serde_json::json!({
+            "locator": { "type": "pdf-page", "value": "1" }
+        }))
+        .send()
+        .await?;
+    assert_eq!(progress_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let progress_body = progress_response.text().await?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&progress_body)?,
+        serde_json::json!({
+            "message": "",
+            "errors": ["internal server error"]
+        })
+    );
+    assert!(!progress_body.contains("no such table"));
+    assert!(!progress_body.contains("books"));
 
     server.abort();
     Ok(())

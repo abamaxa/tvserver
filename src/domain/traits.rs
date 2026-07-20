@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::messages::{MediaItem, RemoteMessage, TaskState};
-use super::models::{BookDetails, CollectionItem, DownloadableItem, SearchResults, VideoDetails};
+use super::models::{
+    BookDetails, CollectionItem, DownloadableItem, SaveBookProgressRequest, SearchResults,
+    VideoDetails,
+};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -296,6 +299,11 @@ pub trait Databaser: Sync + Send {
     async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
     async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error>;
+    async fn save_book_progress(
+        &self,
+        checksum: i64,
+        progress: &SaveBookProgressRequest,
+    ) -> Result<bool, sqlx::Error>;
 }
 
 pub type Repository = Arc<dyn Databaser>;

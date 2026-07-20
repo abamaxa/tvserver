@@ -10,8 +10,8 @@ use crate::domain::messages::{
 };
 #[cfg(not(feature = "webserver"))]
 use crate::domain::models::{
-    BookCollectionDetails, BookDetails, Conversion, DownloadableItem, SearchResults,
-    TaskListResults, AVAILABLE_CONVERSIONS,
+    BookCollectionDetails, BookDetails, Conversion, DownloadableItem, SaveBookProgressRequest,
+    SearchResults, TaskListResults, AVAILABLE_CONVERSIONS,
 };
 #[cfg(not(feature = "webserver"))]
 use crate::domain::traits::{MediaSharer, Repository};
@@ -26,6 +26,9 @@ use super::{AvailableBookRuntime, BookRuntime, BOOK_LIBRARY_UNAVAILABLE};
 
 #[cfg(not(feature = "webserver"))]
 pub type SharedState = Arc<Context>;
+
+#[cfg(not(feature = "webserver"))]
+const BOOK_NOT_FOUND_MESSAGE: &str = "book not found";
 
 #[cfg(not(feature = "webserver"))]
 #[tauri::command]
@@ -210,6 +213,32 @@ async fn delete_book_core(book_store: &BookStore, checksum: &str) -> Result<Resp
 
 #[cfg(not(feature = "webserver"))]
 #[tauri::command]
+pub async fn save_book_progress(
+    state: tauri::State<'_, SharedState>,
+    checksum: String,
+    progress: SaveBookProgressRequest,
+) -> Result<(), String> {
+    require_available_books(&state.get_book_runtime())?;
+    save_book_progress_core(&state.get_repository(), &checksum, progress).await
+}
+
+#[cfg(not(feature = "webserver"))]
+async fn save_book_progress_core(
+    repository: &Repository,
+    checksum: &str,
+    progress: SaveBookProgressRequest,
+) -> Result<(), String> {
+    let checksum = parse_book_checksum(checksum)?;
+    progress.validate().map_err(str::to_string)?;
+    match repository.save_book_progress(checksum, &progress).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(BOOK_NOT_FOUND_MESSAGE.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
 pub async fn log_client_message(
     payload: ClientLogMessage
 ) -> Result<(), String> {
@@ -353,6 +382,7 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         list_books,
         get_book,
         delete_book,
+        save_book_progress,
         log_client_message,
         remote_play,
         remote_command,
@@ -373,13 +403,19 @@ mod tests {
     use crate::{
         adaptors::{FileSystemStore, SqlRepository},
         domain::{
-            models::{BookDetails, DEFAULT_BOOK_THUMBNAIL},
+            models::{
+                BookDetails, BookLocator, BookLocatorType, SaveBookProgressRequest,
+                DEFAULT_BOOK_THUMBNAIL,
+            },
             traits::{FileStorer, Repository},
         },
         services::BookStore,
     };
 
-    use super::{delete_book_core, get_book_core, list_books_core, require_available_books};
+    use super::{
+        delete_book_core, get_book_core, list_books_core, require_available_books,
+        save_book_progress_core,
+    };
     use crate::entrypoints::{BookRuntime, BOOK_LIBRARY_UNAVAILABLE};
 
     #[test]
@@ -405,6 +441,7 @@ mod tests {
             ..BookDetails::default()
         }
     }
+
 
     async fn test_book_store() -> (Arc<BookStore>, Repository, PathBuf) {
         let test_root = std::env::temp_dir().join(format!(
@@ -549,5 +586,125 @@ mod tests {
         assert_eq!(delete_error, expected);
         drop(store);
         tokio::fs::remove_dir_all(test_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn book_progress_save_core_returns_unit_and_embeds_progress() {
+        let (store, repository, test_root) = test_book_store().await;
+        repository
+            .save_book(&sample_book(20, "Shelf", "second.epub"))
+            .await
+            .unwrap();
+        let request = SaveBookProgressRequest {
+            locator: BookLocator {
+                locator_type: BookLocatorType::EpubCfi,
+                value: "epubcfi(/6/4)".into(),
+            },
+            progression: Some(0.25),
+        };
+
+        let saved: () = save_book_progress_core(&repository, "20", request.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved, ());
+        let progress = repository.retrieve_book(20).await.unwrap().progress.unwrap();
+        assert_eq!(progress.locator, request.locator);
+        assert_eq!(progress.progression, Some(0.25));
+
+        drop(store);
+        tokio::fs::remove_dir_all(test_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn book_progress_save_core_validates_checksum_request_and_book_presence() {
+        let (store, repository, test_root) = test_book_store().await;
+        let valid = SaveBookProgressRequest {
+            locator: BookLocator {
+                locator_type: BookLocatorType::PdfPage,
+                value: "7".into(),
+            },
+            progression: None,
+        };
+
+        assert!(save_book_progress_core(&repository, "invalid", valid.clone())
+            .await
+            .unwrap_err()
+            .starts_with("Invalid book checksum 'invalid':"));
+        assert_eq!(
+            save_book_progress_core(&repository, "404", valid)
+                .await
+                .unwrap_err(),
+            "book not found"
+        );
+        let invalid = SaveBookProgressRequest {
+            locator: BookLocator {
+                locator_type: BookLocatorType::PdfPage,
+                value: "  ".into(),
+            },
+            progression: None,
+        };
+        assert_eq!(
+            save_book_progress_core(&repository, "404", invalid)
+                .await
+                .unwrap_err(),
+            "book locator value must not be blank"
+        );
+
+        drop(store);
+        tokio::fs::remove_dir_all(test_root).await.unwrap();
+    }
+
+
+    #[test]
+    fn book_progress_save_command_gates_unavailable_runtime_before_repository_use() {
+        let runtime = BookRuntime::Unavailable {
+            message: Arc::from(BOOK_LIBRARY_UNAVAILABLE),
+        };
+        assert_eq!(
+            require_available_books(&runtime)
+                .err()
+                .expect("unavailable runtime should return an error"),
+            BOOK_LIBRARY_UNAVAILABLE
+        );
+
+        let body = include_str!("tauri_api.rs")
+            .split_once("pub async fn save_book_progress(")
+            .expect("save command should exist")
+            .1
+            .split_once("\n}\n")
+            .expect("save command should have a complete function body")
+            .0;
+        let availability_check = body
+            .find("require_available_books")
+            .expect("save command must require the book runtime");
+        let core_call = body
+            .find("save_book_progress_core")
+            .expect("save command must call its core");
+        assert!(availability_check < core_call);
+    }
+
+    #[test]
+    fn book_progress_commands_are_registered_inside_tauri_handler_list() {
+        let source = include_str!("tauri_api.rs");
+        let handler = source
+            .split_once("tauri::generate_handler![")
+            .expect("Tauri handler list should exist")
+            .1
+            .split_once("\n    ]")
+            .expect("Tauri handler list should be closed")
+            .0;
+        let registered = handler
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+
+        assert!(registered.contains(&"save_book_progress"));
+        for command in ["list_book_progress", "get_book_progress", "delete_book_progress"] {
+            assert!(
+                !registered.contains(&command),
+                "{command} must not be inside generate_handler!, found {registered:?}"
+            );
+        }
     }
 }

@@ -6,7 +6,8 @@ mod youtube;
 
 pub use book::{
     default_book_thumbnail_bytes, ensure_default_book_thumbnail, is_default_book_thumbnail,
-    BookCollectionDetails, BookCollectionItem, BookDetails, BookFormat, BookMetadata, BookState,
+    BookCollectionDetails, BookCollectionItem, BookDetails, BookFormat, BookLocator,
+    BookLocatorType, BookMetadata, BookReadingProgress, BookState, SaveBookProgressRequest,
     DEFAULT_BOOK_THUMBNAIL,
 };
 pub use conversion::{Conversion, AVAILABLE_CONVERSIONS};
