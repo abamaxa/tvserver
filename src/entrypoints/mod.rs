@@ -1,5 +1,7 @@
 pub mod api;
 mod book_runtime;
+#[cfg(feature = "webserver")]
+mod capability_file_service;
 mod context;
 mod tvserver;
 #[cfg(feature = "webserver")]
