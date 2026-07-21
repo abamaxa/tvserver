@@ -109,6 +109,7 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
     // Protected routes: API endpoints, player, and fallback (app)
     let mut protected_routes = register(Arc::new(context))
         .nest_service("/player", ServeDir::new(get_client_path("player")))
+        .nest_service("/books", ServeDir::new(get_client_path("books")))
         .fallback_service(ServeDir::new(get_client_path("newapp")));
 
     // Unprotected routes: streaming and thumbnails (need external access for casting)
