@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.abamaxa.lots-of-videos",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../apps/video/dist",
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "npm run dev:video",
+    "beforeBuildCommand": "npm run build --workspace @lots-of-videos/video"
   },
   "app": {
     "windows": [
