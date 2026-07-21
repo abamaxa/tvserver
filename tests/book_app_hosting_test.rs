@@ -21,12 +21,15 @@ use axum::{
     body::{to_bytes, Body},
     extract::ConnectInfo,
     http::{
-        header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, RANGE, WWW_AUTHENTICATE},
+        header::{
+            AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE, WWW_AUTHENTICATE,
+        },
         Request, StatusCode,
     },
     response::Response,
     Router,
 };
+use reqwest::Url;
 use tower::ServiceExt;
 
 use crate::common::{
@@ -170,15 +173,26 @@ async fn hosts_books_app_behind_auth_without_shadowing_video_or_book_downloads()
         .headers()
         .contains_key("content-security-policy"));
 
-    for path in ["/books", "/books/"] {
-        let response = request(&app, path, true, None).await;
-        assert_eq!(response.status(), StatusCode::OK, "{path}");
-        assert_eq!(response.headers()[CONTENT_TYPE], "text/html", "{path}");
-        assert!(response.headers().contains_key("content-security-policy"));
-        assert_eq!(body_text(response).await?, "books-index-sentinel", "{path}");
-    }
+    let books_redirect = request(&app, "/books", true, None).await;
+    assert_eq!(books_redirect.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(books_redirect.headers()[LOCATION], "/books/");
+    assert!(books_redirect
+        .headers()
+        .contains_key("content-security-policy"));
 
-    let asset = request(&app, "/books/assets/books.js", true, None).await;
+    let final_url = Url::parse("http://localhost/books")?
+        .join(books_redirect.headers()[LOCATION].to_str()?)?;
+    assert_eq!(final_url.path(), "/books/");
+    let relative_asset_url = final_url.join("./assets/books.js")?;
+    assert_eq!(relative_asset_url.path(), "/books/assets/books.js");
+
+    let books = request(&app, final_url.path(), true, None).await;
+    assert_eq!(books.status(), StatusCode::OK);
+    assert_eq!(books.headers()[CONTENT_TYPE], "text/html");
+    assert!(books.headers().contains_key("content-security-policy"));
+    assert_eq!(body_text(books).await?, "books-index-sentinel");
+
+    let asset = request(&app, relative_asset_url.path(), true, None).await;
     assert_eq!(asset.status(), StatusCode::OK);
     assert!(asset.headers()[CONTENT_TYPE]
         .to_str()?

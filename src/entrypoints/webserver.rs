@@ -23,7 +23,7 @@ use axum::{
     },
     middleware,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -53,6 +53,13 @@ fn with_security_headers(mut response: Response) -> Response {
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
     with_security_headers(next.run(request).await)
+}
+
+async fn redirect_books_root(request: Request<Body>, next: Next) -> Response {
+    if request.uri().path() == "/books" {
+        return Redirect::temporary("/books/").into_response();
+    }
+    next.run(request).await
 }
 
 async fn empty_unsatisfiable_range_body(request: Request<Body>, next: Next) -> Response {
@@ -158,7 +165,9 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
     unprotected_routes =
         unprotected_routes.nest("/api/book-thumbnails", book_thumbnail_routes);
 
-    let protected_routes = protected_routes.layer(middleware::from_fn(restrict_access));
+    let protected_routes = protected_routes
+        .layer(middleware::from_fn(redirect_books_root))
+        .layer(middleware::from_fn(restrict_access));
 
     Ok(Router::new()
         .merge(unprotected_routes)
