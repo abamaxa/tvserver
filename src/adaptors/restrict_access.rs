@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::ConnectInfo,
-    http::{Request, StatusCode},
+    http::{header::SEC_WEBSOCKET_PROTOCOL, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -11,7 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 use crate::domain::config::get_auth_credentials;
 
 /// Middleware that restricts access to localhost and private 192.168.* IPs.
-/// Remote clients can authenticate via HTTP Basic Auth (header or query param).
+/// Remote clients can authenticate via HTTP Basic Auth, query auth, or a WebSocket subprotocol.
 pub async fn restrict_access(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     request: Request<Body>,
@@ -41,7 +41,10 @@ pub async fn restrict_access(
     }
 
     // IP is not local — check for Basic Auth
-    if check_basic_auth(&request) || check_query_auth(&request) {
+    if check_basic_auth(&request)
+        || check_query_auth(&request)
+        || check_websocket_protocol_auth(&request)
+    {
         return next.run(request).await;
     }
 
@@ -94,6 +97,28 @@ fn check_query_auth(request: &Request<Body>) -> bool {
         }
     }
     false
+}
+
+/// Check a WebSocket-safe `basic.<base64url-no-pad>` subprotocol for valid credentials.
+fn check_websocket_protocol_auth(request: &Request<Body>) -> bool {
+    request
+        .headers()
+        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|protocol| protocol.trim().strip_prefix("basic."))
+        .any(|encoded| {
+            let Ok(decoded_bytes) =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)
+            else {
+                return false;
+            };
+            let Ok(decoded) = String::from_utf8(decoded_bytes) else {
+                return false;
+            };
+            decoded == get_auth_credentials()
+        })
 }
 
 /// Build a 401 response with the WWW-Authenticate header.
@@ -273,6 +298,43 @@ mod tests {
         ensure_test_credentials();
         let request = make_request_with_query("foo=bar&auth=ZW1tYTpHaXJhZmZlMTI=&baz=qux");
         assert!(check_query_auth(&request));
+    }
+
+    fn make_request_with_websocket_protocol(header_value: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/api/remote/ws")
+            .header("Sec-WebSocket-Protocol", header_value)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn test_valid_websocket_protocol_auth() {
+        ensure_test_credentials();
+        let request = make_request_with_websocket_protocol("books-v1, basic.ZW1tYTpHaXJhZmZlMTI");
+
+        assert!(check_websocket_protocol_auth(&request));
+    }
+
+    #[test]
+    fn test_invalid_websocket_protocol_auth() {
+        ensure_test_credentials();
+
+        for header in [
+            "books-v1",
+            "books-v1, basic.d3Jvbmc6d3Jvbmc",
+            "books-v1, basic.ZW1tYTpHaXJhZmZlMTI=",
+            "books-v1, basic.not!a!token",
+        ] {
+            let request = make_request_with_websocket_protocol(header);
+            assert!(!check_websocket_protocol_auth(&request), "accepted {header}");
+        }
+
+        let request = Request::builder()
+            .uri("/api/remote/ws")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!check_websocket_protocol_auth(&request));
     }
 
     #[test]
