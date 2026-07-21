@@ -40,7 +40,7 @@ sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "chrono", "sqlite"
 thiserror = "1.0.40"
 tokio = { version = "1.25.0", features = ["full"] }
 tokio-util = "0.7.4"
-tower-http = { version = "0.6.1", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.7.0", features = ["fs", "trace", "cors"] }
 titlecase = "2.2.1"
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
@@ -67,6 +67,7 @@ tauri-build = { version = "2.6.3", features = [], optional = true }
 oas3 = { version = "0.22", features = ["yaml-spec"] }
 roas = { version = "=0.17.2", default-features = false, features = ["v3_1"] }
 serde_yaml = "0.9"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

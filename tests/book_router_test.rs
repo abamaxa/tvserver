@@ -351,6 +351,13 @@ async fn book_static_routes_enforce_capability_and_file_type_boundaries() -> Res
         default_book_thumbnail_bytes()
     );
 
+    let directory_response = client
+        .get("http://localhost:57210/api/books/download/Valid")
+        .send()
+        .await?;
+    assert_eq!(directory_response.status(), StatusCode::NOT_FOUND);
+    assert!(directory_response.bytes().await?.is_empty());
+
     assert_rejected_without_leaking(
         client
             .get("http://localhost:57210/api/books/download/Escape/secret.epub")
