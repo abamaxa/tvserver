@@ -14,10 +14,6 @@ use tokio::task::JoinHandle;
 
 const BOOKS_WEBSOCKET_PROTOCOL: &str = "books-v1";
 
-fn supported_websocket_protocols() -> [&'static str; 1] {
-    [BOOKS_WEBSOCKET_PROTOCOL]
-}
-
 #[derive(Debug)]
 pub struct RemoteBrowserPlayer {
     in_tx: Sender<RemoteMessage>,
@@ -49,7 +45,7 @@ impl RemoteBrowserPlayer {
         let runner = RemoteBrowserPlayer { in_tx };
 
         let response = ws
-            .protocols(supported_websocket_protocols())
+            .protocols([BOOKS_WEBSOCKET_PROTOCOL])
             .on_upgrade(move |socket| handle_socket(socket, who, in_rx, out_tx));
 
         tokio::spawn(async move {
@@ -189,15 +185,4 @@ async fn wait_for_socket_to_close(
     }
 
     tracing::info!("Websocket context {} destroyed", who);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn negotiates_only_the_fixed_books_protocol() {
-        assert_eq!(supported_websocket_protocols(), ["books-v1"]);
-        assert!(!supported_websocket_protocols()[0].starts_with("basic."));
-    }
 }
