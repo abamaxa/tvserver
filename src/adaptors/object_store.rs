@@ -9,7 +9,7 @@ use cap_fs_ext::{
 };
 use cap_std::{
     ambient_authority,
-    fs::{Dir, OpenOptions},
+    fs::{Dir, File, OpenOptions},
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -61,6 +61,7 @@ pub struct FileSystemStore {
 #[derive(Clone)]
 struct PrivateSnapshotAuthority {
     directory: Arc<Dir>,
+    file: Arc<File>,
     name: PathBuf,
     device: u64,
     inode: u64,
@@ -1423,7 +1424,7 @@ impl FileStore for FileSystemStore {
             }
 
             let snapshot_name = PathBuf::from(unique_staging_name("snapshot"));
-            let copy_result = (|| -> Result<(u64, u64)> {
+            let copy_result = (|| -> Result<(File, u64, u64)> {
                 let mut source_options = OpenOptions::new();
                 source_options.read(true).follow(FollowSymlinks::No);
                 let mut source = source_dir.open_with(&staged_source, &source_options)?;
@@ -1444,9 +1445,9 @@ impl FileStore for FileSystemStore {
                 if !metadata.is_file() {
                     return Err(anyhow!("private snapshot must be a regular file"));
                 }
-                Ok((metadata.dev(), metadata.ino()))
+                Ok((snapshot, metadata.dev(), metadata.ino()))
             })();
-            let (device, inode) = match copy_result {
+            let (file, device, inode) = match copy_result {
                 Ok(identity) => identity,
                 Err(error) => {
                     let _ = snapshot_dir.remove_file(&snapshot_name);
@@ -1468,6 +1469,7 @@ impl FileStore for FileSystemStore {
                 id,
                 PrivateSnapshotAuthority {
                     directory: Arc::new(snapshot_dir),
+                    file: Arc::new(file),
                     name: snapshot_name.clone(),
                     device,
                     inode,
@@ -1492,6 +1494,11 @@ impl FileStore for FileSystemStore {
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
             let authority = store.private_snapshot_authority(&snapshot)?;
+            ensure_snapshot_identity(
+                &authority.file.metadata()?,
+                authority.device,
+                authority.inode,
+            )?;
             let metadata = authority.directory.symlink_metadata(&authority.name)?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_file()
