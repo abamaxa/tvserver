@@ -2,11 +2,12 @@ use std::path::Path;
 
 use anyhow::Result;
 // Assuming these are defined in your codebase:
-use crate::domain::traits::Repository;
+use super::media_kind::is_video_extension;
 use crate::domain::models::VideoDetails;
+use crate::domain::traits::Repository;
 
 /// Asynchronously retrieves videos for a series or a given id.
-/// 
+///
 /// If `series_or_id` can be parsed as an integer, it attempts to retrieve a single video
 /// using that checksum. If that call fails or is not parseable as an integer, it splits
 /// the input into series and season parts and calls `list_series_details`.
@@ -32,7 +33,9 @@ pub async fn get_videos_for_series_or_id(
 
     // Call the async method to list series details.
     // We pass the season as an Option<&str> (using as_deref() to convert Option<String> to Option<&str>)
-    repo.list_series_details(&series, season.as_deref()).await.map_err(|e| anyhow::anyhow!("Error listing series details: {}", e))
+    repo.list_series_details(&series, season.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("Error listing series details: {}", e))
 }
 
 pub fn skip_file(name: &str) -> bool {
@@ -51,38 +54,40 @@ pub fn skip_file(name: &str) -> bool {
         return true;
     }
 
-    // List of accepted file extensions.
-    let accept_extensions = [
-        "", ".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm",
-        ".m4v", ".mpg", ".mpeg", ".3gp", ".3g2", ".ts", ".vob", ".m2ts",
-        ".mts", ".f4v", ".f4p", ".f4a", ".f4b", ".ogv", ".ogg", ".drc",
-        ".gif", ".gifv", ".mng", ".avi", ".mov", ".qt", ".wmv", ".yuv",
-        ".rm", ".rmvb", ".asf", ".amv", ".mp4", ".m4p", ".m4v", ".mpg",
-        ".mp2", ".mpeg", ".mpe", ".mpv", ".mpg", ".mpeg", ".m2v", ".m4v",
-        ".svi", ".3gp", ".3g2", ".mxf", ".roq", ".nsv", ".flv", ".f4v",
-        ".f4p", ".f4a", ".f4b", 
-        // subtitles
-        //".srt", ".sub", ".idx", ".ass", ".ssa", ".sup", ".vtt", ".ttml", ".dfxp", ".ttx", ".xml", ".sbv", ".usf",
-        //".usm", ".usx", ".usx2", ".usx3", ".usx4", ".usx5", ".usx6", ".usx7", ".usx8", ".usx9", ".usx10"
-    ];
-
     // Convert the file name to lowercase and extract the extension.
     let name_lowercase = name.to_lowercase();
     let file_ext = {
         let path = Path::new(&name_lowercase);
         match path.extension().and_then(|s| s.to_str()) {
-            Some(ext) => format!(".{}", ext),
+            Some(ext) => ext.to_string(),
             None => String::new(),
         }
     };
 
     // If the file extension is one of the accepted ones, don't skip the file.
-    if accept_extensions.iter().any(|&ext| ext == file_ext) {
+    if file_ext.is_empty()
+        || is_video_extension(&file_ext)
+        || matches!(file_ext.as_str(), "pdf" | "epub")
+    {
         return false;
     }
 
     // Skip the file if none of the conditions for acceptance are met.
     true
+}
+
+pub fn is_video_scan_candidate(name: &str) -> bool {
+    if skip_file(name) {
+        return false;
+    }
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        None | Some("") => true,
+        Some(extension) => is_video_extension(extension),
+    }
 }
 
 /// Splits the input string at the last occurrence of '/'.
@@ -99,7 +104,6 @@ fn split_at_last_slash(s: &str) -> (String, Option<String>) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +115,10 @@ mod tests {
             ("TV2", false),
             ("file.py", true),
             ("file.mp4", false),
+            ("book.pdf", false),
+            ("BOOK.PDF", false),
+            ("book.epub", false),
+            ("BOOK.EPUB", false),
             ("file.jpg", true),
             ("file.png", true),
         ];
@@ -119,5 +127,17 @@ mod tests {
             assert_eq!(skip_file(name), expected);
         }
     }
-}
 
+    #[test]
+    fn video_scan_rejects_books_and_preserves_extensionless_legacy_files() {
+        for name in ["manual.pdf", "MANUAL.PDF", "novel.epub", "NOVEL.EPUB"] {
+            assert!(!is_video_scan_candidate(name), "movie scan admitted {name}");
+        }
+        for name in ["movie.mp4", "MOVIE.MKV", "legacy-file"] {
+            assert!(is_video_scan_candidate(name), "movie scan rejected {name}");
+        }
+        for name in [".hidden.mp4", "partial.tmp.mp4", "cover.jpg"] {
+            assert!(!is_video_scan_candidate(name), "movie scan admitted {name}");
+        }
+    }
+}

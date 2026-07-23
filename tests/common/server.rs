@@ -1,29 +1,35 @@
-use std::{net::SocketAddr, sync::Arc};
-
-use tower_http::{
-    services::ServeDir,
-    trace::{DefaultMakeSpan, TraceLayer},
-};
+use std::{env, net::SocketAddr};
 
 use anyhow::Result;
 use tokio::{task::JoinHandle, time};
 
 use app_lib::{
-    domain::config::{get_client_path, get_movie_dir},
-    entrypoints::{register, Context},
+    domain::config::BOOK_DIR,
+    entrypoints::{webserver::build_http_router, Context},
 };
 
 pub async fn create_server(context: Context, port: u16) -> JoinHandle<Result<()>> {
+    if env::var_os(BOOK_DIR).is_none() {
+        env::set_var(
+            BOOK_DIR,
+            env::temp_dir().join(format!("tvserver-http-tests-{}", std::process::id())),
+        );
+    }
+
+    create_server_task(context, port).await
+}
+
+async fn create_server_task(context: Context, port: u16) -> JoinHandle<Result<()>> {
     let task = tokio::spawn(async move {
-        let app = register(Arc::new(context))
-            .nest_service("/player", ServeDir::new(get_client_path("player")))
-            .nest_service("/api/stream", ServeDir::new(get_movie_dir()))
-            .fallback_service(ServeDir::new(get_client_path("app")))
-            .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()));
+        let app = build_http_router(context)?;
 
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-        axum::serve(tokio::net::TcpListener::bind(&addr).await?, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+        axum::serve(
+            tokio::net::TcpListener::bind(&addr).await?,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
 
         Ok(())
     });

@@ -5,7 +5,7 @@ use mockall::lazy_static;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::net::{IpAddr, SocketAddr};
 
-use super::VideoEvent;
+use super::{BookEvent, VideoEvent};
 
 lazy_static! {
     static ref DEFAULT_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 80);
@@ -145,6 +145,7 @@ pub enum RemoteMessage {
     LastState(VideoDetails),
     CurrentTasks(Vec<TaskState>),
 
+    Book(Vec<BookEvent>),
     Video(Vec<VideoEvent>),
 }
 

@@ -2,13 +2,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::messages::{MediaItem, RemoteMessage, TaskState};
-use super::models::{CollectionItem, DownloadableItem, SearchResults, VideoDetails};
+use super::models::{
+    BookDetails, CollectionItem, DownloadableItem, SaveBookProgressRequest, SearchResults,
+    VideoDetails,
+};
 use anyhow;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use mockall::automock;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+
+use super::algorithm::file_integrity::FileSeal;
 
 /*
 The following are higher level traits that provide polymorphism
@@ -44,6 +49,15 @@ pub trait MediaChecker: Send + Sync {
 }
 
 pub type Checker = Arc<dyn MediaChecker>;
+
+/// Provides a separate boundary for checking book files and metadata state.
+#[automock]
+#[async_trait]
+pub trait BookChecker: Send + Sync {
+    async fn check_book_information(&self) -> anyhow::Result<()>;
+}
+
+pub type BookCheckerHandle = Arc<dyn BookChecker>;
 
 
 /// Provides an interface to observe the progress of a download
@@ -113,6 +127,41 @@ pub trait Filer: Sync + Send {
 
 pub type StoreObject = Arc<dyn Filer>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedFile {
+    pub original_path: PathBuf,
+    pub staged_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateSnapshot {
+    pub path: PathBuf,
+    pub(crate) id: u128,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateSnapshotFingerprint {
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+impl PrivateSnapshot {
+    pub(crate) fn new(path: PathBuf, id: u128, device: u64, inode: u64) -> Self {
+        Self {
+            path,
+            id,
+            device,
+            inode,
+        }
+    }
+}
+
+fn unsupported_no_follow_listing(path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    anyhow::bail!("strict no-follow listing is not supported for {path}")
+}
+
 /// An interface to a collection of files.
 ///
 /// Unlike the MediaStorer interface, this is a low level interface implemented
@@ -122,11 +171,71 @@ pub type StoreObject = Arc<dyn Filer>;
 pub trait FileStore: Sync + Send {
     async fn create_folder(&self, path: &Path) -> anyhow::Result<()>;
     async fn list_folder(&self, path: &str) -> anyhow::Result<(Vec<String>, Vec<String>)>;
+    async fn list_folder_no_follow(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        unsupported_no_follow_listing(path)
+    }
     async fn ensure_path_exists(&self, path: &str) -> anyhow::Result<()>;
     async fn rename(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> anyhow::Result<()>;
+    async fn stage_no_follow(&self, source: &str) -> anyhow::Result<StagedFile>;
+    async fn create_private_snapshot(
+        &self,
+        staged: &StagedFile,
+    ) -> anyhow::Result<PrivateSnapshot>;
+    async fn private_snapshot_fingerprint(
+        &self,
+        _snapshot: &PrivateSnapshot,
+    ) -> anyhow::Result<PrivateSnapshotFingerprint> {
+        anyhow::bail!("private snapshot fingerprinting is not supported by this file store")
+    }
+    async fn seal_private_snapshot(
+        &self,
+        snapshot: &PrivateSnapshot,
+    ) -> anyhow::Result<FileSeal>;
+    async fn private_snapshot_matches_regular_no_follow(
+        &self,
+        _snapshot: &PrivateSnapshot,
+        _path: &Path,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("private snapshot comparison is not supported by this file store")
+    }
+    async fn publish_private_snapshot_no_replace(
+        &self,
+        snapshot: &PrivateSnapshot,
+        destination: &str,
+        expected_seal: &FileSeal,
+    ) -> anyhow::Result<()>;
+    async fn remove_private_snapshot(&self, snapshot: &PrivateSnapshot) -> anyhow::Result<()>;
+    async fn regular_file_exists_no_follow(&self, path: &Path) -> anyhow::Result<bool>;
+    async fn remove_regular_no_follow(&self, path: &Path) -> anyhow::Result<()>;
+    async fn discard_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
+    async fn publish_staged_no_replace(
+        &self,
+        staged: &StagedFile,
+        destination: &str,
+    ) -> anyhow::Result<()>;
+    async fn restore_staged(&self, staged: &StagedFile) -> anyhow::Result<()>;
+    async fn restore(&self, staged_path: &str, original_path: &str) -> anyhow::Result<()>;
     async fn get(&self, path: &str) -> anyhow::Result<StoreObject>;
     async fn delete(&self, path: &str) -> anyhow::Result<()>;
     async fn remove_empty_dir(&self, path: &Path) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_follow_listing_default_is_explicitly_unsupported() {
+        let error = unsupported_no_follow_listing("Shelf").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("strict no-follow listing is not supported"));
+    }
 }
 
 pub type FileStorer = Arc<dyn FileStore>;
@@ -165,6 +274,21 @@ pub type Spawner = Arc<dyn ProcessSpawner>;
 
 #[async_trait]
 pub trait Databaser: Sync + Send {
+    async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error>;
+    async fn list_book_collections(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<String>, sqlx::Error>;
+    async fn list_books(&self, collection: &str) -> Result<Vec<BookDetails>, sqlx::Error>;
+    async fn list_all_books(&self) -> Result<Vec<BookDetails>, sqlx::Error>;
+    async fn retrieve_book(&self, checksum: i64) -> Result<BookDetails, sqlx::Error>;
+    async fn delete_book(&self, checksum: i64) -> Result<u64, sqlx::Error>;
+    async fn delete_book_if_path_matches(
+        &self,
+        checksum: i64,
+        collection: &str,
+        file_name: &str,
+    ) -> Result<u64, sqlx::Error>;
     async fn save_video(&self, details: &VideoDetails) -> Result<i64, sqlx::Error>;
     async fn list_collection(&self, collection: &str)  -> Result<Vec<String>, sqlx::Error>;
     async fn list_videos(&self, collection: &str)  -> Result<Vec<VideoDetails>, sqlx::Error>;
@@ -175,6 +299,11 @@ pub trait Databaser: Sync + Send {
     async fn update_watched_video(&self, checksum: i64, current_time: f64) -> Result<(), sqlx::Error>;
     async fn get_history(&self, offset: i32, limit: i32) -> Result<Vec<VideoDetails>, sqlx::Error>;
     async fn list_all_videos(&self) -> Result<Vec<VideoDetails>, sqlx::Error>;
+    async fn save_book_progress(
+        &self,
+        checksum: i64,
+        progress: &SaveBookProgressRequest,
+    ) -> Result<bool, sqlx::Error>;
 }
 
 pub type Repository = Arc<dyn Databaser>;

@@ -1,15 +1,17 @@
-use crate::domain::config::get_movie_dir;
+#[cfg(not(feature = "webserver"))]
+use crate::domain::config::get_book_thumbnail_dir;
 #[cfg(not(feature = "webserver"))]
 use crate::domain::config::get_thumbnail_dir;
+use crate::domain::config::{get_book_dir, get_movie_dir};
 use mockall::lazy_static;
 use regex::Regex;
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use std::{collections::HashSet, path::{Component, Path, PathBuf}};
 use titlecase::titlecase;
 
 pub fn replace_extension(path: &str, new_extension: &str) -> String {
     let path_obj = Path::new(path);
     let stem = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    
+
     match path_obj.parent() {
         Some(parent) => parent.join(format!("{}{}", stem, new_extension))
             .to_str()
@@ -96,31 +98,82 @@ pub fn generate_display_name(name: &Option<String>) -> String {
 }
 
 pub fn get_collection_from_path(path: &Path) -> String {
-    let short_path = match path.strip_prefix(&get_movie_dir()) {
+    get_video_collection_from_rooted_path(path, &get_movie_dir())
+}
+
+pub fn get_book_collection_from_path(path: &Path) -> String {
+    get_collection_from_rooted_path(path, &get_book_dir())
+}
+
+pub fn path_to_collection_id(path: &Path) -> Option<String> {
+    path.components()
+        .map(|component| match component {
+            Component::Normal(part) => part.to_str().filter(|segment| is_portable_segment(segment)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
+}
+
+fn is_portable_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('\\')
+        && !segment.contains(':')
+}
+
+pub fn collection_id_to_path(collection: &str) -> Option<PathBuf> {
+    if collection.is_empty() {
+        return Some(PathBuf::new());
+    }
+
+    let mut path = PathBuf::new();
+    for segment in collection.split('/') {
+        if !is_portable_segment(segment) {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
+}
+
+pub fn get_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> String {
+    let short_path = match path.strip_prefix(root.as_ref()) {
         Ok(p) => PathBuf::from(p),
         _ => PathBuf::from(path),
     };
 
-    if path.is_dir() {
-        return short_path.to_str().unwrap_or_default().to_string();
-    }
+    let collection_path = if path.is_dir() {
+        short_path.as_path()
+    } else {
+        short_path.parent().unwrap_or_else(|| Path::new(""))
+    };
 
-    match short_path.parent() {
-        Some(parent) => parent.to_str().unwrap_or_default().to_string(),
-        _ => String::new(),
-    }
+    path_to_collection_id(collection_path).unwrap_or_default()
 }
 
 pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
-    let short_path = match path.strip_prefix(&get_movie_dir()) {
+    get_video_collection_and_file_from_rooted_path(path, &get_movie_dir())
+}
+
+pub fn get_collection_and_book_from_path(path: &Path) -> (String, String) {
+    get_collection_and_file_from_rooted_path(path, &get_book_dir())
+}
+
+pub fn get_collection_and_file_from_rooted_path(
+    path: &Path,
+    root: impl AsRef<Path>,
+) -> (String, String) {
+    let short_path = match path.strip_prefix(root.as_ref()) {
         Ok(p) => PathBuf::from(p),
         _ => PathBuf::from(path),
     };
 
-    let parent = match short_path.parent() {
-        Some(parent) => parent.to_str().unwrap_or_default().to_string(),
-        _ => String::new(),
-    };
+    let parent = short_path
+        .parent()
+        .and_then(path_to_collection_id)
+        .unwrap_or_default();
 
     (
         parent,
@@ -133,10 +186,39 @@ pub fn get_collection_and_video_from_path(path: &Path) -> (String, String) {
     )
 }
 
+fn get_video_collection_from_rooted_path(path: &Path, root: impl AsRef<Path>) -> String {
+    let short_path = path.strip_prefix(root.as_ref()).unwrap_or(path);
+    let collection = if path.is_dir() {
+        short_path
+    } else {
+        short_path.parent().unwrap_or_else(|| Path::new(""))
+    };
+    collection.to_str().unwrap_or_default().to_string()
+}
+
+fn get_video_collection_and_file_from_rooted_path(
+    path: &Path,
+    root: impl AsRef<Path>,
+) -> (String, String) {
+    let short_path = path.strip_prefix(root.as_ref()).unwrap_or(path);
+    (
+        short_path
+            .parent()
+            .and_then(Path::to_str)
+            .unwrap_or_default()
+            .to_string(),
+        short_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
 pub fn title_case(input: &str) -> String {
     // Define the exception words
     let exceptions: HashSet<&str> = ["of", "in", "the"].iter().cloned().collect();
-    
+
     // Split the input by whitespace into words.
     let words: Vec<&str> = input.split_whitespace().collect();
     let mut result = Vec::with_capacity(words.len());
@@ -207,9 +289,140 @@ pub fn get_thumbnails_url(thumbnails: &Vec<String>) -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
+#[cfg(feature = "webserver")]
+pub fn get_book_url(collection: &str, file_name: &str) -> String {
+    let mut segments = Path::new(collection)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => part
+                .to_str()
+                .map(|part| urlencoding::encode(part).into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    segments.push(urlencoding::encode(&get_book_thumbnail_file_name(file_name)).into_owned());
+    format!("/api/books/download/{}", segments.join("/"))
+}
+
+#[cfg(not(feature = "webserver"))]
+pub fn get_book_url(collection: &str, file_name: &str) -> String {
+    let download_path = get_book_download_path(collection, file_name);
+    format!("{}/{}", get_book_dir(), download_path)
+}
+
+#[cfg(feature = "webserver")]
+pub fn get_book_thumbnail_url(thumbnail: &str) -> String {
+    format!("/api/book-thumbnails/{}", get_book_thumbnail_file_name(thumbnail))
+}
+
+#[cfg(not(feature = "webserver"))]
+pub fn get_book_thumbnail_url(thumbnail: &str) -> String {
+    let thumbnail_dir = get_book_thumbnail_dir(&get_book_dir())
+        .to_str()
+        .unwrap_or_default()
+        .to_string();
+    format!("{}/{}", thumbnail_dir, get_book_thumbnail_file_name(thumbnail))
+}
+
+pub fn get_book_download_path(collection: &str, file_name: &str) -> String {
+    let mut relative_path = PathBuf::new();
+    for component in Path::new(collection).components() {
+        if let Component::Normal(part) = component {
+            relative_path.push(part);
+        }
+    }
+    relative_path.push(get_book_thumbnail_file_name(file_name));
+    relative_path.to_str().unwrap_or_default().to_string()
+}
+
+pub fn get_book_thumbnail_file_name(thumbnail: &str) -> String {
+    Path::new(thumbnail)
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn collection_ids_join_native_path_components_with_forward_slashes() {
+        let path = ["Fiction", "Classics", "British"].iter().collect::<PathBuf>();
+        assert_eq!(
+            path_to_collection_id(&path),
+            Some("Fiction/Classics/British".to_string())
+        );
+        assert_eq!(path_to_collection_id(Path::new("")), Some(String::new()));
+        assert_eq!(path_to_collection_id(Path::new("../Fiction")), None);
+    }
+
+    #[test]
+    fn collection_id_to_path_accepts_empty_and_nested_canonical_ids() {
+        assert_eq!(collection_id_to_path(""), Some(PathBuf::new()));
+        assert_eq!(
+            collection_id_to_path("Fiction/Classics"),
+            Some(PathBuf::from("Fiction").join("Classics"))
+        );
+    }
+
+    #[test]
+    fn collection_id_to_path_rejects_noncanonical_and_host_dependent_ids() {
+        for collection in [
+            "../Fiction",
+            "Fiction/./Classics",
+            "Fiction//Classics",
+            "/Fiction",
+            "Fiction/",
+            r"Fiction\Classics",
+        ] {
+            assert_eq!(
+                collection_id_to_path(collection),
+                None,
+                "expected {collection:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_id_to_path_rejects_windows_prefix_segments_on_every_host() {
+        for collection in ["C:", "C:Books", "Fiction/C:", "Fiction/Class:ics"] {
+            assert_eq!(
+                collection_id_to_path(collection),
+                None,
+                "expected {collection:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn path_to_collection_id_rejects_nonportable_normal_segments() {
+        for path in [Path::new(r"Fiction\Classics"), Path::new("Fiction:Classics")] {
+            assert_eq!(
+                path_to_collection_id(path),
+                None,
+                "expected {path:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn every_produced_collection_id_round_trips() {
+        let path = Path::new("Fiction").join("Classics").join("British");
+        let collection = path_to_collection_id(&path).expect("portable path should convert");
+
+        assert_eq!(collection_id_to_path(&collection), Some(path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collection_ids_normalize_native_windows_separators() {
+        assert_eq!(
+            path_to_collection_id(Path::new(r"Fiction\Classics\British")),
+            Some("Fiction/Classics/British".to_string())
+        );
+    }
 
     #[test]
     fn test_title_case() {
@@ -281,6 +494,82 @@ mod test {
         assert_eq!(
             get_next_version_name(input_path.to_str().unwrap(), None),
             Some(expected_path.to_str().unwrap().to_string())
+        );
+    }
+
+    #[test]
+    fn collection_helpers_strip_their_configured_roots() {
+        let video_path = Path::new("/library/TV/Season 1/episode.mkv");
+        assert_eq!(
+            get_collection_from_rooted_path(video_path, "/library"),
+            "TV/Season 1"
+        );
+        assert_eq!(
+            get_collection_and_file_from_rooted_path(video_path, "/library"),
+            ("TV/Season 1".to_string(), "episode.mkv".to_string())
+        );
+
+        let book_path = Path::new("/library/books/Fiction/Classics/novel.epub");
+        assert_eq!(
+            get_collection_from_rooted_path(book_path, "/library/books"),
+            "Fiction/Classics"
+        );
+        assert_eq!(
+            get_collection_and_file_from_rooted_path(book_path, "/library/books"),
+            ("Fiction/Classics".to_string(), "novel.epub".to_string())
+        );
+    }
+
+    #[test]
+    fn video_collection_helpers_preserve_legacy_nonportable_names() {
+        let root = std::env::temp_dir().join(format!(
+            "tvserver-video-collection-names-{}",
+            std::process::id()
+        ));
+        let colon_dir = root.join("Mission: Impossible");
+        std::fs::create_dir_all(&colon_dir).unwrap();
+        let colon_path = colon_dir.join("movie.mkv");
+        assert_eq!(
+            get_video_collection_from_rooted_path(&colon_dir, &root),
+            "Mission: Impossible"
+        );
+        assert_eq!(
+            get_video_collection_from_rooted_path(&colon_path, &root),
+            "Mission: Impossible"
+        );
+        assert_eq!(
+            get_video_collection_and_file_from_rooted_path(&colon_path, &root),
+            ("Mission: Impossible".to_string(), "movie.mkv".to_string())
+        );
+
+        #[cfg(unix)]
+        {
+            let backslash_dir = root.join(r"Manuals\Extras");
+            std::fs::create_dir_all(&backslash_dir).unwrap();
+            let backslash_path = backslash_dir.join("movie.mkv");
+            assert_eq!(
+                get_video_collection_from_rooted_path(&backslash_dir, &root),
+                r"Manuals\Extras"
+            );
+            assert_eq!(
+                get_video_collection_from_rooted_path(&backslash_path, &root),
+                r"Manuals\Extras"
+            );
+            assert_eq!(
+                get_video_collection_and_file_from_rooted_path(&backslash_path, &root),
+                (r"Manuals\Extras".to_string(), "movie.mkv".to_string())
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "webserver")]
+    #[test]
+    fn get_book_url_percent_encodes_each_path_segment() {
+        assert_eq!(
+            get_book_url("Programming/C# & Rust", "100%? Complete.epub"),
+            "/api/books/download/Programming/C%23%20%26%20Rust/100%25%3F%20Complete.epub"
         );
     }
 }

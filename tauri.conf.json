@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' ipc: http://ipc.localhost; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' blob:; img-src 'self' asset: http://asset.localhost data: blob:; font-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost blob:; frame-src blob:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost http://127.0.0.1:4081 ws: wss:; form-action 'none'; navigate-to 'self' http: https: mailto: tel:",
       "assetProtocol": {
         "enable": true,
         "scope": [

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 
+use super::book_event::BookEvent;
 use super::messages::{TaskState, RemotePlayerState, RemoteMessage};
 use super::media::MediaEvent;
 use super::video_event::VideoEvent;
@@ -13,6 +14,7 @@ use super::video_event::VideoEvent;
 pub enum LocalMessage {
     Media(MediaEvent),
     Task(Vec<TaskState>),
+    Book(BookEvent),
     Video(VideoEvent),
     PlayerState(RemotePlayerState),
     SendToRemote(SocketAddr, RemoteMessage),

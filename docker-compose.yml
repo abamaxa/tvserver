@@ -10,9 +10,12 @@ services:
     volumes:
       - .:/opt/tvserver
       - ${HOME}/Movies:/Movies
+      - ${HOME}/Books:/Books
       - .transmission/config:/config
       - .transmission/downloads:/downloads
       - .transmission/watch:/watch
+    environment:
+      - BOOK_DIR=/Books
     env_file:
       - .env
     restart: on-failure

@@ -5,6 +5,7 @@
 TV Server 
 - provides ad free viewing of videos published on the public internet.
 - connects Youtube to your TV and lets you control them with your mobile phone.
+- manages a local library of PDF and EPUB books alongside the video library.
 - is a thin wrapper around [FFmpeg](https://ffmpeg.org/), 
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [Transmission](https://transmissionbt.com/)
 
@@ -13,7 +14,7 @@ Architecturally, it consists of 3 components:
 - The remote control, which is a web app that acts as a remote control
 - The player, which is a web app that runs on the TV
 - The server, which is a daemon that hosts the player and remote control apps and handles downloading 
-and streaming movies; 
+and serving videos and books;
 
 ![Overview](docs/images/overview.svg)
 
@@ -41,17 +42,42 @@ NB YouTube search will not work until a key for the Google API is provided throu
 
 The tvserver daemon is configured through the following environment variables
 
-| Environment Variable | Description                                                                        |
-|----------------------|------------------------------------------------------------------------------------|
-| GOOGLE_KEY           | *A key to use with the Google API, see below for instructions for obtaining a key. |
-| MOVIE_DIR            | *The directory where movies will be stored.                                        |
-| CLIENT_DIR           | The directory contain the client apps, defaults to `clients`                       |
-| TRANSMISSION_URL     | URL to access the Transmission HTTP interface                                      |
-| TRANSMISSION_USER    | Username to access the Transmission HTTP interface                                 |
-| TRANSMISSION_PWD     | Password to access the Transmission HTTP interface                                 |
-| TORRENT_DIR          | The directory where torrent files are saved.                                       |
+| Environment Variable | Description                                                                                   |
+|----------------------|-----------------------------------------------------------------------------------------------|
+| GOOGLE_KEY           | *A key to use with the Google API, see below for instructions for obtaining a key.            |
+| MOVIE_DIR            | *The directory where movies will be stored.                                                   |
+| BOOK_DIR             | The directory where PDF and EPUB books will be stored; defaults to lowercase `books` beside `MOVIE_DIR`. |
+| BOOK_THUMBNAIL_DIR   | The directory for book covers; defaults to `<BOOK_DIR>/.thumbnails`.                           |
+| CLIENT_DIR           | The directory contain the client apps, defaults to `clients`                                  |
+| TRANSMISSION_URL     | URL to access the Transmission HTTP interface                                                 |
+| TRANSMISSION_USER    | Username to access the Transmission HTTP interface                                            |
+| TRANSMISSION_PWD     | Password to access the Transmission HTTP interface                                            |
+| TORRENT_DIR          | The directory where torrent files are saved.                                                  |
 
 `*` Required
+
+## Book Library
+
+PDF and EPUB books are stored separately from videos under `BOOK_DIR`. When unset, `BOOK_DIR`
+defaults to a lowercase `books` directory beside `MOVIE_DIR`. Book covers are written to
+`BOOK_THUMBNAIL_DIR`, which is optional and defaults to `<BOOK_DIR>/.thumbnails`. If a cover cannot
+be extracted, the bundled `assets/book/default-book.jpg` is materialized there as
+`default-book.jpg`. This shared fallback is preserved when books are deleted.
+
+The backend does not parse PDF metadata or render PDF pages. PDF files remain ingestible and
+downloadable: the original filename provides the fallback title, authors and page count remain
+empty, and the book uses `default-book.jpg`. Rich PDF metadata supplied by a frontend is not yet
+part of the backend API.
+
+EPUB metadata and cover extraction remain available in the backend and use bounded archive,
+document, and image-processing limits.
+
+The canonical frontend REST contract location is `docs/api/openapi.yaml`.
+
+## Development
+
+All ebook-support implementation branches must be based on `spec/ebook-support`, not directly on
+`main`, so they inherit the approved specification and implementation plan.
 
 ## Obtaining a Google API Key
 
@@ -128,5 +154,3 @@ Clicking brings up a dialog asking to confirm before downloading.
 ### The final tab provides a list of running tasks, e.g. downloads and conversions in progress.
 
 <img src="docs/images/tasks.png" alt="Task List" width="585"/>
-
-

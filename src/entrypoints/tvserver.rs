@@ -1,60 +1,70 @@
-use anyhow::Error;
 use crate::domain::messagebus::MessageFilter;
 use crate::domain::services::HistoryService;
-use crate::services::{
-    MetaDataManager, Monitor,
-};
+use crate::services::{MetaDataManager, MetaDataManagerHandle, Monitor};
+use anyhow::Error;
 use tokio::task::JoinHandle;
 
-use super::context::{Context, create_context};
+use super::context::{create_context, Context};
 
 pub struct TVServer {
     context: Context,
     monitor_handle: JoinHandle<()>,
-    metadata_manager: JoinHandle<()>,
+    metadata_manager: MetaDataManagerHandle,
     history_service: JoinHandle<()>,
 }
 
 impl TVServer {
     pub async fn new() -> Result<Self, Error> {
         let context = create_context().await?;
-        
+
         let monitor_handle = Monitor::start(
-            context.get_checker(),      
+            context.get_checker(),
+            context.get_book_checker(),
             context.get_task_manager(),
             context.get_store(),
             context.get_local_sender(),
         );
-    
+
         let metadata_manager = MetaDataManager::consume(
             context.get_repository(),
             context.get_store(),
-            context.listen_for_messages(MessageFilter::All).await
+            context.get_book_runtime().ingestion(),
+            context
+                .listen_for_messages(MessageFilter::All)
+                .await
                 .map_err(|e| anyhow::anyhow!("failed to listen for messages: {}", e))?,
             context.get_local_sender(),
             context.get_spawner(),
         );
 
-        let hs = HistoryService::new(  
-            context.get_repository(),
-            context.get_local_sender(),
-        );
+        let hs = HistoryService::new(context.get_repository(), context.get_local_sender());
 
         let history_service = hs.observe(
-            context.listen_for_messages(MessageFilter::PlayerState).await
-                .map_err(|e| anyhow::anyhow!("failed to listen for player state: {}", e))?
+            context
+                .listen_for_messages(MessageFilter::PlayerState)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to listen for player state: {}", e))?,
         );
-        
-        Ok(Self { context, monitor_handle, metadata_manager, history_service })
+
+        Ok(Self {
+            context,
+            monitor_handle,
+            metadata_manager,
+            history_service,
+        })
     }
 
     pub fn get_context(&self) -> &Context {
         &self.context
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(self) {
         self.monitor_handle.abort();
-        self.metadata_manager.abort();
         self.history_service.abort();
+        if let Err(error) = self.metadata_manager.shutdown().await {
+            tracing::error!("metadata manager shutdown failed: {error}");
+        }
+        let _ = self.monitor_handle.await;
+        let _ = self.history_service.await;
     }
 }

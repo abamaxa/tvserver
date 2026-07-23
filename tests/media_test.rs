@@ -1,3 +1,5 @@
+#![cfg(feature = "webserver")]
+
 mod common;
 
 use crate::common::{get_context, get_repository, get_task_manager};
