@@ -20,12 +20,20 @@ use reqwest::{
     header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, IF_RANGE, RANGE},
     StatusCode,
 };
-use std::env;
-use std::sync::Arc;
+use std::{env, fs::File, path::PathBuf, sync::Arc};
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
+const MAX_VIDEO_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
+struct TestFileGuard(PathBuf);
+
+impl Drop for TestFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 
 #[tokio::test]
 async fn test_video_stream_supports_byte_ranges() -> Result<()> {
@@ -83,6 +91,75 @@ async fn test_video_stream_supports_byte_ranges() -> Result<()> {
             assert!(response.bytes().await?.is_empty(), "{range}");
         }
     }
+
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn test_video_stream_caps_oversized_byte_ranges() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+    let fixture_path = PathBuf::from(TEST_MOVIR_DIR).join("large-range-test.mp4");
+    let _fixture = TestFileGuard(fixture_path.clone());
+    let fixture_size = MAX_VIDEO_RANGE_BYTES + 10;
+    let file = File::create(&fixture_path)?;
+    file.set_len(fixture_size)?;
+
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+    let store = Arc::new(MediaStore::new(file_storer, repo));
+    let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
+    let context = get_context(
+        store,
+        searcher,
+        get_task_manager(),
+        get_repository().await,
+        get_checker(),
+    )
+    .await?;
+    let server = common::create_server(context, 57193).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57193/api/stream/large-range-test.mp4";
+
+    for range in ["bytes=0-", "bytes=0-8388617"] {
+        let response = client.get(url).header(RANGE, range).send().await?;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(
+            response.headers()[CONTENT_RANGE],
+            format!("bytes 0-{}/{}", MAX_VIDEO_RANGE_BYTES - 1, fixture_size),
+            "{range}"
+        );
+        assert_eq!(
+            response.headers()[CONTENT_LENGTH],
+            MAX_VIDEO_RANGE_BYTES.to_string(),
+            "{range}"
+        );
+        assert_eq!(
+            response.bytes().await?.len(),
+            MAX_VIDEO_RANGE_BYTES as usize,
+            "{range}"
+        );
+    }
+
+    let suffix = client
+        .get(url)
+        .header(RANGE, "bytes=-8388618")
+        .send()
+        .await?;
+    assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        suffix.headers()[CONTENT_RANGE],
+        format!(
+            "bytes {}-{}/{}",
+            fixture_size - MAX_VIDEO_RANGE_BYTES,
+            fixture_size - 1,
+            fixture_size
+        )
+    );
+    assert_eq!(
+        suffix.headers()[CONTENT_LENGTH],
+        MAX_VIDEO_RANGE_BYTES.to_string()
+    );
+    assert_eq!(suffix.bytes().await?.len(), MAX_VIDEO_RANGE_BYTES as usize);
 
     Ok(server.abort())
 }

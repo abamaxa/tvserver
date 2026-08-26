@@ -27,11 +27,14 @@ use axum::{
     routing::get,
     Router,
 };
+use http_range_header::{parse_range_header, EndPosition, StartPosition};
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
+
+const MAX_VIDEO_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
 const READER_CONTENT_SECURITY_POLICY: &str = concat!(
     "default-src 'self'; ",
@@ -67,12 +70,60 @@ async fn empty_unsatisfiable_range_body(request: Request<Body>, next: Next) -> R
     response
 }
 
+fn normalize_static_file_request(request: &mut Request<Body>) -> bool {
+    if request.method() != Method::GET || request.headers().contains_key(IF_RANGE) {
+        request.headers_mut().remove(RANGE);
+        return false;
+    }
+
+    true
+}
+
+fn capped_video_range(range: &HeaderValue) -> Option<HeaderValue> {
+    let parsed = parse_range_header(range.to_str().ok()?).ok()?;
+    let [range] = parsed.ranges.as_slice() else {
+        return None;
+    };
+
+    let value = match (range.start, range.end) {
+        (StartPosition::Index(start), EndPosition::LastByte) => {
+            format!(
+                "bytes={start}-{}",
+                start.saturating_add(MAX_VIDEO_RANGE_BYTES - 1)
+            )
+        }
+        (StartPosition::Index(start), EndPosition::Index(end))
+            if end > start.saturating_add(MAX_VIDEO_RANGE_BYTES - 1) =>
+        {
+            format!(
+                "bytes={start}-{}",
+                start.saturating_add(MAX_VIDEO_RANGE_BYTES - 1)
+            )
+        }
+        (StartPosition::FromLast(suffix), EndPosition::LastByte)
+            if suffix > MAX_VIDEO_RANGE_BYTES =>
+        {
+            format!("bytes=-{MAX_VIDEO_RANGE_BYTES}")
+        }
+        _ => return None,
+    };
+
+    HeaderValue::from_str(&value).ok()
+}
+
 async fn conservatively_normalize_static_file_request(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if request.method() != Method::GET || request.headers().contains_key(IF_RANGE) {
-        request.headers_mut().remove(RANGE);
+    normalize_static_file_request(&mut request);
+    next.run(request).await
+}
+
+async fn normalize_video_stream_request(mut request: Request<Body>, next: Next) -> Response {
+    if normalize_static_file_request(&mut request) {
+        if let Some(range) = request.headers().get(RANGE).and_then(capped_video_range) {
+            request.headers_mut().insert(RANGE, range);
+        }
     }
     next.run(request).await
 }
@@ -114,7 +165,7 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
     // Unprotected routes: streaming and thumbnails (need external access for casting)
     let video_stream_service = Router::new()
         .fallback_service(ServeDir::new(&movie_dir))
-        .layer(middleware::from_fn(conservatively_normalize_static_file_request));
+        .layer(middleware::from_fn(normalize_video_stream_request));
 
     let mut unprotected_routes = Router::new()
         .route(
