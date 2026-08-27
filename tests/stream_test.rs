@@ -17,7 +17,7 @@ use axum::{
 };
 use common::{get_checker, get_pirate_search};
 use reqwest::{
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, IF_RANGE, RANGE},
+    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE},
     StatusCode,
 };
 use std::{env, fs::File, path::PathBuf, sync::Arc};
@@ -140,6 +140,27 @@ async fn test_video_stream_caps_oversized_byte_ranges() -> Result<()> {
         );
     }
 
+    let etag = client.head(url).send().await?.headers()[ETAG].clone();
+    let matching_if_range = client
+        .get(url)
+        .header(RANGE, "bytes=0-")
+        .header(IF_RANGE, etag)
+        .send()
+        .await?;
+    assert_eq!(matching_if_range.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        matching_if_range.headers()[CONTENT_RANGE],
+        format!("bytes 0-{}/{}", MAX_VIDEO_RANGE_BYTES - 1, fixture_size)
+    );
+    assert_eq!(
+        matching_if_range.headers()[CONTENT_LENGTH],
+        MAX_VIDEO_RANGE_BYTES.to_string()
+    );
+    assert_eq!(
+        matching_if_range.bytes().await?.len(),
+        MAX_VIDEO_RANGE_BYTES as usize
+    );
+
     let suffix = client
         .get(url)
         .header(RANGE, "bytes=-8388618")
@@ -216,19 +237,86 @@ async fn test_video_stream_conservatively_ignores_if_range() -> Result<()> {
     let url = "http://localhost:57192/api/stream/test.mp4";
     let fixture: Vec<u8> = (0_u8..=255).collect();
 
-    let response = client
+    for validator in [
+        "\"stale-validator\"",
+        "W/\"weak-validator\"",
+        "not-a-validator",
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+    ] {
+        let response = client
+            .get(url)
+            .header(RANGE, "bytes=0-9")
+            .header(IF_RANGE, validator)
+            .header("X-Real-IP", "8.8.8.8")
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK, "{validator}");
+        assert_eq!(response.headers()[ACCEPT_RANGES], "bytes", "{validator}");
+        assert_eq!(response.headers()[CONTENT_LENGTH], "256", "{validator}");
+        assert!(
+            response.headers().get(CONTENT_RANGE).is_none(),
+            "{validator}"
+        );
+        assert_eq!(
+            response.bytes().await?.as_ref(),
+            fixture.as_slice(),
+            "{validator}"
+        );
+    }
+
+    let mut duplicate_request = client
         .get(url)
         .header(RANGE, "bytes=0-9")
-        .header(IF_RANGE, "\"stale-validator\"")
-        .header("X-Real-IP", "8.8.8.8")
-        .send()
-        .await?;
+        .header(IF_RANGE, "\"first-validator\"")
+        .build()?;
+    duplicate_request
+        .headers_mut()
+        .append(IF_RANGE, "\"second-validator\"".parse()?);
+    let duplicate = client.execute(duplicate_request).await?;
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    assert_eq!(duplicate.headers()[CONTENT_LENGTH], "256");
+    assert!(duplicate.headers().get(CONTENT_RANGE).is_none());
+    assert_eq!(duplicate.bytes().await?.as_ref(), fixture.as_slice());
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[ACCEPT_RANGES], "bytes");
-    assert_eq!(response.headers()[CONTENT_LENGTH], "256");
-    assert!(response.headers().get(CONTENT_RANGE).is_none());
-    assert_eq!(response.bytes().await?.as_ref(), fixture.as_slice());
+    Ok(server.abort())
+}
+
+#[tokio::test]
+async fn test_video_stream_honors_matching_if_range() -> Result<()> {
+    env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
+
+    let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
+    let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
+    let store = Arc::new(MediaStore::new(file_storer, repo));
+    let searcher = get_pirate_search("torrents_get.json", "pb_search.html").await;
+    let context = get_context(
+        store,
+        searcher,
+        get_task_manager(),
+        get_repository().await,
+        get_checker(),
+    )
+    .await?;
+    let server = common::create_server(context, 57194).await;
+    let client = reqwest::Client::builder().no_proxy().build()?;
+    let url = "http://localhost:57194/api/stream/test.mp4";
+    let metadata = client.head(url).send().await?;
+    let fixture: Vec<u8> = (0_u8..=255).collect();
+
+    for validator in [metadata.headers()[ETAG].clone(), metadata.headers()[LAST_MODIFIED].clone()] {
+        let response = client
+            .get(url)
+            .header(RANGE, "bytes=240-255")
+            .header(IF_RANGE, validator)
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[CONTENT_RANGE], "bytes 240-255/256");
+        assert_eq!(response.headers()[CONTENT_LENGTH], "16");
+        assert_eq!(response.bytes().await?.as_ref(), &fixture[240..=255]);
+    }
 
     Ok(server.abort())
 }

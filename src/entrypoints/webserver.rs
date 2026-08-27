@@ -18,7 +18,7 @@ use axum::{
     body::Body,
     extract::Request,
     http::{
-        header::{IF_RANGE, RANGE},
+        header::{IF_MATCH, IF_RANGE, IF_UNMODIFIED_SINCE, RANGE},
         HeaderName, HeaderValue, Method, StatusCode,
     },
     middleware,
@@ -71,7 +71,7 @@ async fn empty_unsatisfiable_range_body(request: Request<Body>, next: Next) -> R
 }
 
 fn normalize_static_file_request(request: &mut Request<Body>) -> bool {
-    if request.method() != Method::GET || request.headers().contains_key(IF_RANGE) {
+    if request.method() != Method::GET {
         request.headers_mut().remove(RANGE);
         return false;
     }
@@ -115,15 +115,84 @@ async fn conservatively_normalize_static_file_request(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    normalize_static_file_request(&mut request);
+    if normalize_static_file_request(&mut request) && request.headers().contains_key(IF_RANGE) {
+        request.headers_mut().remove(RANGE);
+    }
     next.run(request).await
 }
 
+fn if_range_precondition(if_range: &HeaderValue) -> Option<HeaderName> {
+    let validator = if_range.as_bytes();
+    let is_strong_etag = validator.len() >= 2
+        && validator.first() == Some(&b'"')
+        && validator.last() == Some(&b'"')
+        && validator[1..validator.len() - 1]
+            .iter()
+            .all(|byte| matches!(*byte, 0x21 | 0x23..=0x7e | 0x80..=0xff));
+
+    if is_strong_etag {
+        return Some(IF_MATCH);
+    }
+
+    if_range
+        .to_str()
+        .ok()
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .map(|_| IF_UNMODIFIED_SINCE)
+}
+
+fn retry_without_range(request: &Request<Body>) -> Request<Body> {
+    let mut retry = Request::new(Body::empty());
+    *retry.method_mut() = request.method().clone();
+    *retry.uri_mut() = request.uri().clone();
+    *retry.version_mut() = request.version();
+    *retry.headers_mut() = request.headers().clone();
+    retry.headers_mut().remove(RANGE);
+    retry.headers_mut().remove(IF_RANGE);
+    retry
+}
+
 async fn normalize_video_stream_request(mut request: Request<Body>, next: Next) -> Response {
-    if normalize_static_file_request(&mut request) {
+    if !normalize_static_file_request(&mut request) || !request.headers().contains_key(RANGE) {
+        return next.run(request).await;
+    }
+
+    let mut if_ranges = request.headers().get_all(IF_RANGE).iter();
+    let if_range = if_ranges.next().cloned();
+    if if_ranges.next().is_some() {
+        request.headers_mut().remove(RANGE);
+        return next.run(request).await;
+    }
+
+    if let Some(if_range) = if_range {
+        if request.headers().contains_key(IF_MATCH)
+            || request.headers().contains_key(IF_UNMODIFIED_SINCE)
+        {
+            request.headers_mut().remove(RANGE);
+            return next.run(request).await;
+        }
+
+        let Some(precondition) = if_range_precondition(&if_range) else {
+            request.headers_mut().remove(RANGE);
+            return next.run(request).await;
+        };
+        let retry = retry_without_range(&request);
+        request.headers_mut().remove(IF_RANGE);
+        request.headers_mut().insert(precondition, if_range);
+
         if let Some(range) = request.headers().get(RANGE).and_then(capped_video_range) {
             request.headers_mut().insert(RANGE, range);
         }
+
+        let response = next.clone().run(request).await;
+        if response.status() == StatusCode::PRECONDITION_FAILED {
+            return next.run(retry).await;
+        }
+        return response;
+    }
+
+    if let Some(range) = request.headers().get(RANGE).and_then(capped_video_range) {
+        request.headers_mut().insert(RANGE, range);
     }
     next.run(request).await
 }
@@ -275,5 +344,67 @@ mod security_tests {
         assert!(!script_sources_are_self_only(
             "SCRIPT-SRC https://evil; script-src 'self'"
         ));
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    use axum::{body::to_bytes, http::header::ETAG};
+    use tower::ServiceExt;
+
+    async fn replaced_video(request: Request<Body>) -> Response {
+        if request.method() == Method::HEAD {
+            return Response::builder()
+                .header(ETAG, "\"old\"")
+                .body(Body::empty())
+                .unwrap();
+        }
+
+        if request.headers().get("if-match") != Some(&HeaderValue::from_static("\"new\""))
+            && request.headers().contains_key("if-match")
+        {
+            return Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .body(Body::empty())
+                .unwrap();
+        }
+
+        if request.headers().contains_key(RANGE) {
+            return Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header("content-range", "bytes 0-2/8")
+                .body(Body::from("new"))
+                .unwrap();
+        }
+
+        Response::new(Body::from("new full"))
+    }
+
+    #[tokio::test]
+    async fn if_range_rechecks_a_replaced_representation() {
+        let app = Router::new()
+            .route("/video", get(replaced_video))
+            .layer(middleware::from_fn(normalize_video_stream_request));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/video")
+                    .header(RANGE, "bytes=0-2")
+                    .header(IF_RANGE, "\"old\"")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("content-range").is_none());
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            "new full"
+        );
     }
 }
