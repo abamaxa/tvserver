@@ -20,12 +20,12 @@ use reqwest::{
     header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE},
     StatusCode,
 };
-use std::{env, fs::File, path::PathBuf, sync::Arc};
+use std::{env, path::PathBuf, sync::Arc};
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 const TEST_MOVIR_DIR: &str = "tests/fixtures/media_dir";
-const MAX_VIDEO_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+const LARGE_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
 struct TestFileGuard(PathBuf);
 
@@ -96,13 +96,16 @@ async fn test_video_stream_supports_byte_ranges() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_video_stream_caps_oversized_byte_ranges() -> Result<()> {
+async fn test_video_stream_delivers_complete_large_byte_ranges() -> Result<()> {
     env::set_var(MOVIE_DIR, TEST_MOVIR_DIR);
     let fixture_path = PathBuf::from(TEST_MOVIR_DIR).join("large-range-test.mp4");
     let _fixture = TestFileGuard(fixture_path.clone());
-    let fixture_size = MAX_VIDEO_RANGE_BYTES + 10;
-    let file = File::create(&fixture_path)?;
-    file.set_len(fixture_size)?;
+    let fixture_size = LARGE_RANGE_BYTES + 1024;
+    // Nonuniform bytes catch shifted suffixes and resumed offsets.
+    let fixture: Vec<u8> = (0..fixture_size)
+        .map(|offset| ((offset + offset / 251) % 256) as u8)
+        .collect();
+    std::fs::write(&fixture_path, &fixture)?;
 
     let file_storer: FileStorer = Arc::new(FileSystemStore::new(TEST_MOVIR_DIR));
     let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await.unwrap());
@@ -120,67 +123,50 @@ async fn test_video_stream_caps_oversized_byte_ranges() -> Result<()> {
     let client = reqwest::Client::builder().no_proxy().build()?;
     let url = "http://localhost:57193/api/stream/large-range-test.mp4";
 
-    for range in ["bytes=0-", "bytes=0-8388617"] {
-        let response = client.get(url).header(RANGE, range).send().await?;
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
-        assert_eq!(
-            response.headers()[CONTENT_RANGE],
-            format!("bytes 0-{}/{}", MAX_VIDEO_RANGE_BYTES - 1, fixture_size),
-            "{range}"
-        );
-        assert_eq!(
-            response.headers()[CONTENT_LENGTH],
-            MAX_VIDEO_RANGE_BYTES.to_string(),
-            "{range}"
-        );
-        assert_eq!(
-            response.bytes().await?.len(),
-            MAX_VIDEO_RANGE_BYTES as usize,
-            "{range}"
-        );
+    let metadata = client.head(url).send().await?;
+    let validators = [
+        None,
+        Some(metadata.headers()[ETAG].clone()),
+        Some(metadata.headers()[LAST_MODIFIED].clone()),
+    ];
+    let cases = [
+        ("bytes=0-".to_owned(), 0, fixture_size - 1),
+        (format!("bytes=0-{}", fixture_size - 1), 0, fixture_size - 1),
+        ("bytes=123-".to_owned(), 123, fixture_size - 1),
+        (
+            format!("bytes=123-{}", fixture_size - 124),
+            123,
+            fixture_size - 124,
+        ),
+        (format!("bytes=-{}", fixture_size - 123), 123, fixture_size - 1),
+        (format!("bytes=-{fixture_size}"), 0, fixture_size - 1),
+        (format!("bytes=123-{}", fixture_size + 1), 123, fixture_size - 1),
+    ];
+    for validator in validators {
+        for (range, start, end) in &cases {
+            let mut request = client.get(url).header(RANGE, range);
+            if let Some(validator) = &validator {
+                request = request.header(IF_RANGE, validator);
+            }
+            let response = request.send().await?;
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{range}");
+            assert_eq!(response.headers()[ACCEPT_RANGES], "bytes", "{range}");
+            assert_eq!(
+                response.headers()[CONTENT_RANGE],
+                format!("bytes {start}-{end}/{fixture_size}"),
+                "{range} with {validator:?}"
+            );
+            assert_eq!(
+                response.headers()[CONTENT_LENGTH],
+                (end - start + 1).to_string(),
+                "{range}"
+            );
+            let body = response.bytes().await?;
+            let expected = &fixture[*start as usize..=*end as usize];
+            assert_eq!(body.len(), expected.len(), "{range}");
+            assert!(body.as_ref() == expected, "incorrect bytes for {range}");
+        }
     }
-
-    let etag = client.head(url).send().await?.headers()[ETAG].clone();
-    let matching_if_range = client
-        .get(url)
-        .header(RANGE, "bytes=0-")
-        .header(IF_RANGE, etag)
-        .send()
-        .await?;
-    assert_eq!(matching_if_range.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(
-        matching_if_range.headers()[CONTENT_RANGE],
-        format!("bytes 0-{}/{}", MAX_VIDEO_RANGE_BYTES - 1, fixture_size)
-    );
-    assert_eq!(
-        matching_if_range.headers()[CONTENT_LENGTH],
-        MAX_VIDEO_RANGE_BYTES.to_string()
-    );
-    assert_eq!(
-        matching_if_range.bytes().await?.len(),
-        MAX_VIDEO_RANGE_BYTES as usize
-    );
-
-    let suffix = client
-        .get(url)
-        .header(RANGE, "bytes=-8388618")
-        .send()
-        .await?;
-    assert_eq!(suffix.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(
-        suffix.headers()[CONTENT_RANGE],
-        format!(
-            "bytes {}-{}/{}",
-            fixture_size - MAX_VIDEO_RANGE_BYTES,
-            fixture_size - 1,
-            fixture_size
-        )
-    );
-    assert_eq!(
-        suffix.headers()[CONTENT_LENGTH],
-        MAX_VIDEO_RANGE_BYTES.to_string()
-    );
-    assert_eq!(suffix.bytes().await?.len(), MAX_VIDEO_RANGE_BYTES as usize);
 
     Ok(server.abort())
 }
