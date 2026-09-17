@@ -289,7 +289,14 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
     if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
         for stream in streams {
             match stream.get("codec_type").and_then(Value::as_str) {
-                Some("video") if video_stream.is_none() => {
+                Some("video")
+                    if video_stream.is_none()
+                        && stream
+                            .get("disposition")
+                            .and_then(|disposition| disposition.get("attached_pic"))
+                            .and_then(Value::as_u64)
+                            != Some(1) =>
+                {
                     video_stream = Some(stream);
                 }
                 Some("audio") => {
@@ -300,8 +307,6 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
         }
     }
 
-    let video_stream = video_stream.ok_or("No video stream found")?;
-
     let duration = json
         .get("format")
         .and_then(|f| f.get("duration"))
@@ -309,25 +314,38 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
         .ok_or("No duration found")?
         .parse::<f64>()?;
 
-    let width = video_stream
-        .get("width")
-        .and_then(Value::as_u64)
-        .ok_or("No width found")? as u32;
-
-    let height = video_stream
-        .get("height")
-        .and_then(Value::as_u64)
-        .ok_or("No height found")? as u32;
-
-    let (aspect_width, aspect_height) = match video_stream.get("display_aspect_ratio") {
-        Some(Value::String(aspect_ratio)) => {
-            let aspect_ratio_parts: Vec<&str> = aspect_ratio.splitn(2, ":").collect();
-            match aspect_ratio_parts.as_slice() {
-                [width, height] => (width.parse::<u32>()?, height.parse::<u32>()?),
-                _ => (width, height),
-            }
+    let (width, height, aspect_width, aspect_height) = match video_stream {
+        Some(video_stream) => {
+            let width = video_stream
+                .get("width")
+                .and_then(Value::as_u64)
+                .ok_or("No width found")? as u32;
+            let height = video_stream
+                .get("height")
+                .and_then(Value::as_u64)
+                .ok_or("No height found")? as u32;
+            let (aspect_width, aspect_height) =
+                match video_stream.get("display_aspect_ratio") {
+                    Some(Value::String(aspect_ratio)) => {
+                        let aspect_ratio_parts: Vec<&str> = aspect_ratio.splitn(2, ":").collect();
+                        match aspect_ratio_parts.as_slice() {
+                            [width, height] => {
+                                (width.parse::<u32>()?, height.parse::<u32>()?)
+                            }
+                            _ => (width, height),
+                        }
+                    }
+                    _ => (width, height),
+                };
+            (width, height, aspect_width, aspect_height)
         }
-        _ => (width, height),
+        None if audio_track_count > 0 => (0, 0, 1, 1),
+        None => {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "No audio or video stream found",
+            )))
+        }
     };
 
     Ok(VideoMetadata {
@@ -347,6 +365,10 @@ async fn extract_random_frame<P: AsRef<Path>>(
     input_path: P,
     metadata: &VideoMetadata,
 ) -> io::Result<Vec<String>> {
+    if metadata.width == 0 || metadata.height == 0 {
+        return Ok(vec![]);
+    }
+
     // Get video duration
     let mut duration = metadata.duration;
     
@@ -443,4 +465,85 @@ fn get_thumbnail_path_with_size<P: AsRef<Path>>(thumbnail_dir: &PathBuf, video: 
         .replace(')', "_");
     let output_filename = format!("{}_thumbnail_{}.jpg", sanitized_filename, width);
     thumbnail_dir.join(output_filename)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_random_frame, get_video_metadata};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use rand::random;
+    use std::path::PathBuf;
+
+    const AUDIO_ONLY_MP3: &str = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYyLjEyLjEwMAAAAAAAAAAAAAAA/+MYxAAMSJKUeU8AAAQJKAL3ve973vSlKUpSlL3u/f337xKp8t4t4m4uZc1WGxACAYrB9//+U9/R/gQ5z/QqJoc4WcQ3/GVE/+MYxAkO8PKQAZRQACo5Qhb/Bt4P1A9yADKiJOAfEwHMjrA71MPfAlAKgKisIoRX/5CPR6RD4fAr/hIGhKEgauAgACHD/76v/+MYxAgMkJaOedUAAv//UpJ0hyhZQW6ANVQAwMEHEWN0wV/2BMp+7//+1d/0sXZ9WUq1///e2moQAAQCAQT/X//mA5BIjLiC/+MYxBAM+KJmWVUAAoGegYZE4GNTiB1vtgcACg9B7Yg8Y8k5hr///6f/////b///096sWIdf6Ivrr//P7FC+jlv0un8cdS+F/+MYxBcSYRqUAZpYAIHgqjXkFTRtVwQT7l3GJPn6wNAMjqBCIMkI1P74qvrWLjpqom9b/gYWIgEV/+SAwswwtaRNaqhZ8lUK/+MYxAgL4LWwAckAARxZE0mh2Mck1KVkQqFUyEMktERCSocWRNWhKmwn5BWILCd//0F4NxVMQU1FMy4xMDBVVVVVVVVVVVVV";
+    const AUDIO_ONLY_MP3_WITH_COVER: &str = "SUQzAwAAAAABGFRTU0UAAAAPAAAATGF2ZjYyLjEyLjEwMABBUElDAAAAawAAAGltYWdlL3BuZwAAAIlQTkcNChoKAAAADUlIRFIAAAACAAAAAggCAAAA/dSacwAAAAlwSFlzAAAAAQAAAAEATyXE1gAAABBJREFUeJxj/MMAAixgkgEADQQBAr9QFbMAAAAASUVORK5CYIIAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAABgAAAogAcXFxcXFxcXFxcXFxcXFxcY6Ojo6Ojo6Ojo6Ojo6Ojo6OqqqqqqqqqqqqqqqqqqqqqsfHx8fHx8fHx8fHx8fHx8fH4+Pj4+Pj4+Pj4+Pj4+Pj4+P/////////////////////AAAAAExhdmYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKIQfZkkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+MYxAAMSJKUeU8AAAQJKAL3ve973vSlKUpSlL3u/f337xKp8t4t4m4uZc1WGxACAYrB9//+U9/R/gQ5z/QqJoc4WcQ3/GVE/+MYxAkO8PKQAZRQACo5Qhb/Bt4P1A9yADKiJOAfEwHMjrA71MPfAlAKgKisIoRX/5CPR6RD4fAr/hIGhKEgauAgACHD/76v/+MYxAgMkJaOedUAAv//UpJ0hyhZQW6ANVQAwMEHEWN0wV/2BMp+7//+1d/0sXZ9WUq1///e2moQAAQCAQT/X//mA5BIjLiC/+MYxBAM+KJmWVUAAoGegYZE4GNTiB1vtgcACg9B7Yg8Y8k5hr///6f/////b///096sWIdf6Ivrr//P7FC+jlv0un8cdS+F/+MYxBcSYRqUAZpYAIHgqjXkFTRtVwQT7l3GJPn6wNAMjqBCIMkI1P74qvrWLjpqom9b/gYWIgEV/+SAwswwtaRNaqhZ8lUK/+MYxAgL4LWwAckAARxZE0mh2Mck1KVkQqFUyEMktERCSocWRNWhKmwn5BWILCd//0F4NxVMQU1FMy4xMDBVVVVVVVVVVVVV";
+
+    struct TestFile(PathBuf);
+
+    impl TestFile {
+        async fn audio_only_mp3() -> Self {
+            Self::from_base64("audio-only", AUDIO_ONLY_MP3).await
+        }
+
+        async fn audio_only_mp3_with_cover() -> Self {
+            Self::from_base64("audio-only-with-cover", AUDIO_ONLY_MP3_WITH_COVER).await
+        }
+
+        async fn from_base64(label: &str, data: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tvserver-{}-{}-{}.mp3",
+                label,
+                std::process::id(),
+                random::<u64>()
+            ));
+            let bytes = STANDARD.decode(data).unwrap();
+            tokio::fs::write(&path, bytes).await.unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_only_mp3_has_metadata_and_does_not_require_a_thumbnail() {
+        let file = TestFile::audio_only_mp3().await;
+
+        let metadata = get_video_metadata(&file.0)
+            .await
+            .expect("audio-only MP3 metadata should be accepted");
+
+        assert!(metadata.duration > 0.0);
+        assert_eq!(metadata.width, 0);
+        assert_eq!(metadata.height, 0);
+        assert_eq!(metadata.aspect_width, 1);
+        assert_eq!(metadata.aspect_height, 1);
+        assert_eq!(metadata.audio_tracks, 1);
+        assert_eq!(metadata.audio_track_list.as_ref().unwrap().len(), 1);
+        assert!(extract_random_frame(&file.0, &metadata)
+            .await
+            .expect("audio-only media should skip frame extraction")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn attached_cover_art_does_not_turn_audio_only_mp3_into_video() {
+        let file = TestFile::audio_only_mp3_with_cover().await;
+
+        let metadata = get_video_metadata(&file.0)
+            .await
+            .expect("MP3 with attached cover art should be accepted as audio-only");
+
+        assert_eq!(metadata.width, 0);
+        assert_eq!(metadata.height, 0);
+        assert_eq!(metadata.aspect_width, 1);
+        assert_eq!(metadata.aspect_height, 1);
+        assert_eq!(metadata.audio_tracks, 1);
+        assert!(extract_random_frame(&file.0, &metadata)
+            .await
+            .expect("attached cover art should not trigger video-frame extraction")
+            .is_empty());
+    }
 }
