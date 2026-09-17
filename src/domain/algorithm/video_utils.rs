@@ -115,6 +115,8 @@ mod tests {
             ("TV2", false),
             ("file.py", true),
             ("file.mp4", false),
+            ("audio.flac", false),
+            ("audio.FLAC", false),
             ("book.pdf", false),
             ("BOOK.PDF", false),
             ("book.epub", false),
@@ -133,7 +135,7 @@ mod tests {
         for name in ["manual.pdf", "MANUAL.PDF", "novel.epub", "NOVEL.EPUB"] {
             assert!(!is_video_scan_candidate(name), "movie scan admitted {name}");
         }
-        for name in ["movie.mp4", "MOVIE.MKV", "legacy-file"] {
+        for name in ["movie.mp4", "MOVIE.MKV", "track.flac", "TRACK.FLAC", "legacy-file"] {
             assert!(is_video_scan_candidate(name), "movie scan rejected {name}");
         }
         for name in [".hidden.mp4", "partial.tmp.mp4", "cover.jpg"] {

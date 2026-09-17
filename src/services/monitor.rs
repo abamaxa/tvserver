@@ -23,7 +23,15 @@ impl Monitor {
     ) -> JoinHandle<()> {
         task::spawn(async move {
             tracing::info!("updating yt-dlp");
-            task_manager.execute("Update yt-dlp", "pip", vec!["install", "--upgrade", "yt-dlp"]).await;
+            // YouTube's JavaScript challenge solver is a separate dependency;
+            // upgrade it together with yt-dlp to keep their versions compatible.
+            task_manager
+                .execute(
+                    "Update yt-dlp",
+                    "python3",
+                    vec!["-m", "pip", "install", "--upgrade", "yt-dlp[default]"],
+                )
+                .await;
 
             tracing::info!("starting download monitor");
             let monitor = Self {

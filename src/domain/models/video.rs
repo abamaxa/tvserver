@@ -237,17 +237,30 @@ impl VideoDetails {
     }
 
     pub fn should_retry_metadata(&self) -> bool {
-        if self.metadata.duration == 0. || self.metadata.height == 0 {
+        if !self.has_complete_metadata() {
             return !Self::is_older_than_x_hours(self.updated_on, 24);
         }
         false
     }
 
     pub fn should_delete(&self) -> bool {
-        if self.metadata.duration == 0. || self.metadata.height == 0 {
+        if !self.has_complete_metadata() {
             return Self::is_older_than_x_hours(self.updated_on, 24);
         }
         false
+    }
+
+    fn has_complete_metadata(&self) -> bool {
+        self.metadata.duration > 0.
+            && (self.metadata.height > 0 || self.has_audio_only_metadata())
+    }
+
+    fn has_audio_only_metadata(&self) -> bool {
+        self.metadata.width == 0
+            && self.metadata.height == 0
+            && self.metadata.aspect_width == 1
+            && self.metadata.aspect_height == 1
+            && self.metadata.audio_tracks > 0
     }
 
     fn is_older_than_x_hours(given_datetime: NaiveDateTime, num_hours: i64) -> bool {
@@ -497,5 +510,61 @@ pub mod test {
             let result = SeriesDetails::parse_file_name_with_series(test, None);
             assert_eq!(result, expected);
         }
+    }
+
+    fn audio_only_details() -> VideoDetails {
+        VideoDetails {
+            metadata: VideoMetadata {
+                duration: 60.0,
+                aspect_width: 1,
+                aspect_height: 1,
+                audio_tracks: 1,
+                ..VideoMetadata::default()
+            },
+            updated_on: Local::now().naive_utc(),
+            ..VideoDetails::default()
+        }
+    }
+
+    #[test]
+    fn recent_audio_only_metadata_does_not_retry() {
+        assert!(!audio_only_details().should_retry_metadata());
+    }
+
+    #[test]
+    fn older_audio_only_metadata_is_not_deleted() {
+        let mut details = audio_only_details();
+        details.updated_on = Local::now().naive_utc() - Duration::hours(25);
+
+        assert!(!details.should_delete());
+    }
+
+    fn incomplete_video_details() -> VideoDetails {
+        VideoDetails {
+            metadata: VideoMetadata {
+                duration: 60.0,
+                width: 1920,
+                height: 0,
+                aspect_width: 16,
+                aspect_height: 9,
+                audio_tracks: 1,
+                ..VideoMetadata::default()
+            },
+            updated_on: Local::now().naive_utc(),
+            ..VideoDetails::default()
+        }
+    }
+
+    #[test]
+    fn recent_zero_height_video_metadata_still_retries() {
+        assert!(incomplete_video_details().should_retry_metadata());
+    }
+
+    #[test]
+    fn older_zero_height_video_metadata_is_still_deleted() {
+        let mut details = incomplete_video_details();
+        details.updated_on = Local::now().naive_utc() - Duration::hours(25);
+
+        assert!(details.should_delete());
     }
 }

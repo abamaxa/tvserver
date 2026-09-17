@@ -38,6 +38,30 @@ $ docker compose up
 NB YouTube search will not work until a key for the Google API is provided through the 
 `GOOGLE_KEY` environment variable - ([see below](#obtaining-a-google-api-key)).
 
+### YouTube download dependencies
+
+Downloads require FFmpeg, Python 3.10 or newer, and Node.js 22 or newer on the
+server's `PATH`. Install yt-dlp with its YouTube challenge solver dependencies:
+
+```shell
+python3 -m pip install --upgrade "yt-dlp[default]"
+```
+
+The server runs this upgrade on startup. The Docker image includes these
+dependencies; rebuild it after updating the Dockerfile. A supported Deno
+installation can also be used because yt-dlp enables it by default.
+
+Updating bare `yt-dlp` does not install the JavaScript challenge solver. Search
+uses Google's API and can still work when download dependencies are missing.
+See the [yt-dlp JavaScript setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+
+To verify the download command without contacting YouTube, run the regression
+test with yt-dlp installed:
+
+```shell
+cargo test --no-default-features --features webserver --lib downloads_one_file_with_a_fixed_output_name -- --ignored
+```
+
 ## Configuration
 
 The tvserver daemon is configured through the following environment variables

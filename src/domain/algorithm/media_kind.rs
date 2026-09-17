@@ -4,7 +4,7 @@ const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "flv", "wmv", "webm", "m4v", "mpg", "mpeg", "3gp", "3g2", "ts",
     "vob", "m2ts", "mts", "f4v", "f4p", "f4a", "f4b", "ogv", "ogg", "drc", "gif", "gifv", "mng",
     "qt", "yuv", "rm", "rmvb", "asf", "amv", "m4p", "mp2", "mpe", "mpv", "m2v", "svi", "mxf",
-    "roq", "nsv",
+    "roq", "nsv", "mp3", "flac",
 ];
 
 const BOOK_EXTENSIONS: &[&str] = &["pdf", "epub"];
@@ -72,6 +72,13 @@ mod tests {
     #[test]
     fn classifies_existing_video_extensions_as_video() {
         for file_name in ["clip.mp4", "clip.MKV", "clip.avi", "clip.webm", "clip.mov"] {
+            assert_eq!(classify_media_kind(file_name), MediaKind::Video);
+        }
+    }
+
+    #[test]
+    fn classifies_supported_audio_extensions_as_media_case_insensitively() {
+        for file_name in ["track.mp3", "track.flac", "track.FLAC"] {
             assert_eq!(classify_media_kind(file_name), MediaKind::Video);
         }
     }

@@ -48,8 +48,10 @@ impl YoutubeTask {
                 "yt-dlp",
                 vec![
                     "--no-update",
-                    "--sponsorblock-remove",
-                    "all",
+                    // Deno is enabled by default; also allow the Node runtime
+                    // supplied by our container and local development setup.
+                    "--js-runtimes",
+                    "node",
                     "-f", 
                     "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
                     "-o",
@@ -132,160 +134,81 @@ impl YoutubeFetcher {
 }
 
 
-/*
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
-    use crate::adaptors::{HTTPClient, TokioProcessSpawner};
-    use crate::domain::config::get_google_key;
-    use crate::domain::models::{Id, Item, Snippet};
-    use crate::domain::traits::{MockTaskMonitor, ProcessSpawner, Task};
-    use anyhow::anyhow;
+    use crate::adaptors::TokioProcessSpawner;
+    use crate::domain::SearchEngineType;
+    use axum::{http::header, routing::get, Router};
+    use std::time::Duration;
 
-    #[derive(Default, Debug, Clone)]
-    struct MockFetcher {
-        response: Option<YoutubeResponse>,
-        error: Option<String>,
+    struct DownloadFixture {
+        directory: PathBuf,
+        server: tokio::task::JoinHandle<()>,
     }
 
-    #[async_trait]
-    impl<'a> JsonFetcher<'a, YoutubeResponse, &'a [(&'a str, &'a str)]> for MockFetcher {
-        async fn fetch(
-            &self,
-            url: &str,
-            query: &'a &'a [(&'a str, &'a str)],
-        ) -> anyhow::Result<YoutubeResponse> {
-            match &self.response {
-                Some(response) => Ok(response.clone()),
-                None => match &self.error {
-                    Some(error) => Err(anyhow!(error.clone())),
-                    None => {
-                        let items = query
-                            .iter()
-                            .map(|(k, v)| store_query_parameter_in_an_item(k, v, url))
-                            .collect();
-                        Ok(YoutubeResponse {
-                            items,
-                            ..Default::default()
-                        })
-                    }
-                },
-            }
+    impl Drop for DownloadFixture {
+        fn drop(&mut self) {
+            self.server.abort();
+            let _ = std::fs::remove_dir_all(&self.directory);
         }
     }
 
-    fn store_query_parameter_in_an_item(key: &str, value: &str, url: &str) -> Item {
-        Item {
-            snippet: Snippet {
-                title: key.to_string(),
-                description: value.to_string(),
-                ..Default::default()
+    // Exercise the real downloader against a local file, so invalid yt-dlp
+    // arguments fail without relying on YouTube availability or credentials.
+    #[tokio::test]
+    #[ignore = "requires yt-dlp on PATH and a loopback HTTP listener"]
+    async fn downloads_one_file_with_a_fixed_output_name() -> anyhow::Result<()> {
+        const VIDEO: &[u8] = include_bytes!("../../tests/fixtures/media_dir/test.mp4");
+        let app = Router::new().route(
+            "/video.mp4",
+            get(|| async { ([(header::CONTENT_TYPE, "video/mp4")], VIDEO) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let directory = std::env::temp_dir().join(format!(
+            "tvserver-youtube-{}-{}",
+            std::process::id(),
+            address.port()
+        ));
+        fs::create_dir_all(&directory).await?;
+        let fixture = DownloadFixture {
+            directory,
+            server: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+        };
+        let destination = fixture.directory.join("downloaded video.mp4");
+        let task = YoutubeTask {
+            spawner: Arc::new(TokioProcessSpawner::new()),
+            request: DownloadRequest {
+                name: "downloaded video".into(),
+                link: format!("http://{address}/video.mp4"),
+                engine: SearchEngineType::YouTube,
+                series: None,
             },
-            id: Id {
-                video_id: url.to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[derive(Default, Debug, Clone)]
-    struct MockProcessSpawner {}
-
-    #[async_trait]
-    impl ProcessSpawner for MockProcessSpawner {
-        async fn execute(&self, _name: &str, _cmd: &str, _args: Vec<&str>) -> Task {
-            Arc::new(MockTaskMonitor::new())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_conversion_of_response() -> anyhow::Result<()> {
-        const THE_QUERY: &str = "find this";
-        const THE_KEY: &str = "the key";
-
-        let fetcher = MockFetcher {
-            ..Default::default()
-        };
-        let spawner = MockProcessSpawner {};
-
-        let client: &dyn MediaSearcher<DownloadableItem> =
-            &YoutubeClient::new(THE_KEY, Arc::new(fetcher), Arc::new(spawner));
-
-        let response = client.search(THE_QUERY).await?;
-
-        let results = response.results.ok_or(anyhow!("expected results"))?;
-
-        assert_eq!(results.len(), 5);
-
-        for item in &results {
-            assert_eq!(
-                item.description,
-                match item.title.as_str() {
-                    "q" => THE_QUERY,
-                    "key" => THE_KEY,
-                    "part" => SEARCH_PART,
-                    "maxResults" => SEARCH_MAX_RESULTS,
-                    "type" => SEARCH_TYPE,
-                    _ => panic!(
-                        "unexpected query parameter: {}: {}",
-                        item.title, item.description
-                    ),
-                }
-            );
-
-            assert_eq!(item.link, SEARCH_URL);
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_youtube_error_handling() -> anyhow::Result<()> {
-        const ERROR_MESSAGE: &str = "test error message";
-
-        let fetcher = MockFetcher {
-            error: Some(ERROR_MESSAGE.to_string()),
-            ..Default::default()
+            monitor: RwLock::new(None),
+            destination: destination.clone(),
         };
 
-        let spawner = MockProcessSpawner {};
-
-        let client: &dyn MediaSearcher<DownloadableItem> =
-            &YoutubeClient::new("", Arc::new(fetcher), Arc::new(spawner));
-
-        let response = client.search("").await;
-
-        assert!(response.is_ok());
-
-        let results = response.unwrap();
-
-        assert_eq!(&results.error.unwrap().to_string(), ERROR_MESSAGE);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_live_search_youtube() {
-        let client = Arc::new(HTTPClient::new());
-        let spawner = Arc::new(TokioProcessSpawner::new());
-        let pc = YoutubeClient::new(&get_google_key(), client, spawner);
-
-        match pc.search("Dragons Den 2023").await {
-            Ok(response) => {
-                if let Some(err) = response.error {
-                    panic!("failed: {}", err)
+        task.start().await?;
+        let info = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let info = task.observe().await;
+                if info.finished {
+                    break info;
                 }
-
-                if let Some(results) = response.results {
-                    for result in &results {
-                        println!("({}):{} - {}", result.link, result.title, result.description);
-                    }
-                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Err(e) => panic!("error: {}", e.to_string()),
-        };
+        })
+        .await?;
+        assert!(
+            info.error_message.is_empty(),
+            "download failed: {}; {}",
+            info.error_message,
+            info.progress_message
+        );
+        assert_eq!(fs::read(&destination).await?, VIDEO);
+        assert_eq!(info.downloaded_size, VIDEO.len() as i64);
+        assert_eq!(info.files, vec![destination.to_string_lossy().to_string()]);
+        Ok(())
     }
 }
-*/
