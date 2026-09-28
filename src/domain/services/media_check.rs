@@ -60,6 +60,14 @@ impl MediaCheck {
             self.process_directory(Path::new(&dir_path).join(directory)).await?;
         }
 
+        // Keep this snapshot intact while current_videos is drained for orphan detection.
+        // The repository stores one path per checksum; alternate copies must not keep
+        // replacing that path on every scan. Only retain paths still present on disk.
+        let known_checksums: HashSet<i64> = current_videos.iter()
+            .filter(|video| files.contains(&video.video))
+            .map(|video| video.checksum)
+            .collect();
+
         for file in files {
             let path = PathBuf::from(file);
 
@@ -80,6 +88,18 @@ impl MediaCheck {
                 .collect::<HashMap<_, _>>();
 
             if existing.len() == 0 {
+                if !known_checksums.is_empty() {
+                    match calculate_checksum(&full_path).await {
+                        Ok(checksum) if known_checksums.contains(&checksum) => {
+                            tracing::debug!(path = %full_path.display(), checksum, "Skipping duplicate video content");
+                            continue;
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::warn!(path = %full_path.display(), "Could not check for duplicate video: {err}");
+                        }
+                    }
+                }
                 self.store_video_info(&full_path).await;
                 continue;
             }
@@ -170,6 +190,46 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+
+    #[tokio::test]
+    async fn duplicate_content_does_not_requeue_or_replace_existing_video() -> Result<()> {
+        use crate::domain::models::{VideoMetadata, VideoState};
+        let root = std::env::temp_dir();
+        let dir = root.join(format!("duplicate-scan-{}", rand::random::<u64>()));
+        tokio::fs::create_dir_all(&dir).await?;
+        let original = dir.join("a.mkv");
+        let duplicate = dir.join("b.mkv");
+        tokio::fs::write(&original, b"identical video content").await?;
+        tokio::fs::copy(&original, &duplicate).await?;
+        let checksum = calculate_checksum(&original).await?;
+        let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
+        let mut video = VideoDetails::new("a.mkv".into(), get_collection_from_path(&dir), &original, None);
+        video.checksum = checksum;
+        video.state = VideoState::Ready;
+        video.metadata = VideoMetadata { duration: 60.0, height: 1080, ..Default::default() };
+        repo.save_video(&video).await?;
+        let (tx, mut rx) = mpsc::channel(16);
+        let scanner = MediaCheck::new(Arc::new(FileSystemStore::new(root.to_str().unwrap())), repo.clone(), tx);
+        scanner.process_directory(dir.clone()).await?;
+        scanner.process_directory(dir.clone()).await?;
+        assert!(rx.try_recv().is_err(), "duplicate content must not be queued again");
+        assert_eq!(repo.retrieve_video(checksum).await?.video, "a.mkv");
+
+        // Different content must still be queued.
+        let distinct = dir.join("c.mkv");
+        tokio::fs::write(&distinct, b"different video content").await?;
+        scanner.process_directory(dir.clone()).await?;
+        assert!(matches!(rx.try_recv()?, LocalMessage::Media(MediaEvent::MediaAvailable(event)) if event.full_path == distinct));
+        assert!(rx.try_recv().is_err());
+        tokio::fs::remove_file(distinct).await?;
+
+        // A genuine rename must still be discovered when the old path is gone.
+        tokio::fs::remove_file(&original).await?;
+        scanner.process_directory(dir.clone()).await?;
+        assert!(matches!(rx.try_recv()?, LocalMessage::Media(MediaEvent::MediaAvailable(event)) if event.full_path == duplicate));
+        tokio::fs::remove_dir_all(dir).await?;
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore]

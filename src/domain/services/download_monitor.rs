@@ -78,7 +78,9 @@ impl DownloadMonitor {
                         }*/
                         
                         if info.finished || this.has_finished() || is_finished {
-                            info.send_media_messages(&sender, skip_file, this.request.series.clone()).await;
+                            if info.error_message.is_empty() {
+                                info.send_media_messages(&sender, skip_file, this.request.series.clone()).await;
+                            }
                             break;
                         }
                     }
@@ -101,9 +103,7 @@ impl DownloadMonitor {
         let mut state = self.state.lock().unwrap();
         
         let elapsed = now.duration_since(state.last_time).as_millis() as i64;
-        if elapsed == 0 {
-            return false;
-        }
+        let elapsed = elapsed.max(1);
         
         let bytes_downloaded = last_state.downloaded_size;
         let download_rate = 1000 * (bytes_downloaded - state.bytes_downloaded) / elapsed;
@@ -169,7 +169,8 @@ impl DownloadMonitor {
         }
         
         state.progress_details = last_state.progress_message.clone();
-        if last_state.finished || 
+        state.error_message = last_state.error_message.clone();
+        if !state.error_message.is_empty() || last_state.finished ||
            (has_total_size && bytes_downloaded == total_size && state.finished.is_none()) {
             let now = SystemTime::now();
             state.finished = Some(now);
@@ -291,3 +292,25 @@ pub async fn wait(monitor: &DownloadMonitor) {
     monitor.done.notified().await;
 }
 */
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::domain::{SearchEngineType, traits::MockDownloadProgress};
+
+    #[tokio::test]
+    async fn torrent_initialization_errors_are_visible_and_terminal() {
+        let monitor = DownloadMonitor::new(
+            DownloadRequest { name: "test".into(), link: "magnet:test".into(), engine: SearchEngineType::CopyServer, series: None },
+            Arc::new(MockDownloadProgress::new()),
+        );
+        monitor.state.lock().unwrap().last_time = Instant::now() - Duration::from_secs(1);
+        assert!(monitor.update_state(&DownloadInfo {
+            total_size: None, downloaded_size: 0, uploaded_size: None,
+            finished: false, error_message: "metadata lookup timed out".into(),
+            progress_message: String::new(), files: vec![],
+        }));
+        let state = monitor.get_state().await;
+        assert!(state.finished);
+        assert_eq!(state.error_string, "metadata lookup timed out");
+    }
+}
