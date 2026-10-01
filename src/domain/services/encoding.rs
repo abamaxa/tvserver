@@ -348,6 +348,7 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
     let parent_dir = current_path.parent().unwrap_or_else(|| Path::new(""));
 
     let mut extracted_files = Vec::new();
+    let mut attempted_tracks = 0;
     // Track the subtitle stream index separately since we skip bitmap tracks
     let mut subtitle_stream_index = 0;
 
@@ -399,6 +400,7 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
             &output_path_str,
         ];
 
+        attempted_tracks += 1;
         let task_name = format!("Extract Subtitles {}", video.video);
         let task = spawner.execute(&task_name,"ffmpeg", args).await;
         // Wait for the task to complete (2 hour timeout)
@@ -428,9 +430,51 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
         subtitle_stream_index += 1;
     }
 
-    if extracted_files.is_empty() && !subtitle_tracks.is_empty() {
+    if extracted_files.is_empty() && attempted_tracks > 0 {
         tracing::info!("Failed to extract any subtitle tracks from {}", video.video);
     }
 
     Ok(extracted_files)
+}
+
+
+#[cfg(test)]
+mod subtitle_tests {
+    use super::*;
+    use crate::domain::models::VideoMetadata;
+    use crate::domain::traits::{MockTaskMonitor, Task};
+    use async_trait::async_trait;
+
+    struct FailedSubtitleSpawner;
+
+    #[async_trait]
+    impl ProcessSpawner for FailedSubtitleSpawner {
+        async fn execute(&self, _: &str, _: &str, _: Vec<&str>) -> Task {
+            let mut task = MockTaskMonitor::new();
+            task.expect_wait_finished().returning(|| ());
+            task.expect_get_state().returning(|| crate::domain::messages::TaskState {
+                error_string: "ffmpeg could not extract subtitles".into(),
+                ..Default::default()
+            });
+            Arc::new(task)
+        }
+    }
+
+    #[tokio::test]
+    async fn skipped_bitmap_and_failed_text_subtitles_are_nonfatal() {
+        for codec in ["dvb_subtitle", "subrip"] {
+            let video = VideoDetails {
+                video: "episode.mkv".into(),
+                dir_path: Some(PathBuf::from("/tmp")),
+                metadata: VideoMetadata {
+                    subtitle_tracks: Some(serde_json::from_value(serde_json::json!([
+                        { "id": 2, "language": "eng", "codec": codec }
+                    ])).unwrap()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert!(extract_subtitles(&video, Arc::new(FailedSubtitleSpawner)).await.unwrap().is_empty());
+        }
+    }
 }

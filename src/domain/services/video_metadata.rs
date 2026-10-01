@@ -135,7 +135,7 @@ pub async fn generate_video_metadatas(path: PathBuf, storer: Storer, repo: Repos
 
     metadata_debug(&new_path, "subtitles:start");
     if let Err(err) = extract_subtitles(&details, spawner).await {
-        return Err(MetaDataError::from_error(MetaDataErrorCode::ExtractSubtitles, &err.as_ref(), &path, details));
+        tracing::warn!(path = %new_path.display(), "Subtitle extraction failed; video remains ready: {err}");
     }
     metadata_debug(&new_path, "subtitles:done");
 

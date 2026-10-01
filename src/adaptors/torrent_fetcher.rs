@@ -2,7 +2,10 @@ use anyhow::Context;
 use async_trait::async_trait;
 use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentMetadata};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tokio::sync::RwLock;
 
 use crate::domain::config;
@@ -64,21 +67,6 @@ impl TorrentDownload {
     pub fn new(handle: Arc<ManagedTorrent>) -> Self {
         Self { handle, metadata: RwLock::new(None) }
     }
-
-    pub async fn download(&self) -> Result<(), anyhow::Error> {
-        {
-            let mut meta_data_store = self.metadata.write().await;
-            self.handle.with_metadata(|r| {
-                meta_data_store.replace(r.clone());
-            })?;
-        }
-
-        // Wait until the download is completed
-        self.handle.wait_until_completed().await?;
-        tracing::info!("torrent downloaded");
-
-        Ok(())
-    }
 }
 
 pub struct TorrentFetcher {
@@ -91,20 +79,16 @@ impl Download for TorrentFetcher {
         &self,
         request: DownloadRequest,
     ) -> Result<DownloadProgressMonitor, anyhow::Error> {
-        let handle = self.get_handle(&request.link).await?;
-
-        let downloader = Arc::new(TorrentDownload::new(handle));
-
-        tokio::spawn({
-            let downloader = downloader.clone();
-            async move {
-                if let Err(err) = downloader.download().await {
-                    tracing::error!("error downloading torrent: {:?}", err);
-                }
-            }
-        });
-
-        Ok(downloader)
+        let client = self.client.clone();
+        Ok(PendingTorrentDownload::start(async move {
+            let fetcher = TorrentFetcher { client };
+            let handle = fetcher.get_handle(&request.link).await?;
+            let downloader = Arc::new(TorrentDownload::new(handle));
+            // add_torrent has resolved metadata before returning the handle.
+            let metadata = downloader.handle.with_metadata(Arc::clone)?;
+            *downloader.metadata.write().await = Some(metadata);
+            Ok(downloader as DownloadProgressMonitor)
+        }, Duration::from_secs(300)))
     }
 }
 
@@ -158,5 +142,138 @@ impl TorrentFetcher {
                 Err(err).context(format!("error adding torrent from link: {}", link))
             }
         }
+    }
+}
+
+
+// Register the task before magnet metadata resolution, which can wait indefinitely
+// for peers. Unknown size prevents the monitor from treating 0/0 as completion.
+struct PendingTorrentDownload {
+    state: Mutex<Result<Option<DownloadProgressMonitor>, String>>,
+    cancellation: CancellationToken,
+}
+
+impl PendingTorrentDownload {
+    fn start(
+        initialize: impl Future<Output = anyhow::Result<DownloadProgressMonitor>> + Send + 'static,
+        timeout: Duration,
+    ) -> Arc<Self> {
+        let download = Arc::new(Self {
+            state: Mutex::new(Ok(None)),
+            cancellation: CancellationToken::new(),
+        });
+        let worker = download.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                biased;
+                _ = worker.cancellation.cancelled() => Err("Torrent initialization cancelled".to_string()),
+                result = tokio::time::timeout(timeout, initialize) => match result {
+                    Ok(Ok(monitor)) => Ok(Some(monitor)),
+                    Ok(Err(err)) => Err(format!("Torrent initialization failed: {err:#}")),
+                    Err(_) => Err("Torrent metadata lookup timed out; no metadata received from peers. Check peer availability and network connectivity, then retry.".to_string()),
+                }
+            };
+            if let Err(err) = &result {
+                tracing::warn!("{err}");
+            }
+            let mut state = worker.state.lock().unwrap();
+            if worker.cancellation.is_cancelled() {
+                if let Ok(Some(monitor)) = result {
+                    monitor.terminate();
+                }
+            } else {
+                *state = result;
+            }
+        });
+        download
+    }
+}
+
+#[async_trait]
+impl DownloadProgress for PendingTorrentDownload {
+    fn terminate(&self) {
+        self.cancellation.cancel();
+        let mut state = self.state.lock().unwrap();
+        if let Ok(Some(monitor)) = &*state {
+            monitor.terminate();
+        }
+        *state = Err("Torrent download cancelled".into());
+    }
+
+    async fn observe(&self) -> DownloadInfo {
+        let state = self.state.lock().unwrap().clone();
+        if let Ok(Some(monitor)) = &state {
+            return monitor.observe().await;
+        }
+        DownloadInfo {
+            total_size: None,
+            downloaded_size: 0,
+            uploaded_size: None,
+            finished: false,
+            error_message: state.err().unwrap_or_default(),
+            progress_message: "Resolving torrent metadata; waiting for peers".into(),
+            files: vec![],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unresolved_magnet_is_observable_and_can_be_cancelled() {
+        let download = PendingTorrentDownload::start(std::future::pending(), Duration::from_secs(300));
+        let info = download.observe().await;
+        assert!(!info.finished);
+        assert_eq!(info.total_size, None);
+        assert!(info.progress_message.contains("waiting for peers"));
+        download.terminate();
+        assert!(download.observe().await.error_message.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn unresolved_magnet_reports_timeout() {
+        let download = PendingTorrentDownload::start(std::future::pending(), Duration::from_millis(1));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if download.observe().await.error_message.contains("timed out") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("timeout must be reported");
+    }
+
+    #[tokio::test]
+    async fn resolved_magnet_delegates_to_download_progress() {
+        use crate::domain::traits::MockDownloadProgress;
+        let mut progress = MockDownloadProgress::new();
+        progress.expect_observe().returning(|| DownloadInfo {
+            total_size: Some(100), downloaded_size: 25, uploaded_size: None,
+            finished: false, error_message: String::new(), progress_message: "downloading".into(), files: vec![],
+        });
+        let download = PendingTorrentDownload::start(async move {
+            Ok(Arc::new(progress) as DownloadProgressMonitor)
+        }, Duration::from_secs(1));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let info = download.observe().await;
+                if info.total_size == Some(100) {
+                    assert_eq!(info.downloaded_size, 25);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initialization_failure_is_reported() {
+        let download = PendingTorrentDownload::start(async { anyhow::bail!("invalid magnet") }, Duration::from_secs(1));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if download.observe().await.error_message.contains("invalid magnet") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
     }
 }
