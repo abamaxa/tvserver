@@ -1,7 +1,7 @@
 use std::{env, net::SocketAddr};
 
 use anyhow::Result;
-use tokio::{task::JoinHandle, time};
+use tokio::task::JoinHandle;
 
 use app_lib::{
     domain::config::BOOK_DIR,
@@ -20,22 +20,22 @@ pub async fn create_server(context: Context, port: u16) -> JoinHandle<Result<()>
 }
 
 async fn create_server_task(context: Context, port: u16) -> JoinHandle<Result<()>> {
-    let task = tokio::spawn(async move {
+    // Bind before spawning so the port is already listening when this returns;
+    // a fixed sleep raced with the spawned task on slow CI runners.
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .unwrap_or_else(|e| panic!("failed to bind test server on {addr}: {e}"));
+
+    tokio::spawn(async move {
         let app = build_http_router(context)?;
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-
         axum::serve(
-            tokio::net::TcpListener::bind(&addr).await?,
+            listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await?;
 
         Ok(())
-    });
-
-    // wait for the server to come up
-    time::sleep(time::Duration::from_millis(100)).await;
-
-    task
+    })
 }
