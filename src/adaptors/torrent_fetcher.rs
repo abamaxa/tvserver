@@ -1,6 +1,9 @@
 use anyhow::Context;
 use async_trait::async_trait;
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentMetadata};
+use librqbit::{
+    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse,
+    ManagedTorrent, Session, TorrentMetadata,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::future::Future;
@@ -13,6 +16,7 @@ use crate::domain::messages::{DownloadInfo, DownloadRequest};
 use crate::domain::traits::{DownloadProgress, DownloadProgressMonitor, Download};
 
 pub struct TorrentDownload {
+    session: Arc<Session>,
     handle: Arc<ManagedTorrent>,
     metadata: RwLock<Option<Arc<TorrentMetadata>>>,
 }
@@ -20,9 +24,14 @@ pub struct TorrentDownload {
 #[async_trait]
 impl DownloadProgress for TorrentDownload {
     fn terminate(&self) {
-        tracing::info!("terminating torrent download");
-        // Note: librqbit does not expose a synchronous cancel API on ManagedTorrent.
-        // Logging the termination request; the download will be cleaned up when dropped.
+        let session = self.session.clone();
+        let id = self.handle.id();
+        tracing::info!(id, "terminating torrent download");
+        tokio::spawn(async move {
+            if let Err(error) = session.delete(TorrentIdOrHash::Id(id), true).await {
+                tracing::error!(id, "failed to cancel torrent: {error:#}");
+            }
+        });
     }
 
     async fn observe(&self) -> DownloadInfo {
@@ -64,8 +73,12 @@ impl DownloadProgress for TorrentDownload {
 }
 
 impl TorrentDownload {
-    pub fn new(handle: Arc<ManagedTorrent>) -> Self {
-        Self { handle, metadata: RwLock::new(None) }
+    pub fn new(session: Arc<Session>, handle: Arc<ManagedTorrent>) -> Self {
+        Self {
+            session,
+            handle,
+            metadata: RwLock::new(None),
+        }
     }
 }
 
@@ -83,7 +96,7 @@ impl Download for TorrentFetcher {
         Ok(PendingTorrentDownload::start(async move {
             let fetcher = TorrentFetcher { client };
             let handle = fetcher.get_handle(&request.link).await?;
-            let downloader = Arc::new(TorrentDownload::new(handle));
+            let downloader = Arc::new(TorrentDownload::new(fetcher.client.clone(), handle));
             // add_torrent has resolved metadata before returning the handle.
             let metadata = downloader.handle.with_metadata(Arc::clone)?;
             *downloader.metadata.write().await = Some(metadata);
@@ -220,6 +233,54 @@ impl DownloadProgress for PendingTorrentDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use librqbit::{create_torrent, CreateTorrentOptions, SessionOptions};
+
+    #[tokio::test]
+    async fn terminating_a_resolved_torrent_removes_it_from_the_session() {
+        let root = std::env::temp_dir().join(format!("tvserver-cancel-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.bin");
+        std::fs::write(&source, b"test torrent").unwrap();
+        let torrent = create_torrent(&source, CreateTorrentOptions::default()).await.unwrap();
+        let session = Session::new_with_opts(
+            root.join("downloads"),
+            SessionOptions {
+                disable_dht: true,
+                enable_upnp_port_forwarding: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let handle = session
+            .add_torrent(
+                AddTorrent::from_bytes(torrent.as_bytes().unwrap()),
+                Some(AddTorrentOptions {
+                    paused: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap()
+            .into_handle()
+            .unwrap();
+        let id = handle.id();
+        let partial_file = root.join("downloads/source.bin");
+        std::fs::write(&partial_file, b"partial download").unwrap();
+        let download = TorrentDownload::new(session.clone(), handle);
+
+        download.terminate();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.get(librqbit::api::TorrentIdOrHash::Id(id)).is_some() || partial_file.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancel should stop the torrent and remove its partial file");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn unresolved_magnet_is_observable_and_can_be_cancelled() {

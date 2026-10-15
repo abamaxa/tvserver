@@ -1,0 +1,99 @@
+#!/usr/bin/python3 -I
+"""Apply narrowly scoped permission changes beneath /tank/movies."""
+
+import os
+import re
+import stat
+import subprocess
+import sys
+
+
+ROOT = "/tank/movies"
+USERS = {"chris", "tv"}
+MODES = {0o640, 0o644, 0o660, 0o664, 0o700, 0o750, 0o755, 0o770, 0o775}
+
+
+def open_target(root: str, path: str) -> tuple[int, os.stat_result]:
+    """Pin a regular file or directory without following symlinks or mounts."""
+    if path == root:
+        parts = []
+    elif path.startswith(root + "/"):
+        parts = path[len(root) + 1 :].split("/")
+    else:
+        raise ValueError("path must be /tank/movies or inside it")
+
+    if any(part in {"", ".", ".."} or any(ord(char) < 32 or ord(char) == 127 for char in part) for part in parts):
+        raise ValueError("path contains an invalid component")
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
+    fd = os.open(root, flags)
+    try:
+        root_device = os.fstat(fd).st_dev
+        for index, part in enumerate(parts):
+            child_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+            if index < len(parts) - 1:
+                child_flags |= os.O_DIRECTORY
+            child = os.open(part, child_flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            if info.st_dev != root_device:
+                raise ValueError("path crosses a mount point")
+
+        info = os.fstat(fd)
+        if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+            raise ValueError("target must be a regular file or directory")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise ValueError("hard-linked files are not allowed")
+        return fd, info
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def apply(operation: str, arguments: list[str]) -> None:
+    if operation == "chmod":
+        if len(arguments) != 2 or not re.fullmatch(r"0?[0-7]{3}", arguments[0]):
+            raise ValueError("usage: chmod MODE PATH")
+        mode = int(arguments[0], 8)
+        if mode not in MODES:
+            raise ValueError("mode is outside the approved set")
+        path = arguments[1]
+    elif operation in {"acl", "default-acl"}:
+        if len(arguments) != 3:
+            raise ValueError(f"usage: {operation} USER PERMISSIONS PATH")
+        user, permissions, path = arguments
+        if user not in USERS or not re.fullmatch(r"[r-][w-][x-]", permissions):
+            raise ValueError("only chris or tv and rwx-style permissions are allowed")
+    else:
+        raise ValueError("operation must be chmod, acl, or default-acl")
+
+    fd, info = open_target(ROOT, path)
+    try:
+        if operation == "default-acl" and not stat.S_ISDIR(info.st_mode):
+            raise ValueError("default ACLs require a directory")
+        if operation == "chmod":
+            os.fchmod(fd, mode)
+        else:
+            command = ["/usr/bin/setfacl"]
+            if operation == "default-acl":
+                command.append("-d")
+            command.extend(["-m", f"u:{user}:{permissions}", "--", f"/proc/self/fd/{fd}"])
+            subprocess.run(command, check=True, pass_fds=(fd,))
+    finally:
+        os.close(fd)
+
+
+def main() -> int:
+    try:
+        if len(sys.argv) < 2:
+            raise ValueError("usage: tvserver-movie-perms {chmod|acl|default-acl} ...")
+        apply(sys.argv[1], sys.argv[2:])
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f"tvserver-movie-perms: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

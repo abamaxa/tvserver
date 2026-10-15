@@ -44,6 +44,7 @@ impl SeriesDetailsFull {
 
 lazy_static! {
     static ref PATH_REGEX: Vec<Regex> = vec![
+        Regex::new(r"(?i)^(?P<season>\d{1,2})x(?P<episode>\d{1,2})(?:\s*-\s*\([^)]*\))?(?:-v\d+)?$").unwrap(),
         Regex::new(r"^(?P<series_title>[\s\w]+) [Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,2}) - (?P<episode_title>[^\\/\n]+)").unwrap(),
         Regex::new(r"[Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{1,2}) - (?P<episode_title>[^\\/\n]+)").unwrap(),
         Regex::new(r".*\d+-(?P<episode>\d{1,2}) (?P<episode_title>[^\\/\n]+)").unwrap(),
@@ -413,6 +414,21 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn parses_numbered_episodes_with_air_dates() {
+        for (name, season, episode) in [
+            ("1x01 - (08-31-1991).avi", "1", "01"),
+            ("2x12 - (12-06-1992).avi", "2", "12"),
+            ("3x10 - (03-06-1993).avi", "3", "10"),
+            ("1x01 - (08-31-1991)-v2.mp4", "1", "01"),
+        ] {
+            let parsed = parse_file_path(&format!("The House of Eliott/{name}")).series_details;
+            assert_eq!(parsed.series_title, "The House of Eliott");
+            assert_eq!(parsed.season, season);
+            assert_eq!(parsed.episode, episode);
+        }
+    }
+
+    #[test]
     fn test_parse_file_paths() {
         let tests = vec![
             (
@@ -447,8 +463,8 @@ mod tests {
                 SeriesDetails {
                     series_title: "The House of Eliott".to_string(),
                     season: "3".to_string(),
-                    episode_title: "3x08".to_string(),
-                    episode: "3x08 - (02-20-1993)".to_string(),
+                    episode_title: "".to_string(),
+                    episode: "08".to_string(),
                 },
             ),
             (

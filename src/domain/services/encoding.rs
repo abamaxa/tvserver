@@ -32,8 +32,8 @@ pub struct CodecArgs {
     pub current_codecs: Vec<String>,
 }
 
-const VIDEO_CODECS: &[&str] = &["h264", "h265", "mpeg4", "x264", "x265"];
-const AUDIO_CODECS: &[&str] = &["aac", "mp3", "ac3"];
+const VIDEO_CODECS: &[&str] = &["h264"];
+const AUDIO_CODECS: &[&str] = &["aac"];
 
 #[derive(Debug)]
 pub struct AlreadyEncodedError;
@@ -476,5 +476,40 @@ mod subtitle_tests {
             };
             assert!(extract_subtitles(&video, Arc::new(FailedSubtitleSpawner)).await.unwrap().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use crate::domain::models::VideoMetadata;
+
+    fn video(file_name: &str, video_codec: &str, audio_codec: &str) -> VideoDetails {
+        VideoDetails {
+            video: file_name.into(),
+            dir_path: Some(PathBuf::from("/tmp")),
+            metadata: VideoMetadata {
+                probe_data: Some(serde_json::json!({"streams": [
+                    {"codec_type": "video", "codec_name": video_codec},
+                    {"codec_type": "audio", "codec_name": audio_codec}
+                ]}).to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn converts_mpeg4_and_mp3_in_an_avi_to_browser_codecs() {
+        let args = get_re_encoding_args(&video("episode.avi", "mpeg4", "mp3"), VIDEO_CODECS, AUDIO_CODECS).unwrap();
+        assert_eq!(args.video_args, ["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+        assert_eq!(args.audio_args, ["-c:a", "aac", "-b:a", "128k"]);
+    }
+
+    #[test]
+    fn converts_hevc_in_mp4_but_skips_h264_aac_mp4() {
+        let args = get_re_encoding_args(&video("episode.mp4", "hevc", "aac"), VIDEO_CODECS, AUDIO_CODECS).unwrap();
+        assert_eq!(args.video_args[1], "libx264");
+        assert!(!should_re_encode(&video("episode.mp4", "h264", "aac")));
     }
 }

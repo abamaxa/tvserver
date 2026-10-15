@@ -87,14 +87,21 @@ impl AsyncSubProcess {
 
         tokio::spawn(async move {
             match Self::run(&cmd, args.clone(), stdout_tx).await {
-                Ok(exit_status) => {
+                Ok((exit_status, diagnostic)) => {
                     if exit_status.success() {
                         *status.lock().await = Some(exit_status);
                         tracing::info!("succeeded - {} {} {:?}", name, cmd, args)
                     } else {
                         let exit_code = exit_status.code().unwrap_or(0);
-                        *error_string.lock().await = format!("failed with code {}", exit_code);
-                        tracing::error!("failed exit code: {} - {} {} {:?}", exit_code, name, cmd, args)
+                        *error_string.lock().await = if diagnostic.is_empty() {
+                            format!("failed with code {}", exit_code)
+                        } else {
+                            format!("failed with code {}: {}", exit_code, diagnostic.trim())
+                        };
+                        tracing::error!(
+                            "failed exit code: {} - {} {} {:?}: {}",
+                            exit_code, name, cmd, args, diagnostic.trim()
+                        )
                     }
                 }
                 Err(e) => {
@@ -106,7 +113,7 @@ impl AsyncSubProcess {
         })
     }
 
-    pub async fn run(cmd: &str, args: Vec<String>, output: Sender<String>) -> Result<ExitStatus> {
+    pub async fn run(cmd: &str, args: Vec<String>, output: Sender<String>) -> Result<(ExitStatus, String)> {
         let process_result = Command::new(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -138,17 +145,17 @@ impl AsyncSubProcess {
         // Wait for the process to complete
         let result = child.wait().await;
 
-        // Give a bit of time for any buffered stdout/stderr to be processed
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        
-        // Drop the child process to close the pipes which will cause the copy_stdio tasks to complete
-        drop(child);
-        
-        // Wait for the stdout/stderr tasks to complete instead of aborting them
-        // This ensures we capture all output, even if the command fails immediately
-        let _ = tokio::join!(out_task, err_task);
+        // Drain both pipes before reporting the exit status, so failures retain
+        // their diagnostic even if the UI consumes the task immediately.
+        let (stdout, stderr) = tokio::join!(out_task, err_task);
+        let diagnostic = stderr.unwrap_or_default();
+        let diagnostic = if diagnostic.trim().is_empty() {
+            stdout.unwrap_or_default()
+        } else {
+            diagnostic
+        };
 
-        result
+        result.map(|status| (status, diagnostic))
     }
 
     fn store_stdio(&self, mut stdout_rx: Receiver<String>) {
@@ -161,11 +168,12 @@ impl AsyncSubProcess {
         });
     }
 
-    async fn copy_stdio<T>(mut child_stdout: T, output: Sender<String>)
+    async fn copy_stdio<T>(mut child_stdout: T, output: Sender<String>) -> String
     where
         T: AsyncRead + Unpin,
     {
         let mut buffer = [0; 0x1000];
+        let mut tail = String::new();
         loop {
             match child_stdout.read(&mut buffer).await {
                 Ok(0) => {
@@ -176,6 +184,14 @@ impl AsyncSubProcess {
                     let data = String::from_utf8(buffer[0..bytes_read].to_vec()).unwrap_or_default();
                     if data.is_empty() {
                         continue;
+                    }
+                    tail.push_str(&data);
+                    if tail.len() > 8192 {
+                        let mut start = tail.len() - 8192;
+                        while !tail.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        tail.drain(..start);
                     }
                     if let Err(e) = output.send(data).await {
                         tracing::error!("could not copy to channel: {}", e);
@@ -188,6 +204,7 @@ impl AsyncSubProcess {
                 }
             }
         }
+        tail
     }
 
     async fn get_last_message(&self) -> String {
@@ -279,6 +296,23 @@ mod test {
     use super::*;
     use anyhow::Result;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn failed_process_reports_stderr_in_task_error() {
+        let task = AsyncSubProcess::execute(
+            "failed command",
+            "/bin/sh",
+            vec!["-c", "printf 'pip is unavailable\\n' >&2; exit 1"],
+        ).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !task.has_finished() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        let state = task.get_state().await;
+        assert!(state.error_string.contains("pip is unavailable"), "{}", state.error_string);
+    }
 
     #[tokio::test]
     #[ignore] // this was working until reading stdio was changed from reading lines
