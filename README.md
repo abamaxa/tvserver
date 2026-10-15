@@ -40,23 +40,30 @@ NB YouTube search will not work until a key for the Google API is provided throu
 
 ### YouTube download dependencies
 
-Downloads require FFmpeg, Python 3.10 or newer, and Node.js 22 or newer on the
-server's `PATH`. Install yt-dlp with its YouTube challenge solver dependencies:
+Downloads require FFmpeg, Python 3.10 or newer with pip, and Node.js 22 or newer
+on the server's `PATH`. On startup, the server selects a Python interpreter
+that can run pip, installs yt-dlp and its challenge solver dependencies into
+`$DOWNLOAD_DIR/.yt-dlp-python`, and runs downloads with that interpreter. Set
+`TVSERVER_PYTHON` to an absolute interpreter path if needed. The downloads
+directory must be writable by the service user.
+
+To install the same dependencies manually into that directory:
 
 ```shell
-python3 -m pip install --upgrade "yt-dlp[default]"
+export DOWNLOAD_DIR=/path/to/downloads
+python3 -m pip install --upgrade --target "$DOWNLOAD_DIR/.yt-dlp-python" "yt-dlp[default]"
 ```
 
-The server runs this upgrade on startup. The Docker image includes these
-dependencies; rebuild it after updating the Dockerfile. A supported Deno
-installation can also be used because yt-dlp enables it by default.
+The Docker image includes these dependencies; rebuild it after updating the
+Dockerfile. A supported Deno installation can also be used because yt-dlp
+enables it by default.
 
 Updating bare `yt-dlp` does not install the JavaScript challenge solver. Search
 uses Google's API and can still work when download dependencies are missing.
 See the [yt-dlp JavaScript setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 
 To verify the download command without contacting YouTube, run the regression
-test with yt-dlp installed:
+test after yt-dlp is installed in the downloads directory:
 
 ```shell
 cargo test --no-default-features --features webserver --lib downloads_one_file_with_a_fixed_output_name -- --ignored

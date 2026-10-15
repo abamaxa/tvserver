@@ -7,6 +7,7 @@ use tokio::{sync::RwLock, fs};
 use crate::domain::config::get_downloads_dir;
 use crate::domain::traits::{DownloadProgress, DownloadProgressMonitor, Download, Spawner, Task};
 use crate::domain::messages::{DownloadInfo, DownloadRequest, TaskState};
+use crate::adaptors::youtube_runtime;
 
 pub struct YoutubeTask {
     spawner: Spawner,
@@ -38,6 +39,11 @@ impl YoutubeTask {
 
     async fn start(&self) -> Result<(), anyhow::Error> {
 
+        let python = youtube_runtime::python_with_pip()
+            .ok_or_else(|| anyhow::anyhow!("no Python interpreter with pip found for yt-dlp"))?;
+        let python = python.to_string_lossy().into_owned();
+        let package_dir = youtube_runtime::package_dir().to_string_lossy().into_owned();
+
         let output_path = self.destination
             .to_string_lossy()
             .to_string();
@@ -45,8 +51,11 @@ impl YoutubeTask {
         let monitor =self.spawner
             .execute(
                 &self.request.name,
-                "yt-dlp",
+                &python,
                 vec![
+                    "-c",
+                    youtube_runtime::RUN_YTDLP,
+                    &package_dir,
                     "--no-update",
                     // Deno is enabled by default; also allow the Node runtime
                     // supplied by our container and local development setup.
@@ -157,7 +166,7 @@ mod tests {
     // Exercise the real downloader against a local file, so invalid yt-dlp
     // arguments fail without relying on YouTube availability or credentials.
     #[tokio::test]
-    #[ignore = "requires yt-dlp on PATH and a loopback HTTP listener"]
+    #[ignore = "requires yt-dlp installed in DOWNLOAD_DIR and a loopback HTTP listener"]
     async fn downloads_one_file_with_a_fixed_output_name() -> anyhow::Result<()> {
         const VIDEO: &[u8] = include_bytes!("../../tests/fixtures/media_dir/test.mp4");
         let app = Router::new().route(

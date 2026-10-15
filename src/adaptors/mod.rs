@@ -5,6 +5,7 @@ mod subprocess;
 mod websocket;
 mod torrent_fetcher;
 mod youtube_fetcher;
+pub(crate) mod youtube_runtime;
 mod telegram;
 #[cfg(feature = "webserver")]
 mod restrict_access;

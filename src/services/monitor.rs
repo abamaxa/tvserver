@@ -1,6 +1,7 @@
 use crate::domain::messages::{LocalMessage, LocalMessageSender};
 use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Storer};
 use crate::services::TaskManager;
+use crate::adaptors::youtube_runtime;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
 use tokio::time::{sleep, Duration};
@@ -25,11 +26,20 @@ impl Monitor {
             tracing::info!("updating yt-dlp");
             // YouTube's JavaScript challenge solver is a separate dependency;
             // upgrade it together with yt-dlp to keep their versions compatible.
+            let python = youtube_runtime::python_with_pip().unwrap_or_else(|| {
+                tracing::warn!("no Python interpreter with pip found on PATH; the yt-dlp updater may fail");
+                "python3".into()
+            });
+            let python = python.to_string_lossy().into_owned();
+            let package_dir = youtube_runtime::package_dir().to_string_lossy().into_owned();
             task_manager
                 .execute(
                     "Update yt-dlp",
-                    "python3",
-                    vec!["-m", "pip", "install", "--upgrade", "yt-dlp[default]"],
+                    &python,
+                    vec![
+                        "-m", "pip", "install", "--upgrade", "--target", &package_dir,
+                        "yt-dlp[default]",
+                    ],
                 )
                 .await;
 

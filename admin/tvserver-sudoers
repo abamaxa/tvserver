@@ -1,0 +1,2 @@
+# Install tvserver-movie-perms as a root-owned, non-writable executable first.
+chris ALL=(root) NOPASSWD: /usr/bin/systemctl restart tvserver.service, /usr/local/sbin/tvserver-movie-perms *
