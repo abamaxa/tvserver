@@ -1,0 +1,187 @@
+/* Basic block layout also works on TV browsers without flexbox or CSS grid. */
+html {
+    background: #10151d;
+    color: #f4f6fa;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 24px;
+    line-height: 1.4;
+}
+
+body {
+    margin: 0;
+}
+
+header, main, nav {
+    display: block;
+}
+
+header {
+    background: #1c2635;
+    border-bottom: 2px solid #34455c;
+    padding: 16px 5%;
+}
+
+main {
+    margin: 24px auto 60px;
+    max-width: 1200px;
+    width: 90%;
+}
+
+h1 {
+    font-size: 36px;
+    margin: 20px 0;
+}
+
+h2 {
+    font-size: 28px;
+}
+
+a {
+    color: #a9d4ff;
+}
+
+a:focus, a:hover, input:focus, button:focus, button:hover, video:focus {
+    background: #2b4363;
+    color: #fff;
+    outline: 4px solid #ffd36a;
+    outline-offset: 2px;
+}
+
+.brand {
+    color: #fff;
+    font-size: 28px;
+    font-weight: bold;
+    text-decoration: none;
+}
+
+.breadcrumbs {
+    margin: 20px 0;
+}
+
+.breadcrumbs a {
+    display: inline-block;
+    padding: 8px 4px;
+}
+
+.search label {
+    display: block;
+    margin-bottom: 8px;
+}
+
+.search input, .search button {
+    border: 2px solid #6d829e;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: inherit;
+    padding: 12px;
+}
+
+.search input {
+    background: #f4f6fa;
+    color: #10151d;
+    max-width: 65%;
+    width: 440px;
+}
+
+.search button {
+    background: #244974;
+    color: #fff;
+    cursor: pointer;
+}
+
+.listing {
+    list-style: none;
+    margin: 20px 0;
+    padding: 0;
+}
+
+.listing li {
+    margin-bottom: 12px;
+}
+
+.item {
+    background: #1c2635;
+    border: 2px solid #34455c;
+    border-radius: 4px;
+    color: #fff;
+    display: block;
+    min-height: 68px;
+    overflow: hidden;
+    padding: 16px;
+    text-decoration: none;
+    word-wrap: break-word;
+}
+
+.item-title {
+    display: block;
+    font-size: 28px;
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.meta {
+    color: #bbc9da;
+    display: block;
+    font-size: 20px;
+}
+
+.thumbnail {
+    background: #10151d;
+    border: 0;
+    float: left;
+    margin-right: 20px;
+}
+
+.pagination, .playback-nav {
+    margin: 24px 0;
+}
+
+.pagination a, .playback-nav a {
+    background: #1c2635;
+    border: 2px solid #6d829e;
+    display: inline-block;
+    margin: 8px 16px 8px 0;
+    padding: 12px 18px;
+}
+
+.pagination span {
+    display: inline-block;
+    margin-right: 16px;
+}
+
+#videoContainer {
+    background: #000;
+    text-align: center;
+}
+
+#videoPlayer {
+    background: #000;
+    height: 480px;
+    max-height: 72vh;
+    width: 100%;
+}
+
+.description {
+    white-space: pre-line;
+    word-wrap: break-word;
+}
+
+@media screen and (max-width: 600px) {
+    html {
+        font-size: 20px;
+    }
+
+    .thumbnail {
+        height: 54px;
+        margin-right: 12px;
+        width: 96px;
+    }
+
+    .item-title {
+        font-size: 22px;
+    }
+
+    #videoPlayer {
+        height: 240px;
+    }
+}

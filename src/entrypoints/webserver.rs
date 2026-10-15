@@ -186,8 +186,11 @@ pub fn build_http_router(context: crate::entrypoints::Context) -> anyhow::Result
     let movie_dir = get_movie_dir();
     let book_static_roots = context.get_book_runtime().static_roots();
 
-    // Protected routes: API endpoints, player, and fallback (app)
+    let tv_routes = super::tv::router(context.get_repository());
+
+    // Protected routes: API endpoints, TV library, player, and fallback (app)
     let mut protected_routes = register(Arc::new(context))
+        .merge(tv_routes)
         .nest_service("/player", ServeDir::new(get_client_path("player")))
         .fallback_service(ServeDir::new(get_client_path("newapp")));
 

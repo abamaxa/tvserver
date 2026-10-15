@@ -123,6 +123,19 @@ computer running the TV server daemon.
 
 Then, from your mobile phone's browser, navigate to `http://hostname` to load the remote control app.
 
+### Older TVs
+
+Open `http://hostname/tv` on TVs whose browsers cannot load the remote control app.
+The Rust server renders the show, season, and episode lists as ordinary HTML pages.
+Search and page links work without JavaScript, and each episode opens a native
+HTML5 video player with back, previous episode, and next episode links. Shows and
+episode lists display up to 20 items per page.
+
+The TV pages and their stylesheet are embedded in the webserver binary, so no
+frontend build or client export is needed. They use the existing video database,
+streaming routes, and access restrictions. The TV must support the selected
+file's video and audio codecs, just as with the existing simple player.
+
 ## Clients
 
 For simplicity, compiled versions of the apps are available in the `clients` directory.
