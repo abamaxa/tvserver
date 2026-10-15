@@ -5,6 +5,8 @@ mod capability_file_service;
 mod context;
 mod tvserver;
 #[cfg(feature = "webserver")]
+mod tv;
+#[cfg(feature = "webserver")]
 pub mod webserver;
 #[cfg(not(feature = "webserver"))]
 mod app;
