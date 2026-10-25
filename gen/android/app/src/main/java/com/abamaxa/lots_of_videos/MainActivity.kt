@@ -2,6 +2,9 @@ package com.abamaxa.lots_of_videos
 
 import android.graphics.Color
 import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
 import android.view.View
@@ -19,6 +22,17 @@ import java.io.File
 import kotlin.concurrent.thread
 
 class MainActivity : TauriActivity() {
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    fun requestDownloadNotifications() {
+        if (isFinishing || isDestroyed) return
+        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val preferences = getSharedPreferences("downloads", MODE_PRIVATE)
+        if (preferences.getBoolean("notificationPermissionRequested", false)) return
+        preferences.edit().putBoolean("notificationPermissionRequested", true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     private var pendingExport: File? = null
     private var copyingExport = false
     private val exportPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->

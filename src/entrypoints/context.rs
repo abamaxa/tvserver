@@ -142,6 +142,11 @@ pub async fn create_context() -> anyhow::Result<Context> {
 
     let youtube_fetcher = Arc::new(YoutubeFetcher::new(spawner.clone()));
 
+    #[cfg(target_os = "android")]
+    let torrent_fetcher = crate::adaptors::background_download::protect(torrent_fetcher);
+    #[cfg(target_os = "android")]
+    let youtube_fetcher = crate::adaptors::background_download::protect(youtube_fetcher);
+
     let repository = Arc::new(
         SqlRepository::new(&get_database_url(), Some(local_message_exchange.new_sender())).await?,
     );

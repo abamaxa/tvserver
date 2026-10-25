@@ -11,8 +11,16 @@ import org.junit.runner.RunWith
 /** Tests installed APK assets, extracted libraries and executable paths together. */
 @RunWith(AndroidJUnit4::class)
 class BundledRuntimeTest {
-    private fun runtime() = JSONObject(NativeBridge.prepareRuntime(
-        InstrumentationRegistry.getInstrumentation().targetContext))
+    private fun runtime(): JSONObject {
+        // JVM-attached Rust workers start without a Java context class loader.
+        // Exercise that real call-site condition before the SDK initializes.
+        val thread = Thread.currentThread()
+        val previous = thread.contextClassLoader
+        try {
+            thread.contextClassLoader = null
+            return JSONObject(NativeBridge.prepareRuntime(InstrumentationRegistry.getInstrumentation().targetContext))
+        } finally { thread.contextClassLoader = previous }
+    }
 
     private fun execute(runtime: JSONObject, program: String, vararg args: String): String {
         val environment = runtime.getJSONObject("environment")
