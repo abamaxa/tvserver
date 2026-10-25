@@ -1,64 +1,72 @@
 package com.abamaxa.lots_of_videos
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Color
-import android.net.Uri
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.SeekBar
-import android.widget.TextView
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONObject
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media
-import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.util.VLCVideoLayout
-import java.io.File
 
-/** In-process LibVLC player: MKV demuxing and E-AC-3 audio do not depend on WebView codecs. */
+/** A reconnectable window onto NativePlaybackService. It never owns a decoder or an audio source. */
 class NativePlayerActivity : Activity() {
-    private lateinit var engine: LibVLC
-    private lateinit var playback: MediaPlayer
-    private lateinit var media: Media
-    private lateinit var details: JSONObject
-    private lateinit var progress: SeekBar
-    private lateinit var clock: TextView
-    private lateinit var toggle: Button
-    private lateinit var header: LinearLayout
-    private lateinit var controls: LinearLayout
-    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var root: FrameLayout
+    private lateinit var surface: VLCVideoLayout
+    private lateinit var chrome: NativePlayerChrome
+    private var visualizer: NativeVisualizerView? = null
+    private var service: NativePlaybackService? = null
+    private var request: JSONObject? = null
+    private var resumed = false
+    private var bound = false
     private var dragging = false
     private var controlDialogOpen = false
-    private var startPosition = 0L
-    private var errorMessage: String? = null
+    private var settingsDialog: Dialog? = null
+    private var requestingAnalysisPermission = false
+    private var state = JSONObject()
+    private val handler = Handler(Looper.getMainLooper())
+    private val listener: (JSONObject) -> Unit = { update(it) }
     private val hideControls = Runnable {
-        if (::playback.isInitialized && playback.isPlaying && !dragging) {
-            header.visibility = View.INVISIBLE
-            controls.visibility = View.INVISIBLE
+        if (!state.optBoolean("paused", true) && !dragging && !controlDialogOpen) {
+            chrome.visibility = View.INVISIBLE
         }
     }
-    private val ticker = object : Runnable {
-        override fun run() {
-            if (!::playback.isInitialized) return
-            val length = playback.length.coerceAtLeast(0)
-            val time = playback.time.coerceAtLeast(0)
-            if (!dragging) progress.progress = if (length > 0) (time * 1000 / length).toInt() else 0
-            clock.text = "${formatTime(time)} / ${formatTime(length)}"
-            toggle.text = if (playback.isPlaying) "Pause" else "Play"
-            toggle.contentDescription = toggle.text
-            publish()
-            handler.postDelayed(this, 1000)
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val playback = (binder as NativePlaybackService.LocalBinder).service
+            service = playback
+            if (resumed) {
+                playback.attachSurface(surface)
+                playback.setUiVisible(true)
+            }
+            request?.let { playback.open(it) }
+            request = null
+            playback.addListener(listener)
+            if (playback.snapshot().optString("videoId").isEmpty()) finish()
+        }
+        override fun onServiceDisconnected(name: ComponentName) {
+            service = null
+            finish()
         }
     }
 
@@ -67,133 +75,163 @@ class NativePlayerActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         volumeControlStream = android.media.AudioManager.STREAM_MUSIC
-        details = JSONObject(intent.getStringExtra("video") ?: "{}")
-        startPosition = (details.optDouble("startTime", 0.0).coerceAtLeast(0.0) * 1000).toLong()
-        val root = FrameLayout(this).apply {
+        intent.getStringExtra("video")?.let { request = JSONObject(it) }
+        root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             contentDescription = "Video playback"
-            setOnClickListener {
-                if (header.visibility == View.VISIBLE) {
-                    handler.removeCallbacks(hideControls)
-                    header.visibility = View.INVISIBLE
-                    controls.visibility = View.INVISIBLE
-                } else showControls()
-            }
+            setOnClickListener { toggleControls() }
         }
-        val surface = VLCVideoLayout(this)
+        surface = VLCVideoLayout(this)
         root.addView(surface, FrameLayout.LayoutParams(-1, -1))
-        header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(0xCC000000.toInt())
-            addView(button("Back") { finish() })
-            addView(TextView(this@NativePlayerActivity).apply {
-                text = details.optString("video")
-                setTextColor(Color.WHITE)
-                maxLines = 2
-            }, LinearLayout.LayoutParams(0, -2, 1f))
-        }
-        root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-        controls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xDD000000.toInt())
-        }
-        clock = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER }
-        progress = SeekBar(this).apply {
-            max = 1000
-            contentDescription = "Video position"
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onStartTrackingTouch(seekBar: SeekBar) {
-                    dragging = true
-                    handler.removeCallbacks(hideControls)
-                }
-                override fun onProgressChanged(seekBar: SeekBar, value: Int, fromUser: Boolean) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar) {
-                    if (::playback.isInitialized && playback.isSeekable) {
-                        playback.setTime(playback.length * seekBar.progress / 1000)
-                    }
-                    dragging = false
-                    showControls()
-                    publish()
-                }
-            })
-        }
-        val transport = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        transport.addView(button("−10 s") { seek(-10) })
-        toggle = button("Pause") { if (playback.isPlaying) playback.pause() else playback.play(); publish() }
-        transport.addView(toggle)
-        transport.addView(button("+30 s") { seek(30) })
-        val tracks = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        tracks.addView(button("Audio") { chooseTrack(false) })
-        tracks.addView(button("Subtitles") { chooseTrack(true) })
-        tracks.addView(button("Speed") {
-            val rates = floatArrayOf(0.5f, 1f, 1.25f, 1.5f, 2f)
-            controlDialogOpen = true
-            handler.removeCallbacks(hideControls)
-            AlertDialog.Builder(this).setTitle("Playback speed")
-                .setItems(rates.map { "${it}×" }.toTypedArray()) { _, index -> playback.rate = rates[index] }
-                .setOnDismissListener { controlDialogOpen = false; scheduleControlsHide() }.show()
+        chrome = NativePlayerChrome(this, ::playerAction)
+        chrome.progress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+                dragging = true
+                handler.removeCallbacks(hideControls)
+            }
+            override fun onProgressChanged(seekBar: SeekBar, value: Int, fromUser: Boolean) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                service?.seekTo((state.optDouble("duration") * seekBar.progress).toLong())
+                dragging = false
+                showControls()
+            }
         })
-        controls.addView(clock)
-        controls.addView(progress)
-        controls.addView(transport)
-        controls.addView(tracks)
-        root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        root.addView(chrome, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
-            // Pad only the controls. Video fills the display even behind cutouts
-            // and temporarily revealed system bars.
-            val safe = insets.getInsetsIgnoringVisibility(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
-            header.setPadding(safe.left, safe.top, safe.right, 0)
-            controls.setPadding(safe.left, 0, safe.right, safe.bottom)
+            chrome.applyInsets(insets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()))
             insets
         }
         setContentView(root)
         ViewCompat.requestApplyInsets(root)
         hideSystemBars()
-        NativeBridge.player = this
-        try {
-            engine = LibVLC(this, arrayListOf("--audio-time-stretch", "--no-video-title-show"))
-            playback = MediaPlayer(engine)
-            playback.attachViews(surface, null, true, false)
-            playback.setEventListener { event ->
-                when (event.type) {
-                    MediaPlayer.Event.Playing -> {
-                        if (startPosition > 0 && playback.isSeekable) {
-                            playback.setTime(startPosition)
-                            startPosition = 0
-                        }
-                        scheduleControlsHide()
-                        publish()
-                    }
-                    MediaPlayer.Event.EncounteredError -> {
-                        errorMessage = "This video could not be played."
-                        publish()
-                        AlertDialog.Builder(this).setMessage(errorMessage)
-                            .setPositiveButton("Back") { _, _ -> finish() }.show()
-                    }
-                    MediaPlayer.Event.Paused, MediaPlayer.Event.EndReached -> {
-                        showControls()
-                        publish()
-                    }
-                }
-            }
-            media = Media(engine, Uri.fromFile(File(details.getString("path"))))
-            media.setHWDecoderEnabled(true, false)
-            playback.media = media
-            playback.play()
-            handler.post(ticker)
-        } catch (error: Exception) {
-            errorMessage = error.message ?: "Native player initialization failed"
-            publish()
-            AlertDialog.Builder(this).setMessage(errorMessage)
-                .setPositiveButton("Back") { _, _ -> finish() }.show()
+        startService(Intent(this, NativePlaybackService::class.java))
+        bound = bindService(Intent(this, NativePlaybackService::class.java), connection, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra("video")?.let {
+            val next = JSONObject(it)
+            if (service != null) service?.open(next) else request = next
+        }
+        showControls()
+    }
+
+    private fun chooseVisualizer() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            service?.setDisplayMode("visualizer")
+        } else {
+            // Keep Video selected until output-analysis permission has actually been granted.
+            chrome.setDisplayMode("video")
+            dialogOpened()
+            AlertDialog.Builder(this).setTitle("Visualize playback audio")
+                .setMessage("Android requires audio permission to analyze this player's output. The visualizer uses only the playing file; it does not use the microphone.")
+                .setPositiveButton("Continue") { _, _ ->
+                    requestingAnalysisPermission = true
+                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), ANALYSIS_PERMISSION)
+                }.setNegativeButton("Cancel", null).setOnDismissListener { dialogClosed() }.show()
         }
     }
 
-    private fun button(label: String, action: () -> Unit) = Button(this).apply {
-        text = label
-        contentDescription = label
-        setOnClickListener { action(); showControls() }
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == ANALYSIS_PERMISSION) {
+            requestingAnalysisPermission = false
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) service?.setDisplayMode("visualizer")
+            else Toast.makeText(this, "Audio permission is needed for the visualizer", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun update(next: JSONObject) {
+        val wasPaused = state.optBoolean("paused", true)
+        state = next
+        if (next.optBoolean("closed")) {
+            next.optString("error").takeIf { it.isNotEmpty() && it != "null" }?.let {
+                Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+            }
+            if (!isFinishing) finish()
+            return
+        }
+        chrome.bind(next, dragging)
+        val visualizing = next.optString("displayMode") == "visualizer"
+        if (visualizing && visualizer == null) {
+            visualizer = NativeVisualizerView(this) { message ->
+                service?.setDisplayMode("video")
+                Toast.makeText(this, "Visualizer unavailable: $message", Toast.LENGTH_LONG).show()
+            }.also { view ->
+                view.setOnTouchListener { _, event ->
+                    if (event.action == MotionEvent.ACTION_UP) toggleControls()
+                    true
+                }
+                root.addView(view, 1, FrameLayout.LayoutParams(-1, -1))
+            }
+        }
+        visualizer?.visibility = if (visualizing) View.VISIBLE else View.GONE
+        visualizer?.setPlayback(visualizing && resumed && next.optBoolean("playing"), next.optInt("audioSessionId"))
+        if (next.optBoolean("paused", true)) showControls()
+        else if (wasPaused) scheduleControlsHide()
+    }
+
+    private fun control(action: String) { service?.control(JSONObject().put("action", action)) }
+
+    private fun playerAction(action: NativePlayerChrome.Action) {
+        when (action) {
+            NativePlayerChrome.Action.BACK -> finish()
+            NativePlayerChrome.Action.STOP -> service?.stopPlayback()
+            NativePlayerChrome.Action.TOGGLE -> control("togglePause")
+            NativePlayerChrome.Action.REWIND -> service?.seek(-10)
+            NativePlayerChrome.Action.FORWARD -> service?.seek(30)
+            NativePlayerChrome.Action.VIDEO -> service?.setDisplayMode("video")
+            NativePlayerChrome.Action.VISUALIZER -> chooseVisualizer()
+            NativePlayerChrome.Action.BACKGROUND -> service?.setBackgroundAudio(chrome.backgroundAudio.isChecked)
+            NativePlayerChrome.Action.SETTINGS -> showSettings()
+            NativePlayerChrome.Action.AUDIO -> chooseTrack(false)
+            NativePlayerChrome.Action.SUBTITLES -> chooseTrack(true)
+            NativePlayerChrome.Action.SPEED -> chooseSpeed()
+        }
+        showControls()
+    }
+
+    private fun showSettings() {
+        val audio = service?.tracks(false)?.firstOrNull { it.id == state.optInt("currentAudioTrack", -1) }?.name ?: "Default"
+        val subtitles = if (state.optInt("currentSubtitleTrack", -1) < 0) "Off" else
+            service?.tracks(true)?.firstOrNull { it.id == state.optInt("currentSubtitleTrack") }?.name ?: "On"
+        val speed = state.optDouble("playbackRate", 1.0).toString().removeSuffix(".0") + "×"
+        val dialog = Dialog(this)
+        settingsDialog = dialog
+        dialog.setContentView(chrome.settingsContent(audio, subtitles, speed, { selected ->
+            dialog.dismiss()
+            playerAction(selected)
+        }, { dialog.dismiss() }))
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnDismissListener { settingsDialog = null; dialogClosed() }
+        dialogOpened()
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.3f)
+            setLayout(minOf(chrome.dp(328), root.width - chrome.safeInsets.left - chrome.safeInsets.right - chrome.dp(32)), -2)
+            attributes = attributes.apply {
+                gravity = Gravity.TOP or Gravity.RIGHT
+                x = chrome.safeInsets.right + chrome.dp(16)
+                y = chrome.safeInsets.top + chrome.dp(16)
+            }
+            WindowCompat.getInsetsController(this, decorView).hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    private fun chooseSpeed() {
+        val rates = floatArrayOf(0.5f, 1f, 1.25f, 1.5f, 2f)
+        dialogOpened()
+        AlertDialog.Builder(this).setTitle("Playback speed")
+            .setSingleChoiceItems(rates.map { it.toString() + "×" }.toTypedArray(),
+                rates.indexOfFirst { it == state.optDouble("playbackRate", 1.0).toFloat() }) { dialog, index ->
+                service?.control(JSONObject().put("action", "rate").put("rate", rates[index]))
+                dialog.dismiss()
+            }.setOnDismissListener { dialogClosed() }.show()
     }
 
     private fun hideSystemBars() {
@@ -203,103 +241,80 @@ class NativePlayerActivity : Activity() {
         }
     }
 
+    private fun toggleControls() {
+        if (chrome.visibility == View.VISIBLE && !state.optBoolean("paused", true)) {
+            handler.removeCallbacks(hideControls)
+            chrome.visibility = View.INVISIBLE
+        } else showControls()
+    }
+
     private fun scheduleControlsHide() {
         handler.removeCallbacks(hideControls)
-        if (::playback.isInitialized && playback.isPlaying && !dragging && !controlDialogOpen) {
-            handler.postDelayed(hideControls, 3000)
-        }
+        if (!state.optBoolean("paused", true) && !dragging && !controlDialogOpen) handler.postDelayed(hideControls, 3000)
     }
 
     private fun showControls() {
-        header.visibility = View.VISIBLE
-        controls.visibility = View.VISIBLE
+        chrome.visibility = View.VISIBLE
         scheduleControlsHide()
     }
 
-    override fun onUserInteraction() {
-        super.onUserInteraction()
-        scheduleControlsHide()
-    }
+    private fun dialogOpened() { controlDialogOpen = true; handler.removeCallbacks(hideControls) }
+    private fun dialogClosed() { controlDialogOpen = false; scheduleControlsHide() }
+
+    override fun onUserInteraction() { super.onUserInteraction(); scheduleControlsHide() }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideSystemBars()
     }
 
-    private fun seek(seconds: Int) {
-        if (playback.isSeekable) playback.setTime((playback.time + seconds * 1000L).coerceIn(0, playback.length.coerceAtLeast(0)))
-        publish()
-    }
-
-    fun control(request: JSONObject) {
-        if (!::playback.isInitialized) return
-        when (request.optString("action")) {
-            "seek" -> seek(request.optInt("seconds"))
-            "togglePause" -> if (playback.isPlaying) playback.pause() else playback.play()
-            "pause" -> playback.pause()
-            "stop" -> finish()
-            "subtitle" -> playback.setSpuTrack(request.optInt("track", -1))
-            "rate" -> playback.rate = request.optDouble("rate", 1.0).toFloat()
-        }
-        showControls()
-        publish()
-    }
-
     private fun chooseTrack(subtitles: Boolean) {
-        val tracks = (if (subtitles) playback.spuTracks else playback.audioTracks) ?: emptyArray()
+        val tracks = service?.tracks(subtitles) ?: return
         if (tracks.isEmpty()) return
-        controlDialogOpen = true
-        handler.removeCallbacks(hideControls)
+        dialogOpened()
+        val selected = state.optInt(if (subtitles) "currentSubtitleTrack" else "currentAudioTrack", -1)
         AlertDialog.Builder(this).setTitle(if (subtitles) "Subtitles" else "Audio track")
-            .setItems(tracks.map { it.name }.toTypedArray()) { _, index ->
-                if (subtitles) playback.setSpuTrack(tracks[index].id) else playback.setAudioTrack(tracks[index].id)
-                publish()
-            }.setOnDismissListener { controlDialogOpen = false; scheduleControlsHide() }.show()
+            .setSingleChoiceItems(tracks.map { it.name }.toTypedArray(), tracks.indexOfFirst { it.id == selected }) { dialog, index ->
+                service?.control(JSONObject().put("action", if (subtitles) "subtitle" else "audio").put("track", tracks[index].id))
+                dialog.dismiss()
+            }.setOnDismissListener { dialogClosed() }.show()
     }
 
-    private fun publish(closed: Boolean = false) {
-        if (!::details.isInitialized) return
-        val ready = ::playback.isInitialized
-        val stats = if (::media.isInitialized) media.stats else null
-        NativeBridge.publish(JSONObject()
-            .put("videoId", details.optString("videoId"))
-            .put("video", details.optString("video"))
-            .put("collection", details.optString("collection"))
-            .put("currentSrc", details.optString("path"))
-            .put("currentTime", if (ready) playback.time.coerceAtLeast(0) / 1000.0 else 0.0)
-            .put("duration", if (ready) playback.length.coerceAtLeast(0) / 1000.0 else 0.0)
-            .put("paused", !ready || !playback.isPlaying || closed)
-            .put("playbackRate", if (ready) playback.rate.toDouble() else 1.0)
-            .put("currentSubtitleTrack", if (ready) playback.spuTrack else -1)
-            .put("audioTracks", if (ready) playback.audioTracksCount else 0)
-            .put("decodedAudio", stats?.decodedAudio ?: 0)
-            .put("decodedVideo", stats?.decodedVideo ?: 0)
-            .put("closed", closed)
-            .put("error", errorMessage ?: JSONObject.NULL))
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        service?.attachSurface(surface)
+        service?.setUiVisible(true)
+        service?.snapshot()?.let { update(it) }
+        showControls()
     }
 
     override fun onPause() {
-        if (::playback.isInitialized) { playback.pause(); publish() }
+        resumed = false
+        visualizer?.setPlayback(false, state.optInt("audioSessionId"))
+        if (!requestingAnalysisPermission) service?.setUiVisible(false)
         super.onPause()
     }
 
+    override fun onStop() {
+        service?.setUiVisible(false)
+        service?.detachSurface(surface)
+        super.onStop()
+    }
+
     override fun onDestroy() {
+        settingsDialog?.dismiss()
         handler.removeCallbacksAndMessages(null)
-        publish(closed = true)
-        if (NativeBridge.player === this) NativeBridge.player = null
-        if (::playback.isInitialized) {
-            playback.setEventListener(null)
-            playback.stop()
-            playback.detachViews()
-            playback.release()
-        }
-        if (::media.isInitialized) media.release()
-        if (::engine.isInitialized) engine.release()
+        service?.removeListener(listener)
+        service?.detachSurface(surface)
+        if (isFinishing && service?.backgroundAudio != true) service?.stopPlayback()
+        if (bound) unbindService(connection)
+        visualizer?.destroy()
+        service = null
         super.onDestroy()
     }
 
-    private fun formatTime(ms: Long): String {
-        val seconds = ms / 1000
-        return "%02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
+    companion object {
+        private const val ANALYSIS_PERMISSION = 1003
     }
 }
