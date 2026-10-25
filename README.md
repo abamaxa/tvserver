@@ -83,6 +83,22 @@ The pinned yt-dlp version, source URL and SHA-256 are in
 `gen/android/app/src/main/assets/ytdlp/version.json`; dependency notices are
 packaged alongside it. Runtime data stays in app-private storage.
 
+User-started yt-dlp downloads (YouTube and SoundCloud) and torrent downloads keep
+running when the screen turns off or the app is backgrounded. Each transfer
+acquires Android execution before starting the engine, including magnet metadata
+lookup. Android 14 and newer use
+[user-initiated data transfer jobs](https://developer.android.com/develop/background-work/background-tasks/uidt),
+which provide the transfer's CPU lifetime without the six-hour limit of modern
+`dataSync` foreground services. Android 7–13 use a download foreground service
+with a partial wake lock. The Downloads notification shows progress and offers
+cancellation. Its notification permission is requested on the first download;
+declining it still allows background execution.
+
+Completing, failing or cancelling a download releases its execution slot without
+interrupting other transfers. Android system stops are reported as terminal task
+errors. Force-stop, reboot and recovery after process death are separate from
+screen-off execution; download queue restoration is not implemented.
+
 Video is the default for every new playback session. The native player has
 independent **Video / Visualizer** controls and a **Keep audio playing with screen
 off** switch, initially off. With that switch off, locking the phone or leaving
@@ -191,6 +207,27 @@ unresolved magnet and verifies repeated cancellation, without touching user task
 ```shell
 node tests/android_task_cancellation_smoke.cjs emulator-5554
 ```
+
+Screen-off download protection can be checked against an idle debug app. The
+smoke test backgrounds and locks the emulator, asks Android to reclaim disposable
+background processes, and verifies the transfer and its CPU protection survive:
+
+```shell
+node tests/android_background_download_smoke.cjs emulator-5554
+```
+
+To also exercise real yt-dlp and torrent byte transfers, build the disposable
+local seed peer and use `--transfers`. The test serves a throttled local video and
+a local torrent, verifies both advance while locked, and cancels its own
+transfers and removes its fixtures. This mode requires an Android emulator:
+
+```shell
+cargo build --no-default-features --features webserver --example android_download_seed
+node tests/android_background_download_smoke.cjs emulator-5554 --transfers
+```
+
+`NativeDownloadsTest` checks real Android jobs/services, screen-off CPU wake
+locks, progress notifications, independent cancellation and system-stop cleanup.
 
 On an idle emulator, the playlist smoke test checks the real Tauri commands and
 playlist UI, then restarts the app to verify SQLite persistence. It creates and

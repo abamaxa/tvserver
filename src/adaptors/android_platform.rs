@@ -60,7 +60,17 @@ pub(crate) fn with_env<T>(action: impl FnOnce(&mut JNIEnv) -> Result<T>) -> Resu
     let mut env = context.vm.attach_current_thread()?;
     let result = env.with_local_frame(64, action);
     if env.exception_check()? {
+        let exception = env.exception_occurred()?;
         env.exception_clear()?;
+        let description = (|| -> Result<String> {
+            let message = env.call_method(exception, "toString", "()Ljava/lang/String;", &[])?.l()?;
+            Ok(env.get_string(&JString::from(message))?.into())
+        })().unwrap_or_else(|_| "Android native operation failed".into());
+        if env.exception_check()? { env.exception_clear()?; }
+        return Err(match result {
+            Err(error) => error.context(description),
+            Ok(_) => anyhow::anyhow!(description),
+        });
     }
     result
 }
@@ -79,7 +89,7 @@ pub(crate) fn call(method: &str, payload: Option<&str>) -> Result<String> {
                 "(Landroid/content/Context;)Ljava/lang/String;",
                 &[JValue::Object(context.activity.as_obj())],
             )?,
-            ("openPlayer" | "shareVideos" | "exportVideo", Some(payload)) => {
+            ("openPlayer" | "shareVideos" | "exportVideo" | "beginDownload", Some(payload)) => {
                 let payload = env.new_string(payload)?;
                 env.call_static_method(
                     class,
