@@ -87,7 +87,12 @@ jobs:
           profile: pixel_5
           disable-animations: true
           working-directory: gen/android
-          script: ./gradlew --no-daemon :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug -PabiList=x86_64
+          script: |
+            # Reuse the JNI bridge already built above; the regression exercises
+            # the release-minified Java extraction path with fresh runtime data.
+            ./gradlew --no-daemon :app:assembleUniversalRelease -x :app:rustBuildUniversalRelease -PabiList=x86_64
+            python3 ../../tests/android_release_runtime_smoke.py --serial emulator-5554 --apk app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+            ./gradlew --no-daemon :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug -PabiList=x86_64
       - name: Upload Android test reports
         if: always()
         uses: actions/upload-artifact@v4
