@@ -3,6 +3,8 @@ package com.abamaxa.lots_of_videos
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
@@ -14,7 +16,7 @@ import android.widget.Toast
 
 /** JNI boundary shared by Rust's download tasks and the native player. */
 object NativeBridge {
-    @Volatile var player: NativePlayerActivity? = null
+    @Volatile var playback: NativePlaybackService? = null
     @Volatile var playerState = "{}"
 
     @JvmStatic external fun nativePlayerEvent(state: String)
@@ -80,6 +82,7 @@ object NativeBridge {
     fun openPlayer(activity: Activity, payload: String): String {
         activity.runOnUiThread {
             activity.startActivity(Intent(activity, NativePlayerActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra("video", payload))
         }
         return "{}"
@@ -108,8 +111,7 @@ object NativeBridge {
     @JvmStatic
     fun controlPlayer(payload: String): String {
         val request = JSONObject(payload)
-        val active = player ?: return playerState
-        active.runOnUiThread { active.control(request) }
+        Handler(Looper.getMainLooper()).post { playback?.control(request) }
         return playerState
     }
 

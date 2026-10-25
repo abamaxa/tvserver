@@ -83,6 +83,41 @@ The pinned yt-dlp version, source URL and SHA-256 are in
 `gen/android/app/src/main/assets/ytdlp/version.json`; dependency notices are
 packaged alongside it. Runtime data stays in app-private storage.
 
+Video is the default for every new playback session. The native player has
+independent **Video / Visualizer** controls and a **Keep audio playing with screen
+off** switch, initially off. With that switch off, locking the phone or leaving
+the player pauses playback. With it on, Back returns to the library while audio
+continues. The notification and lock-screen controls provide play/pause, seeking,
+and Stop. **Stop** in the player also releases the decoder and playback service.
+Unlocking or reopening the player reconnects to the same session; it does not
+automatically resume a paused video.
+
+`NativePlaybackService` owns the single LibVLC player, Android `MediaSession`,
+audio focus, foreground notification and playback wake lock. The Activity only
+attaches its video surface and controls. Transient focus loss pauses and resumes
+on focus return unless the user paused in the meantime; permanent focus loss and
+headset removal pause. Screen-off playback disables video output. Display changes
+keep the media, position, pause state, rate, volume and audio track intact.
+
+The visualizer uses Android's `Visualizer` effect on an explicitly allocated,
+nonzero LibVLC AudioTrack session. It reads this player's decoded PCM output;
+there is no microphone capture, global-output capture, or second audio player.
+Android requires `RECORD_AUDIO` permission for this effect, requested when the
+user first chooses Visualizer. Declining permission keeps Video selected. If
+analysis is unavailable, the player returns to Video with an explanation.
+Capture and rendering stop while paused or hidden. The local renderer reuses
+the frontend's classic visualizer, including reduced-motion support, in a WebView
+that can load only bundled assets. `android-build.sh` regenerates those assets
+using `scripts/build-android-visualizer.mjs` in the frontend repository.
+
+The service follows Android's [background playback lifecycle guidance](https://developer.android.com/media/media3/session/background-playback)
+using the platform media-session interface compatible with LibVLC, rather than
+replacing its codec stack with ExoPlayer. See also Android's
+[foreground-service types](https://developer.android.com/develop/background-work/services/fgs/service-types#media),
+[audio-focus guidance](https://developer.android.com/media/optimize/audio-focus),
+and [session-scoped Visualizer contract](https://developer.android.com/reference/android/media/audiofx/Visualizer).
+The AudioTrack session option is supported by [VLC's audio output](https://mailman.videolan.org/pipermail/vlc-commits/2018-February/047694.html).
+
 On each Android cold start, a background task checks the official stable GitHub
 release and fetches a newer Python payload, including its EJS solver. It checks
 the release's SHA-256 and tests imports against the bundled Python before
@@ -126,6 +161,28 @@ python3 tests/android_recents_smoke.py
 When finished, remove only the test package with
 `adb -s emulator-5554 uninstall com.abamaxa.lots_of_videos.test`.
 Keep the main `com.abamaxa.lots_of_videos` package installed to preserve its library.
+
+The playback-session regression tests cover default pause on power-button lock,
+opt-in audio while locked, Activity destruction/reconnection, notification and
+media-session controls, interruptions, display-state preservation, actual tone
+versus silence analysis, and MKV/E-AC-3 decoding. After the normal Android build,
+the test APK can be built without re-running Tauri's Rust bridge:
+
+```shell
+cd gen/android
+./gradlew :app:assembleUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug
+adb -s emulator-5554 install -r app/build/outputs/apk/androidTest/universal/debug/app-universal-debug-androidTest.apk
+adb -s emulator-5554 shell am instrument -w -r \
+  -e class com.abamaxa.lots_of_videos.NativePlaybackSessionTest,com.abamaxa.lots_of_videos.NativePlayerUiTest \
+  com.abamaxa.lots_of_videos.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The session tests use disposable files under the app's cache directory and grant
+audio-analysis permission on the test device. They restore the device's media
+volume and immersive tutorial setting. They never delete downloads or databases.
+The protected headset-removal broadcast is simulated as the system UID on a
+userdebug emulator; that one check is skipped on phones, where a physical
+wired/Bluetooth disconnect should be verified.
 
 Native task cancellation can be checked against a running debug app with Node 22+
 and the Android SDK configured. This uses real Tauri IPC to cancel a disposable,
