@@ -19,9 +19,9 @@ pub struct YoutubeTask {
 #[async_trait]
 impl DownloadProgress for YoutubeTask {
     fn terminate(&self) {
-        tracing::info!("terminating youtube download: {}", self.request.name);
-        // Note: the spawner's Task doesn't expose a synchronous abort.
-        // Logging the termination request; the monitor task will be cleaned up when dropped.
+        if let Ok(monitor) = self.monitor.try_read() {
+            if let Some(task) = monitor.as_ref() { task.terminate(); }
+        }
     }
 
     async fn observe(&self) -> DownloadInfo {
@@ -32,42 +32,33 @@ impl DownloadProgress for YoutubeTask {
 impl YoutubeTask {
     pub fn new(spawner: Spawner, request: DownloadRequest) -> Self {
         let destination = PathBuf::from(get_downloads_dir())
-            .join(format!("{}.mp4", request.name));
+            .join(format!("{}.mp4", download_filename(&request.name)));
 
         Self { spawner, request, monitor: RwLock::new(None), destination: destination }
     }
 
     async fn start(&self) -> Result<(), anyhow::Error> {
 
-        let python = youtube_runtime::python_with_pip()
-            .ok_or_else(|| anyhow::anyhow!("no Python interpreter with pip found for yt-dlp"))?;
-        let python = python.to_string_lossy().into_owned();
-        let package_dir = youtube_runtime::package_dir().to_string_lossy().into_owned();
+        let mut command = youtube_runtime::command().await?;
 
         let output_path = self.destination
             .to_string_lossy()
-            .to_string();
+            .replace('%', "%%");
+
+        let link = if self.request.link.len() == 11 && self.request.link.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
+            format!("https://www.youtube.com/watch?v={}", self.request.link)
+        } else { self.request.link.clone() };
+        command.args.extend([
+            "--no-update", "--no-playlist", "--newline", "--socket-timeout", "20",
+            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "--merge-output-format", "mp4", "-o", &output_path, "--", &link,
+        ].into_iter().map(String::from));
 
         let monitor =self.spawner
             .execute(
                 &self.request.name,
-                &python,
-                vec![
-                    "-c",
-                    youtube_runtime::RUN_YTDLP,
-                    &package_dir,
-                    "--no-update",
-                    // Deno is enabled by default; also allow the Node runtime
-                    // supplied by our container and local development setup.
-                    "--js-runtimes",
-                    "node",
-                    "-f", 
-                    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                    "-o",
-                    &output_path,
-                    "--",
-                    &self.request.link,
-                ],
+                &command.program,
+                command.args.iter().map(String::as_str).collect(),
             )
             .await;
 
@@ -123,6 +114,17 @@ impl YoutubeTask {
 
 }
 
+fn download_filename(title: &str) -> String {
+    let mut name = String::new();
+    for character in title.chars() {
+        let character = if character.is_control() || matches!(character, '/' | '\\') { '_' } else { character };
+        if name.len() + character.len_utf8() > 180 { break; }
+        name.push(character);
+    }
+    let name = name.trim_matches(['.', ' ']);
+    if name.is_empty() { "YouTube video".into() } else { name.into() }
+}
+
 pub struct YoutubeFetcher {
     spawner: Spawner,
 }
@@ -150,6 +152,16 @@ mod tests {
     use crate::domain::SearchEngineType;
     use axum::{http::header, routing::get, Router};
     use std::time::Duration;
+
+    #[test]
+    fn download_names_stay_in_one_storage_component() {
+        assert_eq!(download_filename("../bad/name\\clip"), "_bad_name_clip");
+        assert_eq!(download_filename("..."), "YouTube video");
+        assert_eq!(download_filename("A café & 100% video"), "A café & 100% video");
+        let name = download_filename(&"é".repeat(200));
+        assert!(name.len() <= 180);
+        assert!(!name.contains('/'));
+    }
 
     struct DownloadFixture {
         directory: PathBuf,

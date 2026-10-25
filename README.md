@@ -26,17 +26,17 @@ The easiest way to get started is with docker compose.
 
 First you must create a file called `.env` in the root of the source directory that will contain
 values for the required environment variables. There is a sample `.env` file called `env.sample`
-that contains suitable values for running docker compose on macOS,  except for the `GOOGLE_KEY`, 
-which you must supply yourself ([see below](#obtaining-a-google-api-key)).
+that contains suitable values for running docker compose on macOS. `GOOGLE_KEY`
+is optional ([see below](#obtaining-a-google-api-key)).
 
 ```shell
 $ cp env.sample .env
-$ echo GOOGLE_KEY=YOUR_GOOGLE_KEY >> .env
 $ export UID
 $ docker compose up
 ```
-NB YouTube search will not work until a key for the Google API is provided through the 
-`GOOGLE_KEY` environment variable - ([see below](#obtaining-a-google-api-key)).
+YouTube search uses yt-dlp's `ytsearch` when `GOOGLE_KEY` is unset. If a key is
+configured, search uses Google's official API. Keyless search does not require
+a developer key, but YouTube changes and rate limits can require yt-dlp updates.
 
 ### YouTube download dependencies
 
@@ -58,8 +58,8 @@ The Docker image includes these dependencies; rebuild it after updating the
 Dockerfile. A supported Deno installation can also be used because yt-dlp
 enables it by default.
 
-Updating bare `yt-dlp` does not install the JavaScript challenge solver. Search
-uses Google's API and can still work when download dependencies are missing.
+Updating bare `yt-dlp` does not install the JavaScript challenge solver. Keyless
+search uses the same runtime as downloads; official API search is independent.
 See the [yt-dlp JavaScript setup guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 
 To verify the download command without contacting YouTube, run the regression
@@ -69,13 +69,79 @@ test after yt-dlp is installed in the downloads directory:
 cargo test --no-default-features --features webserver --lib downloads_one_file_with_a_fixed_output_name -- --ignored
 ```
 
+### Android playback and downloads
+
+Android uses an embedded LibVLC player, including MKV and E-AC-3 decoding,
+seeking, track selection, playback speed and saved resume positions. Tapping a
+video opens immersive landscape playback. Controls hide after three seconds of
+playback and reappear when the screen is tapped; paused controls stay visible.
+The library returns to the phone's orientation and respects system bars and
+display cutouts. The APK
+bundles Python 3.12, FFmpeg/FFprobe, QuickJS, and the official yt-dlp executable
+with its EJS solver. No device-side pip installation or Google API key is needed.
+The pinned yt-dlp version, source URL and SHA-256 are in
+`gen/android/app/src/main/assets/ytdlp/version.json`; dependency notices are
+packaged alongside it. Runtime data stays in app-private storage.
+
+On each Android cold start, a background task checks the official stable GitHub
+release and fetches a newer Python payload, including its EJS solver. It checks
+the release's SHA-256 and tests imports against the bundled Python before
+activating the update. Running searches/downloads retain their original script;
+new ones use the update immediately. The checked update persists across restarts,
+while offline, failed or incompatible updates leave the last working copy (or the
+APK's bundled version) available. Python, QuickJS and FFmpeg still update with the
+APK. This updater is Android-only and does not affect the web UI or server setup.
+
+Build from the frontend repository using JDK 21:
+
+```shell
+./android-build.sh --debug --target aarch64 --apk --ci
+```
+
+Android's Rust shared library is linked with 16 KB page alignment, matching the
+VLC and downloader SDK prebuilts. Check the actual APK after building (from this
+backend directory):
+
+```shell
+python3 tests/android_apk_alignment.py gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+The downloader SDK's `libpython.zip.so` and `libffmpeg.zip.so` are ZIP data
+archives, so they have no ELF segments to align. Executable `.so` files must all
+pass this check. Also verify APK ZIP alignment with Android Build Tools'
+`zipalign -c -P 16 4 <apk>`.
+
+On-device regression tests are in `gen/android/app/src/androidTest`. The Android
+project keeps APKs installed after instrumentation tests to preserve emulator
+user data; do not override `android.injected.androidTest.leaveApksInstalledAfterRun`.
+Test-only helper activities are excluded from Recent apps so their blank windows
+cannot be reopened as if they were the real app. After instrumentation, start
+MainActivity and check the actual return path (with `adb` on your PATH):
+
+```shell
+adb -s emulator-5554 shell am start -W -n com.abamaxa.lots_of_videos/.MainActivity
+python3 tests/android_recents_smoke.py
+```
+
+When finished, remove only the test package with
+`adb -s emulator-5554 uninstall com.abamaxa.lots_of_videos.test`.
+Keep the main `com.abamaxa.lots_of_videos` package installed to preserve its library.
+
+Native task cancellation can be checked against a running debug app with Node 22+
+and the Android SDK configured. This uses real Tauri IPC to cancel a disposable,
+unresolved magnet and verifies repeated cancellation, without touching user tasks:
+
+```shell
+node tests/android_task_cancellation_smoke.cjs emulator-5554
+```
+
 ## Configuration
 
 The tvserver daemon is configured through the following environment variables
 
 | Environment Variable | Description                                                                                   |
 |----------------------|-----------------------------------------------------------------------------------------------|
-| GOOGLE_KEY           | *A key to use with the Google API, see below for instructions for obtaining a key.            |
+| GOOGLE_KEY           | Optional official YouTube API key. If unset, search uses yt-dlp without a developer key.      |
 | MOVIE_DIR            | *The directory where movies will be stored.                                                   |
 | BOOK_DIR             | The directory where PDF and EPUB books will be stored; defaults to lowercase `books` beside `MOVIE_DIR`. |
 | BOOK_THUMBNAIL_DIR   | The directory for book covers; defaults to `<BOOK_DIR>/.thumbnails`.                           |

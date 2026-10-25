@@ -6,6 +6,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRo
 use sqlx::{Error, Row};
 
 use crate::domain::algorithm::get_thumbnails_url;
+#[cfg(not(target_os = "android"))]
 use crate::domain::config::get_database_migration_dir;
 use crate::domain::messages::{BookEvent, LocalMessage, LocalMessageSender, VideoEvent};
 use crate::domain::models::{
@@ -16,6 +17,9 @@ use crate::domain::traits::Databaser;
 use itertools::Itertools;
 
 const MEMORY_DB_URL: &str = ":memory:";
+
+#[cfg(any(target_os = "android", test))]
+static EMBEDDED_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
 
 pub struct SqlRepository {
     pool: SqlitePool,
@@ -35,9 +39,11 @@ impl SqlRepository {
     }
 
     async fn do_migrations(pool: &SqlitePool) -> Result<(), MigrateError> {
-        let migrations_dir = get_database_migration_dir();
+        #[cfg(target_os = "android")]
+        let m = &EMBEDDED_MIGRATIONS;
 
-        let m = Migrator::new(migrations_dir.as_path()).await?;
+        #[cfg(not(target_os = "android"))]
+        let m = Migrator::new(get_database_migration_dir().as_path()).await?;
 
         m.run(pool).await
     }
@@ -910,6 +916,55 @@ mod tests {
             },
             progression,
         }
+    }
+
+    #[tokio::test]
+    async fn embedded_migrations_initialize_persistent_storage_and_preserve_it_on_restart() {
+        let root = std::env::temp_dir().join(format!("android-database-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database_path = root.join("tvserver.sqlite");
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        EMBEDDED_MIGRATIONS.run(&pool).await.unwrap();
+        let db = SqlRepository { pool, sender: None };
+        db.save_book(&sample_book(
+            125,
+            "Shelf",
+            "persistent.epub",
+            "Persistent Book",
+        ))
+        .await
+        .unwrap();
+        db.save_book_progress(125, &progress_request("epubcfi(/6/4)", Some(0.5)))
+            .await
+            .unwrap();
+        db.pool.close().await;
+
+        let pool = SqlitePoolOptions::new().connect_with(options).await.unwrap();
+        EMBEDDED_MIGRATIONS.run(&pool).await.unwrap();
+        let db = SqlRepository { pool, sender: None };
+        let book = db.retrieve_book(125).await.unwrap();
+        assert_eq!(book.title, "Persistent Book");
+        assert_eq!(book.progress.unwrap().progression, Some(0.5));
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('collections', 'video_details', 'history', 'books')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(tables, 4);
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(applied as usize, EMBEDDED_MIGRATIONS.iter().count());
+        db.pool.close().await;
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ android {
         applicationId = "com.abamaxa.lots_of_videos"
         minSdk = 24
         targetSdk = 36
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
@@ -51,6 +52,11 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    packaging {
+        jniLibs.useLegacyPackaging = true
+        jniLibs.keepDebugSymbols.add("**/libpython.zip.so")
+        jniLibs.keepDebugSymbols.add("**/libffmpeg.zip.so")
+    }
 }
 
 rust {
@@ -58,6 +64,9 @@ rust {
 }
 
 dependencies {
+    implementation("org.videolan.android:libvlc-all:3.7.7")
+    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
+    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

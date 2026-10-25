@@ -21,10 +21,7 @@ pub async fn run(port: Option<u16>) -> anyhow::Result<()> {
 }
 
 #[cfg(not(feature = "webserver"))]
-#[cfg_attr(not(mobile), tokio::main)]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub async fn run() {
-    // on desktop, tokio::main handles the async runtime
-    // on mobile, mobile_entry_point handles the async runtime
-    run_tauri().await;
+pub fn run() {
+    run_tauri();
 }

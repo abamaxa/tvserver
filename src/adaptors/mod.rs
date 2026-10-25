@@ -1,4 +1,8 @@
 mod http_fetcher;
+#[cfg(target_os = "android")]
+pub(crate) mod android_media;
+#[cfg(target_os = "android")]
+pub(crate) mod android_platform;
 mod object_store;
 mod repository;
 mod subprocess;
@@ -6,6 +10,8 @@ mod websocket;
 mod torrent_fetcher;
 mod youtube_fetcher;
 pub(crate) mod youtube_runtime;
+#[cfg(any(target_os = "android", test))]
+mod android_ytdlp_update;
 mod telegram;
 #[cfg(feature = "webserver")]
 mod restrict_access;

@@ -21,6 +21,13 @@ pub struct YoutubeClient {
 #[async_trait]
 impl MediaSearcher<DownloadableItem> for YoutubeClient {
     async fn search(&self, query: &str) -> anyhow::Result<YoutubeResult> {
+        if query.trim().is_empty() { return Ok(SearchResults::success(vec![])); }
+        if self.key.trim().is_empty() {
+            return match keyless_search(query).await {
+                Ok(results) => Ok(SearchResults::success(results)),
+                Err(error) => Ok(SearchResults::error(&error.to_string())),
+            };
+        }
         let query = [
             ("q", query),
             ("key", &self.key),
@@ -34,6 +41,38 @@ impl MediaSearcher<DownloadableItem> for YoutubeClient {
             Err(err) => Ok(SearchResults::error(&err.to_string())),
         }
     }
+}
+
+async fn keyless_search(query: &str) -> anyhow::Result<Vec<DownloadableItem>> {
+    let mut command = crate::adaptors::youtube_runtime::command().await?;
+    let query = format!("ytsearch25:{}", query.trim().chars().take(200).collect::<String>());
+    command.args.extend([
+        "--flat-playlist", "--dump-single-json", "--skip-download", "--quiet",
+        "--no-warnings", "--socket-timeout", "15", "--extractor-retries", "1", "--", &query,
+    ].into_iter().map(String::from));
+    let output = tokio::time::timeout(std::time::Duration::from_secs(45),
+        tokio::process::Command::new(command.program).args(command.args).kill_on_drop(true).output()
+    ).await.map_err(|_| anyhow::anyhow!("YouTube search timed out; please try again"))??;
+    anyhow::ensure!(output.status.success(), "YouTube search failed: {}",
+        String::from_utf8_lossy(&output.stderr).chars().take(600).collect::<String>());
+    parse_keyless_results(&output.stdout)
+}
+
+fn parse_keyless_results(data: &[u8]) -> anyhow::Result<Vec<DownloadableItem>> {
+    let response: serde_json::Value = serde_json::from_slice(data)?;
+    let entries = response["entries"].as_array().ok_or_else(|| anyhow::anyhow!("YouTube returned an invalid search response"))?;
+    Ok(entries.iter().filter_map(|entry| {
+        let id = entry["id"].as_str()?;
+        if id.len() != 11 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) { return None; }
+        let title = entry["title"].as_str()?.trim();
+        if title.is_empty() { return None; }
+        Some(DownloadableItem {
+            title: title.into(),
+            description: entry["description"].as_str().or_else(|| entry["channel"].as_str()).unwrap_or_default().into(),
+            link: format!("https://www.youtube.com/watch?v={id}"),
+            engine: crate::domain::SearchEngineType::YouTube,
+        })
+    }).take(25).collect())
 }
 
 impl YoutubeClient {
@@ -161,9 +200,9 @@ mod test {
         };
 
         let client: &dyn MediaSearcher<DownloadableItem> =
-            &YoutubeClient::new("", Arc::new(fetcher));
+            &YoutubeClient::new("configured-key", Arc::new(fetcher));
 
-        let response = client.search("").await;
+        let response = client.search("test query").await;
 
         assert!(response.is_ok());
 
@@ -172,6 +211,27 @@ mod test {
         assert_eq!(&results.error.unwrap().to_string(), ERROR_MESSAGE);
 
         Ok(())
+    }
+
+    #[test]
+    fn keyless_results_ignore_non_video_entries_and_preserve_downloadable_urls() {
+        let response = serde_json::json!({"entries": [
+            null,
+            {"id": "UC-channel", "title": "Channel"},
+            {"id": "BaW_jenozKc", "title": "Test video", "channel": "Test author"},
+            {"id": "bad/id!", "title": "Invalid result"}
+        ]});
+        let results = parse_keyless_results(&serde_json::to_vec(&response).unwrap()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Test video");
+        assert_eq!(results[0].link, "https://www.youtube.com/watch?v=BaW_jenozKc");
+        assert_eq!(results[0].description, "Test author");
+    }
+
+    #[tokio::test]
+    async fn keyless_empty_query_returns_no_results_without_a_runtime_or_api_key() {
+        let client = YoutubeClient::new("", Arc::new(MockFetcher::default()));
+        assert!(client.search("  ").await.unwrap().results.unwrap().is_empty());
     }
 
     #[tokio::test]

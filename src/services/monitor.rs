@@ -1,6 +1,9 @@
 use crate::domain::messages::{LocalMessage, LocalMessageSender};
-use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Storer};
+use crate::domain::traits::{BookCheckerHandle, Checker, Storer};
+#[cfg(not(target_os = "android"))]
+use crate::domain::traits::ProcessSpawner;
 use crate::services::TaskManager;
+#[cfg(not(target_os = "android"))]
 use crate::adaptors::youtube_runtime;
 use std::sync::Arc;
 use tokio::task::{self, JoinHandle};
@@ -23,6 +26,8 @@ impl Monitor {
         sender: LocalMessageSender,
     ) -> JoinHandle<()> {
         task::spawn(async move {
+            #[cfg(not(target_os = "android"))]
+            {
             tracing::info!("updating yt-dlp");
             // YouTube's JavaScript challenge solver is a separate dependency;
             // upgrade it together with yt-dlp to keep their versions compatible.
@@ -42,6 +47,7 @@ impl Monitor {
                     ],
                 )
                 .await;
+            }
 
             tracing::info!("starting download monitor");
             let monitor = Self {

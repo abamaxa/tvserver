@@ -1,4 +1,7 @@
 # Add project specific ProGuard rules here.
+-keep class com.abamaxa.lots_of_videos.NativeBridge { *; }
+-keep class org.videolan.libvlc.** { *; }
+-keep class org.videolan.medialibrary.** { *; }
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #

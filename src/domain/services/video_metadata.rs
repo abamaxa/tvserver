@@ -3,6 +3,7 @@ use crate::domain::config::{get_movie_dir, get_thumbnail_dir};
 use crate::domain::models::{VideoDetails, VideoMetadata, VideoState};
 use crate::domain::traits::{ProcessSpawner, Repository, Storer};
 use crate::domain::services::extract_subtitles;
+#[cfg(not(target_os = "android"))]
 use rand::Rng;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
@@ -11,11 +12,14 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use std::{io, fmt};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "android"))]
 use std::process::Stdio;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
-use tokio::{fs, process::Command};
+use tokio::fs;
+#[cfg(not(target_os = "android"))]
+use tokio::process::Command;
 
 #[derive(Debug)]
 pub enum MetaDataErrorCode {
@@ -255,6 +259,15 @@ pub async fn calculate_checksum<P: AsRef<Path>>(path: P) -> io::Result<i64> {
     Ok(hasher.finish() as i64)
 }
 
+#[cfg(target_os = "android")]
+pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
+    let path = path.as_ref().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || crate::adaptors::android_media::probe(&path))
+        .await??;
+    parse_video_metadata(output)
+}
+
+#[cfg(not(target_os = "android"))]
 pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata, Box<dyn Error>> {
     //let spawner = Arc::new(TokioProcessSpawner::new());
 
@@ -281,6 +294,10 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
 
     // Parse ffprobe output
     let output_str = String::from_utf8(output.stdout)?;
+    parse_video_metadata(output_str)
+}
+
+fn parse_video_metadata(output_str: String) -> Result<VideoMetadata, Box<dyn Error>> {
     let json: Value = serde_json::from_str(&output_str)?;
 
     let mut video_stream = None;
@@ -361,6 +378,42 @@ pub async fn get_video_metadata<P: AsRef<Path>>(path: P) -> Result<VideoMetadata
     }.from_probe_data(&Some(output_str)))
 }
 
+#[cfg(target_os = "android")]
+async fn extract_random_frame<P: AsRef<Path>>(
+    input_path: P,
+    metadata: &VideoMetadata,
+) -> io::Result<Vec<String>> {
+    if metadata.width == 0 || metadata.height == 0 || metadata.duration < 0.1 {
+        return Ok(vec![]);
+    }
+    let path = input_path.as_ref().to_path_buf();
+    let timestamp_us = (metadata.duration * 0.25 * 1_000_000.0) as i64;
+    // Some device decoders cannot extract a frame from an otherwise playable file.
+    // A missing thumbnail must not prevent the completed download entering the library.
+    tokio::task::spawn_blocking(move || {
+        let jpeg = match crate::adaptors::android_media::frame_jpeg(&path, timestamp_us) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(vec![]),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "Android thumbnail unavailable: {error}");
+                return Ok(vec![]);
+            }
+        };
+        let image = image::load_from_memory(&jpeg).map_err(io::Error::other)?;
+        let thumbnail_dir = get_thumbnail_dir(&get_movie_dir());
+        std::fs::create_dir_all(&thumbnail_dir)?;
+        let mut paths = Vec::new();
+        for (width, height) in [(720, 450), (480, 300), (360, 225), (160, 100)] {
+            let output = get_thumbnail_path_with_size(&thumbnail_dir, &path, width);
+            image.resize_to_fill(width, height, image::imageops::FilterType::Triangle)
+                .save_with_format(&output, image::ImageFormat::Jpeg).map_err(io::Error::other)?;
+            paths.push(output.file_name().unwrap().to_string_lossy().into_owned());
+        }
+        Ok(paths)
+    }).await?
+}
+
+#[cfg(not(target_os = "android"))]
 async fn extract_random_frame<P: AsRef<Path>>(
     input_path: P,
     metadata: &VideoMetadata,
@@ -469,10 +522,31 @@ fn get_thumbnail_path_with_size<P: AsRef<Path>>(thumbnail_dir: &PathBuf, video: 
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_random_frame, get_video_metadata};
+    use super::{extract_random_frame, get_video_metadata, parse_video_metadata};
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use rand::random;
     use std::path::PathBuf;
+
+    #[test]
+    fn android_media_streams_keep_dimensions_duration_and_tracks_after_reloading() {
+        let probe = serde_json::json!({
+            "format": { "duration": "123.45" },
+            "streams": [
+                { "index": 0, "codec_type": "video", "width": 1920, "height": 1080 },
+                { "index": 1, "codec_type": "audio", "codec_name": "aac", "tags": { "language": "eng" } },
+                { "index": 2, "codec_type": "subtitle", "codec_name": "subrip", "tags": { "language": "spa" } }
+            ]
+        }).to_string();
+        let metadata = parse_video_metadata(probe).unwrap();
+        assert_eq!(metadata.duration, 123.45);
+        assert_eq!((metadata.width, metadata.height), (1920, 1080));
+        assert_eq!(metadata.audio_tracks, 1);
+        let reloaded = crate::domain::models::VideoMetadata::default().from_probe_data(&metadata.probe_data);
+        assert_eq!(reloaded.audio_track_list, metadata.audio_track_list);
+        assert_eq!(reloaded.subtitle_tracks, metadata.subtitle_tracks);
+        assert_eq!(reloaded.audio_track_list.unwrap()[0].language, "eng");
+        assert_eq!(reloaded.subtitle_tracks.unwrap()[0].language, "spa");
+    }
 
     const AUDIO_ONLY_MP3: &str = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYyLjEyLjEwMAAAAAAAAAAAAAAA/+MYxAAMSJKUeU8AAAQJKAL3ve973vSlKUpSlL3u/f337xKp8t4t4m4uZc1WGxACAYrB9//+U9/R/gQ5z/QqJoc4WcQ3/GVE/+MYxAkO8PKQAZRQACo5Qhb/Bt4P1A9yADKiJOAfEwHMjrA71MPfAlAKgKisIoRX/5CPR6RD4fAr/hIGhKEgauAgACHD/76v/+MYxAgMkJaOedUAAv//UpJ0hyhZQW6ANVQAwMEHEWN0wV/2BMp+7//+1d/0sXZ9WUq1///e2moQAAQCAQT/X//mA5BIjLiC/+MYxBAM+KJmWVUAAoGegYZE4GNTiB1vtgcACg9B7Yg8Y8k5hr///6f/////b///096sWIdf6Ivrr//P7FC+jlv0un8cdS+F/+MYxBcSYRqUAZpYAIHgqjXkFTRtVwQT7l3GJPn6wNAMjqBCIMkI1P74qvrWLjpqom9b/gYWIgEV/+SAwswwtaRNaqhZ8lUK/+MYxAgL4LWwAckAARxZE0mh2Mck1KVkQqFUyEMktERCSocWRNWhKmwn5BWILCd//0F4NxVMQU1FMy4xMDBVVVVVVVVVVVVV";
     const AUDIO_ONLY_MP3_WITH_COVER: &str = "SUQzAwAAAAABGFRTU0UAAAAPAAAATGF2ZjYyLjEyLjEwMABBUElDAAAAawAAAGltYWdlL3BuZwAAAIlQTkcNChoKAAAADUlIRFIAAAACAAAAAggCAAAA/dSacwAAAAlwSFlzAAAAAQAAAAEATyXE1gAAABBJREFUeJxj/MMAAixgkgEADQQBAr9QFbMAAAAASUVORK5CYIIAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAABgAAAogAcXFxcXFxcXFxcXFxcXFxcY6Ojo6Ojo6Ojo6Ojo6Ojo6OqqqqqqqqqqqqqqqqqqqqqsfHx8fHx8fHx8fHx8fHx8fH4+Pj4+Pj4+Pj4+Pj4+Pj4+P/////////////////////AAAAAExhdmYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKIQfZkkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+MYxAAMSJKUeU8AAAQJKAL3ve973vSlKUpSlL3u/f337xKp8t4t4m4uZc1WGxACAYrB9//+U9/R/gQ5z/QqJoc4WcQ3/GVE/+MYxAkO8PKQAZRQACo5Qhb/Bt4P1A9yADKiJOAfEwHMjrA71MPfAlAKgKisIoRX/5CPR6RD4fAr/hIGhKEgauAgACHD/76v/+MYxAgMkJaOedUAAv//UpJ0hyhZQW6ANVQAwMEHEWN0wV/2BMp+7//+1d/0sXZ9WUq1///e2moQAAQCAQT/X//mA5BIjLiC/+MYxBAM+KJmWVUAAoGegYZE4GNTiB1vtgcACg9B7Yg8Y8k5hr///6f/////b///096sWIdf6Ivrr//P7FC+jlv0un8cdS+F/+MYxBcSYRqUAZpYAIHgqjXkFTRtVwQT7l3GJPn6wNAMjqBCIMkI1P74qvrWLjpqom9b/gYWIgEV/+SAwswwtaRNaqhZ8lUK/+MYxAgL4LWwAckAARxZE0mh2Mck1KVkQqFUyEMktERCSocWRNWhKmwn5BWILCd//0F4NxVMQU1FMy4xMDBVVVVVVVVVVVVV";
