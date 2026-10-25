@@ -125,8 +125,48 @@ class NativePlaybackSessionTest {
             await("Paused video picture did not reconnect after unlock") { videoPictureVisible() }
         }
     }
+    @Test fun pausedDisplaySwitchPreservesPositionAndResumesFromTheSeekTarget() {
+        open().use {
+            val position = 17000L
+            main {
+                val playback = NativeBridge.playback!!
+                playback.pause()
+                playback.control(JSONObject().put("action", "rate").put("rate", 1.5))
+                playback.control(JSONObject().put("action", "audio").put("track", playback.tracks(false).last { it.id >= 0 }.id))
+                playback.seekTo(position)
+            }
+            awaitState("Paused seek was not reported") { kotlin.math.abs(it.optDouble("currentTime") - position / 1000.0) < 0.2 }
+            for (mode in listOf("visualizer", "video")) {
+                main {
+                    NativeBridge.playback!!.setDisplayMode(mode)
+                }
+                SystemClock.sleep(1500)
+                main {
+                    val current = NativeBridge.playback!!.snapshot()
+                    assertTrue("Resumed while selecting $mode", current.getBoolean("paused"))
+                    assertFalse("Decoder played while selecting $mode: $current", current.getBoolean("playing"))
+                    assertEquals("Paused seek moved while selecting $mode", position / 1000.0, current.getDouble("currentTime"), 0.15)
+                }
+            }
+            var resumedAt = 0L
+            main {
+                resumedAt = SystemClock.elapsedRealtime()
+                NativeBridge.playback!!.play()
+            }
+            awaitState("Playback did not resume from the paused position") {
+                it.optBoolean("playing") && it.optDouble("currentTime") > position / 1000.0 + 0.25
+            }
+            main {
+                val current = NativeBridge.playback!!.snapshot()
+                val elapsed = (SystemClock.elapsedRealtime() - resumedAt) / 1000.0
+                assertTrue("Playback resumed from a decoder preroll timestamp: $current",
+                    current.getDouble("currentTime") <= position / 1000.0 + elapsed * 1.5 + 0.4)
+            }
+        }
+    }
     @Test fun displaySwitchPreservesStateAndReadsRealAudio() {
         open().use { scenario ->
+            var selectedAudioTrack = -1
             main {
                 val playback = NativeBridge.playback!!
                 playback.pause()
@@ -134,11 +174,21 @@ class NativePlaybackSessionTest {
                 playback.control(JSONObject().put("action", "volume").put("volume", 67))
                 val tracks = playback.tracks(false).filter { it.id >= 0 }
                 assertEquals(2, tracks.size)
-                playback.control(JSONObject().put("action", "audio").put("track", tracks.last().id))
+                selectedAudioTrack = tracks.last().id
+                playback.control(JSONObject().put("action", "audio").put("track", selectedAudioTrack))
                 playback.seekTo(17000)
             }
-            awaitState("Seek did not settle") { it.optDouble("currentTime") in 16.8..17.2 }
-            val before = state()
+            // VLC applies track, rate and volume changes asynchronously. Capture
+            // the preservation baseline from its actual settled state, not the
+            // optimistic seek notification published before those changes finish.
+            var before = JSONObject()
+            await("Paused seek and playback settings did not settle") {
+                main { before = NativeBridge.playback!!.snapshot() }
+                before.optDouble("currentTime") in 16.8..17.2 && before.optInt("volume") == 67 &&
+                    kotlin.math.abs(before.optDouble("playbackRate") - 1.5) < 0.01 &&
+                    before.optInt("currentAudioTrack") == selectedAudioTrack &&
+                    before.optBoolean("paused") && !before.optBoolean("playing")
+            }
             onView(withText("Visualizer")).perform(click())
             awaitState("Visualizer was not selected") { it.optString("displayMode") == "visualizer" }
             assertFalse(state().getBoolean("backgroundAudio"))
