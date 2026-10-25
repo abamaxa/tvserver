@@ -1,7 +1,7 @@
 /* Basic block layout also works on TV browsers without flexbox or CSS grid. */
 html {
-    background: #10151d;
-    color: #f4f6fa;
+    background: #0a0e14;
+    color: #f3f7fb;
     font-family: Arial, Helvetica, sans-serif;
     font-size: 24px;
     line-height: 1.4;
@@ -16,8 +16,8 @@ header, main, nav {
 }
 
 header {
-    background: #1c2635;
-    border-bottom: 2px solid #34455c;
+    background: #171f2b;
+    border-bottom: 1px solid #293544;
     padding: 16px 5%;
 }
 
@@ -37,20 +37,27 @@ h2 {
 }
 
 a {
-    color: #a9d4ff;
+    color: #8ce4cd;
 }
 
-a:focus, a:hover, input:focus, button:focus, button:hover, video:focus {
+video:focus {
     background: #2b4363;
     color: #fff;
     outline: 4px solid #ffd36a;
     outline-offset: 2px;
 }
 
+a:focus, a:hover, input:focus, button:focus, button:hover {
+    background: #202b39;
+    color: #f3f7fb;
+    outline: 3px solid #8ce4cd;
+    outline-offset: 3px;
+}
+
 .brand {
     color: #fff;
     font-size: 28px;
-    font-weight: bold;
+    font-weight: 600;
     text-decoration: none;
 }
 
@@ -69,23 +76,26 @@ a:focus, a:hover, input:focus, button:focus, button:hover, video:focus {
 }
 
 .search input, .search button {
-    border: 2px solid #6d829e;
-    border-radius: 4px;
+    border: 1px solid #293544;
+    border-radius: 16px;
     font-family: inherit;
     font-size: inherit;
     padding: 12px;
 }
 
 .search input {
-    background: #f4f6fa;
-    color: #10151d;
+    background: #101720;
+    color: #f3f7fb;
     max-width: 65%;
     width: 440px;
 }
 
 .search button {
-    background: #244974;
-    color: #fff;
+    background: #8ce4cd;
+    color: #10231f;
+    border-radius: 28px;
+    padding-left: 24px;
+    padding-right: 24px;
     cursor: pointer;
 }
 
@@ -100,9 +110,9 @@ a:focus, a:hover, input:focus, button:focus, button:hover, video:focus {
 }
 
 .item {
-    background: #1c2635;
-    border: 2px solid #34455c;
-    border-radius: 4px;
+    background: #171f2b;
+    border: 1px solid #293544;
+    border-radius: 16px;
     color: #fff;
     display: block;
     min-height: 68px;
@@ -115,19 +125,20 @@ a:focus, a:hover, input:focus, button:focus, button:hover, video:focus {
 .item-title {
     display: block;
     font-size: 28px;
-    font-weight: bold;
+    font-weight: 600;
     margin-bottom: 4px;
 }
 
 .meta {
-    color: #bbc9da;
+    color: #b8c2cf;
     display: block;
     font-size: 20px;
 }
 
 .thumbnail {
-    background: #10151d;
+    background: #0a0e14;
     border: 0;
+    border-radius: 10px;
     float: left;
     margin-right: 20px;
 }
@@ -137,11 +148,13 @@ a:focus, a:hover, input:focus, button:focus, button:hover, video:focus {
 }
 
 .pagination a, .playback-nav a {
-    background: #1c2635;
-    border: 2px solid #6d829e;
+    background: #171f2b;
+    border: 1px solid #293544;
     display: inline-block;
     margin: 8px 16px 8px 0;
     padding: 12px 18px;
+    border-radius: 28px;
+    text-decoration: none;
 }
 
 .pagination span {
