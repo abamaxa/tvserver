@@ -57,7 +57,9 @@ class NativePlayerUiTest {
     fun restoreSystemTutorial() = setTutorial(previousTutorial)
 
     private fun awaitState(condition: (JSONObject) -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 15000
+        // A cold software-rendered CI emulator can take longer to create VLC's
+        // first video output. Return as soon as the asserted state is ready.
+        val deadline = SystemClock.elapsedRealtime() + 45000
         while (SystemClock.elapsedRealtime() < deadline) {
             if (condition(JSONObject(NativeBridge.playerState))) return
             SystemClock.sleep(100)
