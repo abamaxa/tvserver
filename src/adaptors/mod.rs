@@ -1,4 +1,6 @@
 mod http_fetcher;
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod background_download;
 #[cfg(target_os = "android")]
 pub(crate) mod android_media;
 #[cfg(target_os = "android")]

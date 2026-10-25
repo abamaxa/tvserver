@@ -20,10 +20,48 @@ object NativeBridge {
     @Volatile var playerState = "{}"
 
     @JvmStatic external fun nativePlayerEvent(state: String)
+    @JvmStatic external fun nativeDownloadStopped(id: String, reason: String)
+
+    @JvmStatic
+    fun beginDownload(activity: Activity, payload: String): String {
+        activity.runOnUiThread { (activity as? MainActivity)?.requestDownloadNotifications() }
+        return NativeDownloads.begin(activity.applicationContext, payload)
+    }
+
+    @JvmStatic
+    fun updateDownload(payload: String): String {
+        NativeDownloads.update(payload)
+        return "{}"
+    }
+
+    @JvmStatic
+    fun finishDownload(payload: String): String {
+        NativeDownloads.end(payload)
+        return "{}"
+    }
+
+    internal fun downloadStopped(id: String, reason: String) {
+        try {
+            nativeDownloadStopped(id, reason)
+        } catch (error: UnsatisfiedLinkError) {
+            Log.e("LotsOfVideosDownloads", "Native download bridge is unavailable", error)
+        }
+    }
 
     @JvmStatic
     @Synchronized
     fun prepareRuntime(context: Context): String {
+        // JNI-attached Rust workers have no application context class loader.
+        // The downloader SDK's archive helpers use it for reflective Java I/O.
+        val thread = Thread.currentThread()
+        val previous = thread.contextClassLoader
+        try {
+            thread.contextClassLoader = context.classLoader
+            return prepareRuntimeWithClassLoader(context)
+        } finally { thread.contextClassLoader = previous }
+    }
+
+    private fun prepareRuntimeWithClassLoader(context: Context): String {
         // Executables stay in the installed, read-only native library directory.
         // Only the Python standard library, certificates and yt-dlp data are unpacked.
         YoutubeDL.getInstance().init(context.applicationContext)
