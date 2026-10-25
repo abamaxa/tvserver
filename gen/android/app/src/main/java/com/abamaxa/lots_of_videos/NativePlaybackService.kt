@@ -339,7 +339,11 @@ class NativePlaybackService : Service() {
     fun seek(seconds: Int) = seekTo((playback?.time ?: lastPosition) + seconds * 1000L)
 
     fun seekTo(position: Long) {
-        playback?.let { if (it.isSeekable) it.setTime(position.coerceIn(0, it.length.coerceAtLeast(0))) }
+        playback?.let {
+            // A paused fast seek can settle at a later keyframe after the UI has
+            // already shown its requested time. Keep paused stills at the exact time.
+            if (it.isSeekable) it.setTime(position.coerceIn(0, it.length.coerceAtLeast(0)), desiredPlaying)
+        }
         publish()
     }
 

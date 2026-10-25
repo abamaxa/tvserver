@@ -3,12 +3,14 @@ package com.abamaxa.lots_of_videos
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -17,14 +19,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.SeekBar
-import android.widget.Switch
-import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -37,30 +33,22 @@ import org.videolan.libvlc.util.VLCVideoLayout
 class NativePlayerActivity : Activity() {
     private lateinit var root: FrameLayout
     private lateinit var surface: VLCVideoLayout
-    private lateinit var progress: SeekBar
-    private lateinit var clock: TextView
-    private lateinit var title: TextView
-    private lateinit var toggle: Button
-    private lateinit var header: LinearLayout
-    private lateinit var controls: LinearLayout
-    private lateinit var background: Switch
-    private lateinit var display: RadioGroup
+    private lateinit var chrome: NativePlayerChrome
     private var visualizer: NativeVisualizerView? = null
     private var service: NativePlaybackService? = null
     private var request: JSONObject? = null
     private var resumed = false
     private var bound = false
     private var dragging = false
-    private var updatingUi = false
     private var controlDialogOpen = false
+    private var settingsDialog: Dialog? = null
     private var requestingAnalysisPermission = false
     private var state = JSONObject()
     private val handler = Handler(Looper.getMainLooper())
     private val listener: (JSONObject) -> Unit = { update(it) }
     private val hideControls = Runnable {
         if (!state.optBoolean("paused", true) && !dragging && !controlDialogOpen) {
-            header.visibility = View.INVISIBLE
-            controls.visibility = View.INVISIBLE
+            chrome.visibility = View.INVISIBLE
         }
     }
     private val connection = object : ServiceConnection {
@@ -95,93 +83,23 @@ class NativePlayerActivity : Activity() {
         }
         surface = VLCVideoLayout(this)
         root.addView(surface, FrameLayout.LayoutParams(-1, -1))
-        header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(0xCC000000.toInt())
-            addView(button("Back") { finish() })
-            title = TextView(this@NativePlayerActivity).apply {
-                setTextColor(Color.WHITE)
-                maxLines = 2
+        chrome = NativePlayerChrome(this, ::playerAction)
+        chrome.progress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+                dragging = true
+                handler.removeCallbacks(hideControls)
             }
-            addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(button("Stop") { service?.stopPlayback() })
-        }
-        root.addView(header, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-        controls = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xDD000000.toInt())
-        }
-        clock = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER }
-        progress = SeekBar(this).apply {
-            max = 1000
-            contentDescription = "Video position"
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onStartTrackingTouch(seekBar: SeekBar) {
-                    dragging = true
-                    handler.removeCallbacks(hideControls)
-                }
-                override fun onProgressChanged(seekBar: SeekBar, value: Int, fromUser: Boolean) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar) {
-                    service?.seekTo((state.optDouble("duration") * 1000 * seekBar.progress / 1000).toLong())
-                    dragging = false
-                    showControls()
-                }
-            })
-        }
-        val transport = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        transport.addView(button("−10 s") { service?.seek(-10) })
-        toggle = button("Pause") { control("togglePause") }
-        transport.addView(toggle)
-        transport.addView(button("+30 s") { service?.seek(30) })
-        val tracks = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        tracks.addView(button("Audio") { chooseTrack(false) })
-        tracks.addView(button("Subtitles") { chooseTrack(true) })
-        tracks.addView(button("Speed") {
-            val rates = floatArrayOf(0.5f, 1f, 1.25f, 1.5f, 2f)
-            dialogOpened()
-            AlertDialog.Builder(this).setTitle("Playback speed")
-                .setSingleChoiceItems(rates.map { "${it}×" }.toTypedArray(),
-                    rates.indexOfFirst { it == state.optDouble("playbackRate", 1.0).toFloat() }) { dialog, index ->
-                    service?.control(JSONObject().put("action", "rate").put("rate", rates[index]))
-                    dialog.dismiss()
-                }.setOnDismissListener { dialogClosed() }.show()
+            override fun onProgressChanged(seekBar: SeekBar, value: Int, fromUser: Boolean) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                service?.seekTo((state.optDouble("duration") * seekBar.progress).toLong())
+                dragging = false
+                showControls()
+            }
         })
-        val options = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        display = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            contentDescription = "Playback display"
-            addView(RadioButton(context).apply { id = VIDEO; text = "Video"; setTextColor(Color.WHITE) })
-            addView(RadioButton(context).apply { id = VISUALIZER; text = "Visualizer"; setTextColor(Color.WHITE) })
-            check(VIDEO)
-            setOnCheckedChangeListener { _, selected ->
-                if (!updatingUi) {
-                    if (selected == VISUALIZER) chooseVisualizer() else service?.setDisplayMode("video")
-                    showControls()
-                }
-            }
-        }
-        options.addView(display)
-        background = Switch(this).apply {
-            text = "Keep audio playing with screen off"
-            contentDescription = text
-            setTextColor(Color.WHITE)
-            setPadding(24, 0, 16, 0)
-            setOnCheckedChangeListener { _, checked ->
-                if (!updatingUi) { service?.setBackgroundAudio(checked); showControls() }
-            }
-        }
-        options.addView(background)
-        controls.addView(clock)
-        controls.addView(progress)
-        controls.addView(transport)
-        controls.addView(tracks)
-        controls.addView(options)
-        root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        root.addView(chrome, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
-            val safe = insets.getInsetsIgnoringVisibility(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
-            header.setPadding(safe.left, safe.top, safe.right, 0)
-            controls.setPadding(safe.left, 0, safe.right, safe.bottom)
+            chrome.applyInsets(insets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()))
             insets
         }
         setContentView(root)
@@ -205,10 +123,8 @@ class NativePlayerActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             service?.setDisplayMode("visualizer")
         } else {
-            // Reset the radio until permission has actually been granted.
-            updatingUi = true
-            display.check(VIDEO)
-            updatingUi = false
+            // Keep Video selected until output-analysis permission has actually been granted.
+            chrome.setDisplayMode("video")
             dialogOpened()
             AlertDialog.Builder(this).setTitle("Visualize playback audio")
                 .setMessage("Android requires audio permission to analyze this player's output. The visualizer uses only the playing file; it does not use the microphone.")
@@ -238,11 +154,8 @@ class NativePlayerActivity : Activity() {
             if (!isFinishing) finish()
             return
         }
-        updatingUi = true
-        title.text = next.optString("video")
-        background.isChecked = next.optBoolean("backgroundAudio")
+        chrome.bind(next, dragging)
         val visualizing = next.optString("displayMode") == "visualizer"
-        display.check(if (visualizing) VISUALIZER else VIDEO)
         if (visualizing && visualizer == null) {
             visualizer = NativeVisualizerView(this) { message ->
                 service?.setDisplayMode("video")
@@ -257,23 +170,68 @@ class NativePlayerActivity : Activity() {
         }
         visualizer?.visibility = if (visualizing) View.VISIBLE else View.GONE
         visualizer?.setPlayback(visualizing && resumed && next.optBoolean("playing"), next.optInt("audioSessionId"))
-        val time = (next.optDouble("currentTime") * 1000).toLong()
-        val length = (next.optDouble("duration") * 1000).toLong()
-        if (!dragging) progress.progress = if (length > 0) (time * 1000 / length).toInt() else 0
-        clock.text = "${formatTime(time)} / ${formatTime(length)}"
-        toggle.text = if (next.optBoolean("paused", true)) "Play" else "Pause"
-        toggle.contentDescription = toggle.text
-        updatingUi = false
         if (next.optBoolean("paused", true)) showControls()
         else if (wasPaused) scheduleControlsHide()
     }
 
     private fun control(action: String) { service?.control(JSONObject().put("action", action)) }
 
-    private fun button(label: String, action: () -> Unit) = Button(this).apply {
-        text = label
-        contentDescription = label
-        setOnClickListener { action(); showControls() }
+    private fun playerAction(action: NativePlayerChrome.Action) {
+        when (action) {
+            NativePlayerChrome.Action.BACK -> finish()
+            NativePlayerChrome.Action.STOP -> service?.stopPlayback()
+            NativePlayerChrome.Action.TOGGLE -> control("togglePause")
+            NativePlayerChrome.Action.REWIND -> service?.seek(-10)
+            NativePlayerChrome.Action.FORWARD -> service?.seek(30)
+            NativePlayerChrome.Action.VIDEO -> service?.setDisplayMode("video")
+            NativePlayerChrome.Action.VISUALIZER -> chooseVisualizer()
+            NativePlayerChrome.Action.BACKGROUND -> service?.setBackgroundAudio(chrome.backgroundAudio.isChecked)
+            NativePlayerChrome.Action.SETTINGS -> showSettings()
+            NativePlayerChrome.Action.AUDIO -> chooseTrack(false)
+            NativePlayerChrome.Action.SUBTITLES -> chooseTrack(true)
+            NativePlayerChrome.Action.SPEED -> chooseSpeed()
+        }
+        showControls()
+    }
+
+    private fun showSettings() {
+        val audio = service?.tracks(false)?.firstOrNull { it.id == state.optInt("currentAudioTrack", -1) }?.name ?: "Default"
+        val subtitles = if (state.optInt("currentSubtitleTrack", -1) < 0) "Off" else
+            service?.tracks(true)?.firstOrNull { it.id == state.optInt("currentSubtitleTrack") }?.name ?: "On"
+        val speed = state.optDouble("playbackRate", 1.0).toString().removeSuffix(".0") + "×"
+        val dialog = Dialog(this)
+        settingsDialog = dialog
+        dialog.setContentView(chrome.settingsContent(audio, subtitles, speed, { selected ->
+            dialog.dismiss()
+            playerAction(selected)
+        }, { dialog.dismiss() }))
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnDismissListener { settingsDialog = null; dialogClosed() }
+        dialogOpened()
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.3f)
+            setLayout(minOf(chrome.dp(328), root.width - chrome.safeInsets.left - chrome.safeInsets.right - chrome.dp(32)), -2)
+            attributes = attributes.apply {
+                gravity = Gravity.TOP or Gravity.RIGHT
+                x = chrome.safeInsets.right + chrome.dp(16)
+                y = chrome.safeInsets.top + chrome.dp(16)
+            }
+            WindowCompat.getInsetsController(this, decorView).hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    private fun chooseSpeed() {
+        val rates = floatArrayOf(0.5f, 1f, 1.25f, 1.5f, 2f)
+        dialogOpened()
+        AlertDialog.Builder(this).setTitle("Playback speed")
+            .setSingleChoiceItems(rates.map { it.toString() + "×" }.toTypedArray(),
+                rates.indexOfFirst { it == state.optDouble("playbackRate", 1.0).toFloat() }) { dialog, index ->
+                service?.control(JSONObject().put("action", "rate").put("rate", rates[index]))
+                dialog.dismiss()
+            }.setOnDismissListener { dialogClosed() }.show()
     }
 
     private fun hideSystemBars() {
@@ -284,10 +242,9 @@ class NativePlayerActivity : Activity() {
     }
 
     private fun toggleControls() {
-        if (header.visibility == View.VISIBLE && !state.optBoolean("paused", true)) {
+        if (chrome.visibility == View.VISIBLE && !state.optBoolean("paused", true)) {
             handler.removeCallbacks(hideControls)
-            header.visibility = View.INVISIBLE
-            controls.visibility = View.INVISIBLE
+            chrome.visibility = View.INVISIBLE
         } else showControls()
     }
 
@@ -297,8 +254,7 @@ class NativePlayerActivity : Activity() {
     }
 
     private fun showControls() {
-        header.visibility = View.VISIBLE
-        controls.visibility = View.VISIBLE
+        chrome.visibility = View.VISIBLE
         scheduleControlsHide()
     }
 
@@ -347,6 +303,7 @@ class NativePlayerActivity : Activity() {
     }
 
     override fun onDestroy() {
+        settingsDialog?.dismiss()
         handler.removeCallbacksAndMessages(null)
         service?.removeListener(listener)
         service?.detachSurface(surface)
@@ -357,14 +314,7 @@ class NativePlayerActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun formatTime(ms: Long): String {
-        val seconds = ms / 1000
-        return "%02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
-    }
-
     companion object {
-        private const val VIDEO = 1001
-        private const val VISUALIZER = 1002
         private const val ANALYSIS_PERMISSION = 1003
     }
 }

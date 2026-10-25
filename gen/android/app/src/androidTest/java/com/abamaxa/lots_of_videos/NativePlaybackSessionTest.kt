@@ -90,6 +90,14 @@ class NativePlaybackSessionTest {
                 .put("path", clip.absolutePath).toString())
         val scenario = ActivityScenario.launch<NativePlayerActivity>(intent)
         awaitState("Decoder did not start", 45000) { !it.optBoolean("closed") && it.optBoolean("playing") && it.optInt("decodedAudio") > 0 }
+        scenario.onActivity { activity ->
+            // The decoder may become ready after controls have auto-hidden.
+            // Reveal them as a user would before the test operates a control.
+            val decor = activity.window.decorView
+            if (findControl(decor, "Back")?.isShown != true)
+                findControl(decor, "Video playback")?.performClick()
+            activity.onUserInteraction()
+        }
         return scenario
     }
     private fun notification(): Notification = context.getSystemService(NotificationManager::class.java)
@@ -208,7 +216,11 @@ class NativePlaybackSessionTest {
             assertFalse(state().getBoolean("closed"))
             ActivityScenario.launch<NativePlayerActivity>(Intent(context, NativePlayerActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
-                awaitState("Reconnected session did not play") { it.optBoolean("playing") }
+                // A playing fast seek can still settle while the window reconnects.
+                // Require the same session to actually advance beyond the seek target.
+                awaitState("Reconnected session did not advance past the seek target") {
+                    it.optBoolean("playing") && it.optDouble("currentTime") > 64.5
+                }
                 main { assertSame(original, NativeBridge.playback) }
                 assertEquals(session, state().getString("sessionId"))
                 assertTrue(state().getDouble("currentTime") > 64.5)
@@ -278,6 +290,13 @@ class NativePlaybackSessionTest {
     private fun findVisualizer(view: View): NativeVisualizerView? {
         if (view is NativeVisualizerView) return view
         if (view is ViewGroup) for (i in 0 until view.childCount) findVisualizer(view.getChildAt(i))?.let { return it }
+        return null
+    }
+
+    private fun findControl(view: View, description: String): View? {
+        if (view.contentDescription == description) return view
+        if (view is ViewGroup) for (i in 0 until view.childCount)
+            findControl(view.getChildAt(i), description)?.let { return it }
         return null
     }
 }
