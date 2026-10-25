@@ -10,8 +10,12 @@ mod tv;
 pub mod webserver;
 #[cfg(not(feature = "webserver"))]
 mod app;
+#[cfg(any(all(target_os = "android", not(feature = "webserver")), test))]
+mod app_storage;
 #[cfg(not(feature = "webserver"))]
 mod tauri_api;
+#[cfg(not(feature = "webserver"))]
+mod android;
 
 pub use api::{register, SharedState};
 pub use book_runtime::{

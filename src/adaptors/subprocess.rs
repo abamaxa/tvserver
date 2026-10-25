@@ -114,6 +114,19 @@ impl AsyncSubProcess {
     }
 
     pub async fn run(cmd: &str, args: Vec<String>, output: Sender<String>) -> Result<(ExitStatus, String)> {
+        #[cfg(target_os = "android")]
+        let (cmd, args) = {
+            if cmd == "ffmpeg" {
+                let mut bundled = super::youtube_runtime::ffmpeg_command().await
+                    .map_err(std::io::Error::other)?;
+                bundled.args.extend(args);
+                (bundled.program, bundled.args)
+            } else {
+                (cmd.to_owned(), args)
+            }
+        };
+        #[cfg(target_os = "android")]
+        let cmd = cmd.as_str();
         let process_result = Command::new(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

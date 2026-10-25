@@ -6,7 +6,9 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
     <application
+        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@style/Theme.tvserver"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
@@ -23,6 +25,13 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".NativePlayerActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

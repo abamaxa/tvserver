@@ -16,7 +16,7 @@ use crate::domain::models::{
 #[cfg(not(feature = "webserver"))]
 use crate::domain::traits::{MediaSharer, Repository};
 #[cfg(not(feature = "webserver"))]
-use crate::domain::{SearchEngineType, TaskType};
+use crate::domain::SearchEngineType;
 #[cfg(not(feature = "webserver"))]
 use crate::services::BookStore;
 #[cfg(not(feature = "webserver"))]
@@ -46,7 +46,6 @@ pub async fn tasks_add(
 #[tauri::command]
 pub async fn tasks_delete(
     state: tauri::State<'_, SharedState>,
-    _: TaskType,
     key: String
 ) -> Result<Response, String> {
     match state.get_task_manager().remove(&key, state.get_storer()).await {
@@ -320,7 +319,21 @@ pub async fn convert_video(
 ) -> Result<Response, String> {
     let id = video_id.parse::<i64>().map_err(|e| format!("Invalid video ID: {}", e))?;
     match Conversion::do_conversion(state.inner().clone(), &request.name, id).await {
-        Ok(_) => Ok(Response::success("conversion queued".to_string())),
+        Ok(task) => {
+            #[cfg(target_os = "android")]
+            {
+                let checker = state.get_checker();
+                tokio::spawn(async move {
+                    task.wait_finished().await;
+                    if let Err(error) = checker.check_video_information().await {
+                        tracing::error!("Could not refresh Android library after conversion: {error}");
+                    }
+                });
+            }
+            #[cfg(not(target_os = "android"))]
+            let _ = task;
+            Ok(Response::success("conversion queued".to_string()))
+        },
         Err(e) => Err(e.to_string()),
     }
 }
@@ -371,6 +384,12 @@ pub async fn download_videos(
 // Helper function to register all commands
 pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        super::android::android_player_open,
+        super::android::android_player_control,
+        super::android::android_player_status,
+        super::android::android_runtime_info,
+        super::android::android_video_share,
+        super::android::android_video_export,
         tasks_add,
         tasks_delete,
         tasks_list,

@@ -2,10 +2,10 @@ use crate::domain::{
     algorithm::file_integrity::{seal_reader, FileSeal},
     models::VideoDetails,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use cap_fs_ext::{
-    DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsMaybeDirExt,
+    DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt,
 };
 use cap_std::{
     ambient_authority,
@@ -147,11 +147,18 @@ impl FileSystemStore {
                 match root.create_dir(component) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        return Err(anyhow!(error).context(format!(
+                            "failed to create filesystem root component {}",
+                            component.display()
+                        )));
+                    }
                 }
                 let expected = root.symlink_metadata(component)?;
                 if expected.file_type().is_symlink() {
-                    let target = root.read_link(component)?;
+                    // System ancestors may be absolute symlinks. Read their
+                    // contents here, then re-walk them from the volume anchor.
+                    let target = root.read_link_contents(component)?;
                     let observed = root.symlink_metadata(component)?;
                     if !observed.file_type().is_symlink()
                         || observed.dev() != expected.dev()
@@ -197,13 +204,16 @@ impl FileSystemStore {
                         component.display()
                     ));
                 }
-                let mut options = OpenOptions::new();
-                options
-                    .read(true)
-                    .maybe_dir(true)
-                    .follow(FollowSymlinks::Yes);
-                let child = root.open_with(component, &options)?;
-                let opened = child.metadata()?;
+                // Ancestors such as Android's /data permit traversal without
+                // granting directory reads. Request a directory capability,
+                // rather than opening each ancestor as a readable file.
+                let child = root.open_dir_nofollow(component).with_context(|| {
+                    format!(
+                        "failed to open filesystem root component {}",
+                        component.display()
+                    )
+                })?;
+                let opened = child.dir_metadata()?;
                 if !opened.is_dir()
                     || opened.dev() != expected.dev()
                     || opened.ino() != expected.ino()
@@ -213,7 +223,7 @@ impl FileSystemStore {
                         component.display()
                     ));
                 }
-                root = Dir::from_std_file(child.into_std());
+                root = child;
                 resolved.push(component.as_os_str().to_os_string());
             }
             let _ = self.root_dir.set(root);
@@ -1901,6 +1911,26 @@ mod tests {
             std::process::id(),
             rand::random::<u64>()
         ))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_root_accepts_an_existing_absolute_ancestor_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let base = test_root("absolute-root-symlink");
+        let real_parent = base.join("data");
+        let root = real_parent.join("books");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("existing.epub"), b"existing book").unwrap();
+        let alias = base.join("user");
+        symlink(&real_parent, &alias).unwrap();
+
+        let configured_root = alias.join("books");
+        let result = FileSystemStore::try_new(configured_root.to_str().unwrap())
+            .and_then(|store| Ok(store.open_root()?.read("existing.epub")?));
+        std::fs::remove_dir_all(base).unwrap();
+        assert_eq!(result.unwrap(), b"existing book");
     }
 
     struct ForcedCrossDevice;

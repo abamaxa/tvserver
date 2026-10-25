@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="Lots of Videos tests">
+        <!-- ActivityScenario uses white helper windows during lifecycle tests.
+             They must never become app cards that a user can reopen afterwards. -->
+        <activity
+            android:name="androidx.test.core.app.InstrumentationActivityInvoker$BootstrapActivity"
+            android:excludeFromRecents="true" />
+        <activity
+            android:name="androidx.test.core.app.InstrumentationActivityInvoker$EmptyActivity"
+            android:excludeFromRecents="true" />
+        <activity
+            android:name="androidx.test.core.app.InstrumentationActivityInvoker$EmptyFloatingActivity"
+            android:excludeFromRecents="true" />
+    </application>
+</manifest>

@@ -7,13 +7,13 @@ use async_trait::async_trait;
 #[cfg(not(feature = "webserver"))]
 use axum::http::StatusCode;
 #[cfg(not(feature = "webserver"))]
+use tauri::async_runtime::{spawn, JoinHandle};
+#[cfg(not(feature = "webserver"))]
 use tauri::{AppHandle, Runtime};
 #[cfg(not(feature = "webserver"))]
 use tauri::{Emitter, Listener};
 #[cfg(not(feature = "webserver"))]
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-#[cfg(not(feature = "webserver"))]
-use tokio::task::JoinHandle;
 
 #[cfg(not(feature = "webserver"))]
 /// A struct that implements RemotePlayer for Tauri channels
@@ -48,7 +48,7 @@ impl TauriChannelPlayer {
         let (in_tx, in_rx) = channel(100);
 
         // Spawn a task to forward messages from the channel to the frontend
-        tokio::spawn(handle_sending(app.clone(), in_rx, channel_name.clone()));
+        spawn(handle_sending(app.clone(), in_rx, channel_name.clone()));
 
         TauriChannelPlayer {
             app,
@@ -81,7 +81,7 @@ pub fn setup_frontend_listener<R: Runtime>(
     output: Sender<ReceivedRemoteMessage>,
 ) -> JoinHandle<()> {
     let event_name = channel_name.to_string();
-    tokio::spawn(async move {
+    spawn(async move {
         // Use app.listen which requires Listener trait
         let _unlisten = app.listen(&event_name.clone(), move |event| {
             // event.payload() returns &str directly, no need for if let Some
@@ -95,7 +95,7 @@ pub fn setup_frontend_listener<R: Runtime>(
 
                     // Spawn a task to send the message to the message bus
                     let output_clone = output.clone();
-                    tokio::spawn(async move {
+                    spawn(async move {
                         if let Err(e) = output_clone.send(received).await {
                             tracing::error!("Error forwarding message from frontend: {}", e);
                         }

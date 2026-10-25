@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 108 108">
+  <title>Lots of Videos Android icon</title>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#128FE9"/>
+      <stop offset="1" stop-color="#164EB3"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#background)" d="M0 0h108v108H0z"/>
+  <g id="video-cards">
+    <path fill="#69D9F3" d="M42 29h24q6 0 6 6v22H36V35q0-6 6-6z"/>
+    <path fill="#B6EEFF" d="M38 36h32q6 0 6 6v25H32V42q0-6 6-6z"/>
+    <path fill="#FFF" d="M33 44h42q6 0 6 6v23q0 6-6 6H33q-6 0-6-6V50q0-6 6-6z"/>
+    <path fill="#1661C3" d="M49 54q0-2 1.7-1l12.5 7.2q1.8 1 0 2l-12.5 7.2q-1.7 1-1.7-1z"/>
+  </g>
+</svg>

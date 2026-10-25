@@ -1,0 +1,26 @@
+Android media components
+
+LibVLC Android 3.7.7 - VideoLAN, LGPL-2.1-or-later.
+Source and build instructions: https://code.videolan.org/videolan/libvlcjni
+https://www.videolan.org/vlc/libvlc.html
+
+youtubedl-android 0.18.1 - yausername and contributors, GPL-3.0.
+Includes the Android Python 3.12 runtime, QuickJS and FFmpeg/FFprobe packages.
+Sources, third-party licenses and native build instructions:
+https://github.com/yausername/youtubedl-android
+https://github.com/yausername/youtubedl-android/blob/master/BUILD_PYTHON.md
+https://github.com/yausername/youtubedl-android/blob/master/BUILD_FFMPEG.md
+
+The official yt-dlp Python executable and its bundled EJS solver are distributed
+with their upstream licenses inside the executable archive. The pinned version,
+upstream download URL and verified SHA-256 are in ytdlp/version.json.
+https://github.com/yt-dlp/yt-dlp
+https://github.com/yt-dlp/ejs
+
+Python: Python Software Foundation License, https://www.python.org/psf/license/
+QuickJS: MIT, https://bellard.org/quickjs/
+FFmpeg: LGPL/GPL components, https://ffmpeg.org/legal.html
+
+These components keep their respective copyrights and licenses. They are
+unmodified upstream native libraries. The application's native libraries remain
+dynamically linked and are packaged separately in the APK.
