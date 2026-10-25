@@ -2,7 +2,6 @@ use crate::common::{get_json_fetcher, get_no_spawner, get_text_fetcher, get_torr
 use std::path::PathBuf;
 use std::sync::Arc;
 use app_lib::adaptors::YoutubeFetcher;
-use app_lib::domain::config::get_google_key;
 use app_lib::domain::SearchEngineType::{Torrent, YouTube};
 use app_lib::domain::traits::Searcher;
 use app_lib::services::{
@@ -23,11 +22,11 @@ pub async fn get_search_service(engine: SearchEngine) -> SearchService {
 pub async fn get_youtube_search(fixture: &str) -> SearchService {
     let youtube_fetcher = get_json_fetcher(fixture).await;
 
-    let google_key = get_google_key();
-
     let spawner = get_no_spawner();
 
-    let youtube = Arc::new(YoutubeClient::new(&google_key, youtube_fetcher));
+    // This helper supplies an API response fixture. An empty key selects the
+    // live yt-dlp search path instead, bypassing the fixture on CI.
+    let youtube = Arc::new(YoutubeClient::new("fixture-api-key", youtube_fetcher));
 
     let downloader = Arc::new(YoutubeFetcher::new(spawner.clone()));
 

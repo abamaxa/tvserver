@@ -71,4 +71,49 @@ class NativeVideoFilesTest {
             assertThrows(IllegalStateException::class.java) { NativeVideoFiles.libraryFile(context, request(privateFile)) }
         } finally { privateFile.delete() }
     }
+
+    @Test fun rejectsSiblingDirectoryWithTheSameLibraryPrefix() {
+        val sibling = File(context.filesDir.parentFile, "movies-native-file-actions-test").apply { mkdirs() }
+        val outside = File(sibling, video.name).apply { writeBytes(video.readBytes()) }
+        try {
+            assertThrows(IllegalStateException::class.java) { NativeVideoFiles.libraryFile(context, request(outside)) }
+        } finally { sibling.deleteRecursively() }
+    }
+
+    @Test fun rejectsLibrarySymlinkPointingOutsideTheLibrary() {
+        val outside = File(context.cacheDir, "native-file-actions-private.mp4").apply { writeText("private") }
+        val link = File(directory, "linked.mp4")
+        try {
+            android.system.Os.symlink(outside.absolutePath, link.absolutePath)
+            assertThrows(IllegalStateException::class.java) { NativeVideoFiles.libraryFile(context, request(link)) }
+        } finally {
+            link.delete()
+            outside.delete()
+        }
+    }
+
+    @Test fun rejectsMissingFilesAndDirectories() {
+        assertThrows(IllegalStateException::class.java) {
+            NativeVideoFiles.libraryFile(context, request(File(directory, "missing.mp4")))
+        }
+        assertThrows(IllegalStateException::class.java) { NativeVideoFiles.libraryFile(context, request(directory)) }
+    }
+
+    @Test fun rejectsEmptyShareRequests() {
+        assertThrows(IllegalStateException::class.java) {
+            NativeVideoFiles.shareIntent(context, JSONObject().put("files", JSONArray()))
+        }
+    }
+
+    @Test fun mixedFileTypesShareWithReadOnlyPermission() {
+        val other = File(directory, "Second video.mkv").apply { writeBytes(video.readBytes()) }
+        val intent = NativeVideoFiles.shareIntent(context, JSONObject().put("files", JSONArray().put(request()).put(request(other))))
+        assertEquals(Intent.ACTION_SEND_MULTIPLE, intent.action)
+        assertEquals("*/*", intent.type)
+        assertEquals(Intent.FLAG_GRANT_READ_URI_PERMISSION, intent.flags)
+        for (index in 0 until intent.clipData!!.itemCount) {
+            val uri = intent.clipData!!.getItemAt(index).uri
+            assertArrayEquals(video.readBytes(), context.contentResolver.openInputStream(uri)!!.use { it.readBytes() })
+        }
+    }
 }
