@@ -1,10 +1,12 @@
 package com.abamaxa.lots_of_videos
 
 import android.Manifest
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
@@ -56,13 +58,51 @@ class NativePlayerUiTest {
     @After
     fun restoreSystemTutorial() = setTutorial(previousTutorial)
 
-    private fun awaitState(condition: (JSONObject) -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 15000
+    private fun awaitState(timeoutMs: Long = 15000, condition: (JSONObject) -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (condition(JSONObject(NativeBridge.playerState))) return
             SystemClock.sleep(100)
         }
         throw AssertionError("Native playback state did not settle: ${NativeBridge.playerState}")
+    }
+
+    private fun awaitWindowFocus(scenario: ActivityScenario<NativePlayerActivity>) {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        val serviceInfo = automation.serviceInfo
+        val originalFlags = serviceInfo.flags
+        serviceInfo.flags = originalFlags or AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        automation.serviceInfo = serviceInfo
+        var activePackage: String? = null
+        try {
+            val deadline = SystemClock.elapsedRealtime() + 15000
+            while (SystemClock.elapsedRealtime() < deadline) {
+                var focused = false
+                scenario.onActivity { focused = it.hasWindowFocus() }
+                if (focused) return
+                val root = automation.rootInActiveWindow
+                activePackage = root?.packageName?.toString()
+                // On a fresh device, System UI can show its fullscreen tutorial
+                // before observing the saved confirmation setting. Only dismiss
+                // that system confirmation; app dialogs must still fail the test.
+                if (activePackage == "android" || activePackage == "com.android.systemui") {
+                    for (id in listOf("android:id/ok", "com.android.systemui:id/ok")) {
+                        root?.findAccessibilityNodeInfosByViewId(id)?.forEach { button ->
+                            if (button.isEnabled && button.isClickable) {
+                                button.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            }
+                            button.recycle()
+                        }
+                    }
+                }
+                root?.recycle()
+                SystemClock.sleep(100)
+            }
+            throw AssertionError("Playback window did not gain focus; active package: $activePackage")
+        } finally {
+            serviceInfo.flags = originalFlags
+            automation.serviceInfo = serviceInfo
+        }
     }
 
     @Test
@@ -79,8 +119,11 @@ class NativePlayerUiTest {
                 .putExtra("video", JSONObject().put("videoId", "native-player-ui-test")
                     .put("video", clip.name).put("path", clip.absolutePath).toString())
             ActivityScenario.launch<NativePlayerActivity>(intent).use { scenario ->
-                awaitState { it.optString("videoId") == "native-player-ui-test" &&
+                // A cold CI emulator can take longer to create VLC's first
+                // video output. Later transport checks keep their usual bound.
+                awaitState(45000) { it.optString("videoId") == "native-player-ui-test" &&
                     it.optInt("decodedVideo") > 0 && !it.optBoolean("paused", true) }
+                awaitWindowFocus(scenario)
                 scenario.onActivity { activity ->
                     assertEquals(Configuration.ORIENTATION_LANDSCAPE, activity.resources.configuration.orientation)
                     val insets = WindowInsetsCompat.toWindowInsetsCompat(activity.window.decorView.rootWindowInsets)

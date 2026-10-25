@@ -30,7 +30,7 @@ async fn test_youtube() -> Result<()> {
 
     let response: SearchResults<DownloadableItem> = serde_json::from_str(&body)?;
 
-    assert!(response.error.is_none());
+    assert!(response.error.is_none(), "YouTube search failed: {:?}", response.error);
     assert!(response.results.is_some());
 
     let results = response.results.unwrap();

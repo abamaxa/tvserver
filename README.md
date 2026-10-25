@@ -176,6 +176,29 @@ The canonical frontend REST contract location is `docs/api/openapi.yaml`.
 All ebook-support implementation branches must be based on `spec/ebook-support`, not directly on
 `main`, so they inherit the approved specification and implementation plan.
 
+### Continuous integration
+
+GitHub Actions runs `.github/workflows/rust.yml` and
+`.github/workflows/android.yml` for pushes to `main`, pull requests targeting
+`main`, and manual dispatch. The Rust job builds the webserver and runs the unit,
+integration, and GitHub automation tests. Fixture-backed YouTube tests use a
+dummy API key and do not need `GOOGLE_KEY`, yt-dlp, or live YouTube access.
+
+The Android job builds an x86_64 debug APK with JDK 21, SDK 36 and NDK
+26.2.11394342, then runs every Kotlin instrumentation test on an API 35 emulator.
+This covers native playback, bundled Python/yt-dlp/FFmpeg/QuickJS, file sharing,
+export, and library path boundaries. It uploads instrumentation reports even
+when tests fail. The native test build uses a temporary minimal HTML asset so
+it can run in this repository without access to the private frontend. Frontend
+behavior is checked by the frontend repository's own CI workflow.
+
+After a normal Android build, run the same instrumentation suite locally:
+
+```shell
+cd gen/android
+./gradlew :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug
+```
+
 ## Obtaining a Google API Key
 
 A Google account is required to create an API Key. Instructions for obtaining the key are
