@@ -56,10 +56,8 @@ class NativePlayerUiTest {
     @After
     fun restoreSystemTutorial() = setTutorial(previousTutorial)
 
-    private fun awaitState(condition: (JSONObject) -> Boolean) {
-        // A cold software-rendered CI emulator can take longer to create VLC's
-        // first video output. Return as soon as the asserted state is ready.
-        val deadline = SystemClock.elapsedRealtime() + 45000
+    private fun awaitState(timeoutMs: Long = 15000, condition: (JSONObject) -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (condition(JSONObject(NativeBridge.playerState))) return
             SystemClock.sleep(100)
@@ -81,7 +79,9 @@ class NativePlayerUiTest {
                 .putExtra("video", JSONObject().put("videoId", "native-player-ui-test")
                     .put("video", clip.name).put("path", clip.absolutePath).toString())
             ActivityScenario.launch<NativePlayerActivity>(intent).use { scenario ->
-                awaitState { it.optString("videoId") == "native-player-ui-test" &&
+                // A cold CI emulator can take longer to create VLC's first
+                // video output. Later transport checks keep their usual bound.
+                awaitState(45000) { it.optString("videoId") == "native-player-ui-test" &&
                     it.optInt("decodedVideo") > 0 && !it.optBoolean("paused", true) }
                 scenario.onActivity { activity ->
                     assertEquals(Configuration.ORIENTATION_LANDSCAPE, activity.resources.configuration.orientation)
