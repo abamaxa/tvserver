@@ -388,10 +388,28 @@ pub async fn download_videos(
     state: tauri::State<'_, SharedState>,
     payload: CopyFromServerRequest
 ) -> Result<Response, String> {
-    match state.get_search().download_videos(payload.host_url, payload.videos, state.get_local_sender()).await {
+    match state.get_search().download_videos(payload.source, payload.videos, state.get_local_sender()).await {
         Ok(_) => Ok(Response::success("videos download queued".to_string())),
         Err(err) => Err(err.to_string()),
     }
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
+pub async fn browse_download_source(
+    payload: crate::domain::messages::BrowseDownloadSourceRequest,
+) -> Result<serde_json::Value, String> {
+    let remote = crate::services::download_source::RemoteLibrary::new(payload.source).map_err(|error| error.to_string())?;
+    remote.browse(&payload.collection).await.map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
+pub async fn download_source_thumbnail(
+    payload: crate::domain::messages::DownloadSourceThumbnailRequest,
+) -> Result<serde_json::Value, String> {
+    let remote = crate::services::download_source::RemoteLibrary::new(payload.source).map_err(|error| error.to_string())?;
+    remote.thumbnail(&payload.path).await.map_err(|error| error.to_string())
 }
 
 #[cfg(not(feature = "webserver"))]
@@ -426,7 +444,9 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         convert_video,
         list_conversions,
         channel_connect,
-        download_videos
+        download_videos,
+        browse_download_source,
+        download_source_thumbnail
     ]
 }
 

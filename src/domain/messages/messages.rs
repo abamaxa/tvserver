@@ -275,7 +275,8 @@ pub struct TaskState {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CopyFromServerRequest {
-    pub host_url: String,
+    #[serde(flatten)]
+    pub source: super::DownloadSource,
     pub videos: Vec<VideoDetails>,
 }
 

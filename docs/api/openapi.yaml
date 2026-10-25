@@ -62,6 +62,89 @@ paths:
           $ref: '#/components/responses/UnprocessableEntityTextResponse'
         '500':
           $ref: '#/components/responses/ErrorResponse'
+    patch:
+      tags: [Tasks]
+      operationId: downloadVideosFromHost
+      summary: Queue videos from another TVServer into this server's library
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CopyFromServerRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessResponse'
+        '400':
+          $ref: '#/components/responses/DownloadSourceBadRequestResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
+  /api/download-source:
+    post:
+      tags: [Media]
+      operationId: browseDownloadSource
+      summary: Browse a collection on another TVServer using optional source credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowseDownloadSourceRequest'
+      responses:
+        '200':
+          description: Remote collection, with thumbnail paths relative to the source host
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaItem'
+        '400':
+          $ref: '#/components/responses/DownloadSourceBadRequestResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
+  /api/download-source/thumbnail:
+    post:
+      tags: [Media]
+      operationId: getDownloadSourceThumbnail
+      summary: Fetch a source thumbnail as an inline image using optional source credentials
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DownloadSourceThumbnailRequest'
+      responses:
+        '200':
+          description: Raster image of at most five MiB, encoded as a data URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dataUrl]
+                properties:
+                  dataUrl:
+                    type: string
+        '400':
+          $ref: '#/components/responses/DownloadSourceBadRequestResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLargeTextResponse'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeTextResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntityTextResponse'
   /api/tasks/{type}/{path}:
     delete:
       tags: [Tasks]
@@ -771,6 +854,15 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    DownloadSourceBadRequestResponse:
+      description: Invalid source settings, a remote connection/authentication error, or malformed JSON
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+        text/plain:
+          schema:
+            type: string
     SearchResponse:
       description: Search results or an error in the same response wrapper
       content:
@@ -893,6 +985,55 @@ components:
     TaskType:
       type: string
       enum: [Transmission, AsyncProcess]
+    DownloadSource:
+      type: object
+      required: [hostUrl]
+      properties:
+        hostUrl:
+          type: string
+          description: HTTP or HTTPS base URL, optionally including a port and base path. Bare hostnames use HTTP. Credentials, query strings, and fragments are rejected.
+        username:
+          type: [string, 'null']
+          description: Optional HTTP Basic username for this source only.
+        password:
+          type: [string, 'null']
+          writeOnly: true
+          description: Optional HTTP Basic password. Requires a nonempty username.
+    BrowseDownloadSourceRequest:
+      allOf:
+        - $ref: '#/components/schemas/DownloadSource'
+        - type: object
+          properties:
+            collection:
+              type: string
+              default: ''
+    DownloadSourceThumbnailRequest:
+      allOf:
+        - $ref: '#/components/schemas/DownloadSource'
+        - type: object
+          required: [path]
+          properties:
+            path:
+              type: string
+              description: Thumbnail filename, /api/thumbnails/ path, or thumbnail URL on the selected source.
+    CopyFromServerRequest:
+      allOf:
+        - $ref: '#/components/schemas/DownloadSource'
+        - type: object
+          required: [videos]
+          properties:
+            videos:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                properties:
+                  checksum:
+                    type: string
+                  collection:
+                    type: string
+                  video:
+                    type: string
     DownloadRequest:
       type: object
       additionalProperties: true

@@ -484,6 +484,8 @@ fn openapi_contract_typed_parses_and_meets_project_requirements() {
         ("/api/books/{collection}", &["get"]),
         ("/api/control/ws", &["get"]),
         ("/api/conversion", &["get"]),
+        ("/api/download-source", &["post"]),
+        ("/api/download-source/thumbnail", &["post"]),
         ("/api/log", &["post"]),
         ("/api/media", &["get"]),
         ("/api/media/{media}", &["get", "delete", "post", "patch"]),
@@ -496,7 +498,7 @@ fn openapi_contract_typed_parses_and_meets_project_requirements() {
         ("/api/search/soundcloud", &["get"]),
         ("/api/stream-audio/{audio_index}/{path}", &["get"]),
         ("/api/stream/{path}", &["get"]),
-        ("/api/tasks", &["get", "post"]),
+        ("/api/tasks", &["get", "post", "patch"]),
         ("/api/tasks/{type}/{path}", &["delete"]),
         ("/api/thumbnails/{path}", &["get"]),
     ]);

@@ -3,7 +3,8 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::adaptors::RemoteBrowserPlayer;
 use crate::domain::messages::{
-    ClientLogMessage, Command, ConversionRequest, DownloadRequest,
+    BrowseDownloadSourceRequest, ClientLogMessage, Command, ConversionRequest, CopyFromServerRequest,
+    DownloadRequest, DownloadSourceThumbnailRequest,
     MediaItem, PlayRequest, PlayerList, Response,
 };
 use crate::domain::models::{
@@ -46,6 +47,9 @@ pub fn register(shared_state: SharedState) -> Router {
     Router::new()
         .route("/api/tasks", post(tasks_add))
         .route("/api/tasks", get(tasks_list))
+        .route("/api/tasks", patch(download_videos))
+        .route("/api/download-source", post(browse_download_source))
+        .route("/api/download-source/thumbnail", post(download_source_thumbnail))
         .route("/api/tasks/{type}/{*path}", delete(tasks_delete))
         .route("/api/log", post(log_client_message))
         .route("/api/media", get(list_root_collection))
@@ -71,6 +75,38 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/search/soundcloud", get(soundcloud_search))
         .route("/api/conversion", get(list_conversions))
         .with_state(shared_state)
+}
+
+#[debug_handler]
+async fn download_videos(state: State<SharedState>, Json(payload): Json<CopyFromServerRequest>) -> StdResponse {
+    match state.get_search().download_videos(payload.source, payload.videos, state.get_local_sender()).await {
+        Ok(()) => (OK, Json(Response::success("videos download queued".to_string()))),
+        Err(error) => (BAD_REQUEST, Json(Response::error(error.to_string()))),
+    }
+}
+
+#[debug_handler]
+async fn browse_download_source(Json(payload): Json<BrowseDownloadSourceRequest>) -> AxumResponse {
+    let result = async {
+        let remote = crate::services::download_source::RemoteLibrary::new(payload.source)?;
+        remote.browse(&payload.collection).await
+    }.await;
+    match result {
+        Ok(data) => Json(data).into_response(),
+        Err(error) => (BAD_REQUEST, Json(Response::error(error.to_string()))).into_response(),
+    }
+}
+
+#[debug_handler]
+async fn download_source_thumbnail(Json(payload): Json<DownloadSourceThumbnailRequest>) -> AxumResponse {
+    let result = async {
+        let remote = crate::services::download_source::RemoteLibrary::new(payload.source)?;
+        remote.thumbnail(&payload.path).await
+    }.await;
+    match result {
+        Ok(data) => Json(data).into_response(),
+        Err(error) => (BAD_REQUEST, Json(Response::error(error.to_string()))).into_response(),
+    }
 }
 
 #[debug_handler]
