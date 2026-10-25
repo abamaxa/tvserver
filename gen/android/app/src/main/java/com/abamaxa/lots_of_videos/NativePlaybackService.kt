@@ -45,6 +45,7 @@ class NativePlaybackService : Service() {
     private var playback: MediaPlayer? = null
     private var media: Media? = null
     private var details: JSONObject? = null
+    private val queue = NativePlaybackQueue()
     private var surface: VLCVideoLayout? = null
     private var videoOutputEnabled = false
     private var desiredPlaying = false
@@ -132,6 +133,8 @@ class NativePlaybackService : Service() {
                 override fun onSeekTo(pos: Long) = seekTo(pos)
                 override fun onRewind() = seek(-10)
                 override fun onFastForward() = seek(30)
+                override fun onSkipToNext() { skip(1) }
+                override fun onSkipToPrevious() = previous()
                 override fun onCustomAction(action: String, extras: android.os.Bundle?) {
                     when (action) { REWIND -> seek(-10); FORWARD -> seek(30); STOP -> stopPlayback() }
                 }
@@ -150,6 +153,8 @@ class NativePlaybackService : Service() {
             PAUSE -> pause()
             REWIND -> seek(-10)
             FORWARD -> seek(30)
+            NEXT -> skip(1)
+            PREVIOUS -> previous()
             STOP -> stopPlayback()
         }
         // A process killed by Android must never unexpectedly restart audible media.
@@ -157,19 +162,33 @@ class NativePlaybackService : Service() {
     }
 
     fun open(request: JSONObject) {
-        if (details?.optString("videoId") == request.optString("videoId") && playback != null && !closing) {
+        if (!request.has("items") && queue.playlistId.isEmpty() &&
+            details?.optString("videoId") == request.optString("videoId") && playback != null && !closing) {
             publish()
             return
         }
+        try {
+            openItem(queue.load(request))
+        } catch (error: Exception) {
+            errorMessage = error.message ?: "This playlist could not be opened"
+            stopPlayback()
+        }
+    }
+
+    private fun openItem(request: JSONObject, continuation: Boolean = false) {
+        val rate = if (continuation) playback?.rate ?: 1f else 1f
+        val volume = if (continuation) playback?.volume ?: 100 else 100
         if (playback != null) pause()
         releaseDecoder()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        foreground = false
+        if (!continuation) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            foreground = false
+            sessionId = UUID.randomUUID().toString()
+            backgroundAudio = false
+            displayMode = "video"
+        }
         closing = false
         details = request
-        sessionId = UUID.randomUUID().toString()
-        backgroundAudio = false
-        displayMode = "video"
         errorMessage = null
         lastPosition = 0
         lastDuration = 0
@@ -187,10 +206,18 @@ class NativePlaybackService : Service() {
             player.setAudioOutput("android_audiotrack")
             player.setAudioOutputDevice("pcm")
             surface?.let { player.attachViews(it, null, true, false) }
+            var settingsPending = true
             player.setEventListener { event ->
                 if (closing || playback !== player) return@setEventListener
                 when (event.type) {
                     MediaPlayer.Event.Playing -> {
+                        if (settingsPending) {
+                            settingsPending = false
+                            player.setRate(rate)
+                            // VLC initializes its audio output asynchronously and resets
+                            // volume then. Restore it after that output is actually ready.
+                            player.setVolume(volume)
+                        }
                         if (startPosition > 0 && player.isSeekable) {
                             player.setTime(startPosition)
                             startPosition = 0
@@ -211,7 +238,12 @@ class NativePlaybackService : Service() {
                     }
                     MediaPlayer.Event.EndReached -> {
                         lastPosition = player.length.coerceAtLeast(lastPosition)
-                        stopPlayback()
+                        publish()
+                        // Release/recreate VLC outside the end-event callback. The service
+                        // advances even while its Activity and WebView are in the background.
+                        handler.post {
+                            if (!closing && playback === player && (!desiredPlaying || !skip(1))) stopPlayback()
+                        }
                     }
                     MediaPlayer.Event.Paused -> publish()
                 }
@@ -370,6 +402,8 @@ class NativePlaybackService : Service() {
             "play" -> play()
             "pause" -> pause()
             "stop" -> stopPlayback()
+            "next" -> skip(1)
+            "previous" -> previous()
             "subtitle" -> playback?.setSpuTrack(request.optInt("track", -1))
             "audio" -> playback?.setAudioTrack(request.optInt("track", -1))
             "rate" -> playback?.setRate(request.optDouble("rate", 1.0).toFloat().coerceIn(0.25f, 4f))
@@ -377,6 +411,25 @@ class NativePlaybackService : Service() {
         }
         publish()
     }
+
+    private fun skip(direction: Int): Boolean {
+        if (closing) return false
+        val originalIndex = queue.index
+        while (true) {
+            val next = queue.move(direction) ?: run {
+                queue.move(originalIndex - queue.index)
+                publish()
+                return false
+            }
+            // A file can be removed after the queue was opened. Continue to the
+            // next available entry without re-entering the WebView or restarting it.
+            if (!File(next.getString("path")).isFile) continue
+            openItem(next, continuation = true)
+            return true
+        }
+    }
+
+    private fun previous() { if (!skip(-1)) seekTo(0) }
 
     fun snapshot(): JSONObject {
         val player = playback
@@ -398,6 +451,9 @@ class NativePlaybackService : Service() {
             .put("audioTracks", player?.audioTracksCount ?: 0).put("decodedAudio", stats?.decodedAudio ?: 0)
             .put("decodedVideo", stats?.decodedVideo ?: 0).put("backgroundAudio", backgroundAudio)
             .put("displayMode", displayMode).put("sessionId", sessionId).put("audioSessionId", audioSessionId)
+            .put("playlistId", queue.playlistId).put("playlistName", queue.playlistName)
+            .put("queueIndex", queue.index).put("queueLength", queue.size).put("shuffle", queue.shuffled)
+            .put("hasPrevious", queue.hasPrevious).put("hasNext", queue.hasNext)
             .put("closed", closing).put("error", errorMessage ?: JSONObject.NULL)
     }
 
@@ -424,7 +480,9 @@ class NativePlaybackService : Service() {
         } else PlaybackState.STATE_PAUSED
         session.setPlaybackState(PlaybackState.Builder()
             .setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE or
-                PlaybackState.ACTION_STOP or PlaybackState.ACTION_SEEK_TO or PlaybackState.ACTION_REWIND or PlaybackState.ACTION_FAST_FORWARD)
+                PlaybackState.ACTION_STOP or PlaybackState.ACTION_SEEK_TO or PlaybackState.ACTION_REWIND or PlaybackState.ACTION_FAST_FORWARD or
+                (if (queue.hasPrevious) PlaybackState.ACTION_SKIP_TO_PREVIOUS else 0L) or
+                (if (queue.hasNext) PlaybackState.ACTION_SKIP_TO_NEXT else 0L))
             .setState(status, lastPosition, if (desiredPlaying) playback?.rate ?: 1f else 0f)
             .addCustomAction(REWIND, "Back 10 seconds", android.R.drawable.ic_media_rew)
             .addCustomAction(FORWARD, "Forward 30 seconds", android.R.drawable.ic_media_ff)
@@ -452,10 +510,16 @@ class NativePlaybackService : Service() {
             .setContentIntent(playerIntent()).setDeleteIntent(actionIntent(STOP))
             .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true)
             .setOngoing(desiredPlaying).setCategory(Notification.CATEGORY_TRANSPORT)
-            .addAction(Notification.Action.Builder(android.R.drawable.ic_media_rew, "−10 s", actionIntent(REWIND)).build())
+            .addAction(Notification.Action.Builder(
+                if (queue.playlistId.isNotEmpty()) android.R.drawable.ic_media_previous else android.R.drawable.ic_media_rew,
+                if (queue.playlistId.isNotEmpty()) "Previous" else "−10 s",
+                actionIntent(if (queue.playlistId.isNotEmpty()) PREVIOUS else REWIND)).build())
             .addAction(Notification.Action.Builder(if (desiredPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (desiredPlaying) "Pause" else "Play", actionIntent(if (desiredPlaying) PAUSE else PLAY)).build())
-            .addAction(Notification.Action.Builder(android.R.drawable.ic_media_ff, "+30 s", actionIntent(FORWARD)).build())
+            .addAction(Notification.Action.Builder(
+                if (queue.playlistId.isNotEmpty()) android.R.drawable.ic_media_next else android.R.drawable.ic_media_ff,
+                if (queue.playlistId.isNotEmpty()) "Next" else "+30 s",
+                actionIntent(if (queue.playlistId.isNotEmpty()) NEXT else FORWARD)).build())
             .addAction(Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel, "Stop", actionIntent(STOP)).build())
             .setStyle(Notification.MediaStyle().setMediaSession(session.sessionToken).setShowActionsInCompactView(0, 1, 2))
             .build()
@@ -518,6 +582,8 @@ class NativePlaybackService : Service() {
         const val PAUSE = "com.abamaxa.lots_of_videos.PAUSE"
         const val REWIND = "com.abamaxa.lots_of_videos.REWIND"
         const val FORWARD = "com.abamaxa.lots_of_videos.FORWARD"
+        const val NEXT = "com.abamaxa.lots_of_videos.NEXT"
+        const val PREVIOUS = "com.abamaxa.lots_of_videos.PREVIOUS"
         const val STOP = "com.abamaxa.lots_of_videos.STOP"
     }
 }

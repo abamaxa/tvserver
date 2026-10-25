@@ -183,6 +183,8 @@ class NativePlayerActivity : Activity() {
             NativePlayerChrome.Action.TOGGLE -> control("togglePause")
             NativePlayerChrome.Action.REWIND -> service?.seek(-10)
             NativePlayerChrome.Action.FORWARD -> service?.seek(30)
+            NativePlayerChrome.Action.PREVIOUS -> control("previous")
+            NativePlayerChrome.Action.NEXT -> control("next")
             NativePlayerChrome.Action.VIDEO -> service?.setDisplayMode("video")
             NativePlayerChrome.Action.VISUALIZER -> chooseVisualizer()
             NativePlayerChrome.Action.BACKGROUND -> service?.setBackgroundAudio(chrome.backgroundAudio.isChecked)

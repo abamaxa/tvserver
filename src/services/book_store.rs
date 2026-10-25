@@ -512,6 +512,34 @@ mod tests {
     }
 
     #[async_trait]
+    impl crate::domain::traits::PlaylistDatabaser for RelocatingDeleteRepository {
+        async fn list_playlists(&self) -> Result<Vec<crate::domain::models::PlaylistSummary>, sqlx::Error> {
+            self.inner.list_playlists().await
+        }
+        async fn retrieve_playlist(&self, id: &str) -> Result<crate::domain::models::PlaylistDetails, sqlx::Error> {
+            self.inner.retrieve_playlist(id).await
+        }
+        async fn create_playlist(&self, name: &str) -> Result<crate::domain::models::PlaylistDetails, sqlx::Error> {
+            self.inner.create_playlist(name).await
+        }
+        async fn rename_playlist(&self, id: &str, name: &str) -> Result<(), sqlx::Error> {
+            self.inner.rename_playlist(id, name).await
+        }
+        async fn delete_playlist(&self, id: &str) -> Result<(), sqlx::Error> {
+            self.inner.delete_playlist(id).await
+        }
+        async fn add_playlist_video(&self, id: &str, checksum: i64) -> Result<(), sqlx::Error> {
+            self.inner.add_playlist_video(id, checksum).await
+        }
+        async fn remove_playlist_video(&self, id: &str, checksum: i64) -> Result<(), sqlx::Error> {
+            self.inner.remove_playlist_video(id, checksum).await
+        }
+        async fn reorder_playlist(&self, id: &str, checksums: &[i64]) -> Result<(), sqlx::Error> {
+            self.inner.reorder_playlist(id, checksums).await
+        }
+    }
+
+    #[async_trait]
     impl Databaser for RelocatingDeleteRepository {
         async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error> {
             self.inner.save_book(details).await

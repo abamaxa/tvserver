@@ -16,6 +16,8 @@ mod app_storage;
 mod tauri_api;
 #[cfg(not(feature = "webserver"))]
 mod android;
+#[cfg(not(feature = "webserver"))]
+mod playlists;
 
 pub use api::{register, SharedState};
 pub use book_runtime::{

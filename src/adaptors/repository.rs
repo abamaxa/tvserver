@@ -16,6 +16,8 @@ use crate::domain::models::{
 use crate::domain::traits::Databaser;
 use itertools::Itertools;
 
+mod playlists;
+
 const MEMORY_DB_URL: &str = ":memory:";
 
 #[cfg(any(target_os = "android", test))]
@@ -30,6 +32,7 @@ impl SqlRepository {
     pub async fn new(url: &str, sender: Option<LocalMessageSender>) -> Result<Self, Error> {
         let options = url
             .parse::<SqliteConnectOptions>()?
+            .foreign_keys(true)
             .create_if_missing(url != MEMORY_DB_URL);
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
 

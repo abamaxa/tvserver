@@ -19,7 +19,7 @@ internal class NativePlayerIcon(
     private val color: Int = 0xFFF5F7FA.toInt(),
     size: Int = 24,
 ) : Drawable() {
-    enum class Kind { BACK, PLAY, PAUSE, STOP, REWIND, FORWARD, SETTINGS, VIDEO, VISUALIZER, AUDIO, SUBTITLES, SPEED, CLOSE, CHEVRON }
+    enum class Kind { BACK, PLAY, PAUSE, STOP, REWIND, FORWARD, PREVIOUS, NEXT, SETTINGS, VIDEO, VISUALIZER, AUDIO, SUBTITLES, SPEED, CLOSE, CHEVRON }
     private val pixels = (size * context.resources.displayMetrics.density).toInt()
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         strokeWidth = 1.8f
@@ -54,6 +54,11 @@ internal class NativePlayerIcon(
         when (kind) {
             Kind.BACK -> { line(13f, 5f, 6f, 12f, 13f, 19f); line(6f, 12f, 21f, 12f) }
             Kind.PLAY -> fill(Path().apply { moveTo(8f, 4f); lineTo(20f, 12f); lineTo(8f, 20f); close() })
+            Kind.PREVIOUS, Kind.NEXT -> {
+                if (kind == Kind.PREVIOUS) canvas.scale(-1f, 1f, 12f, 12f)
+                fill(Path().apply { moveTo(5f, 5f); lineTo(16f, 12f); lineTo(5f, 19f); close() })
+                line(19f, 5f, 19f, 19f)
+            }
             Kind.PAUSE -> {
                 paint.style = Paint.Style.FILL
                 canvas.drawRoundRect(6f, 4f, 10f, 20f, 1f, 1f, paint)

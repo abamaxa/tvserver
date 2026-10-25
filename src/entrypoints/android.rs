@@ -15,16 +15,10 @@ pub async fn android_player_open(
             .retrieve_video(checksum)
             .await
             .map_err(|error| error.to_string())?;
-        let path = video
-            .get_full_path()
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
         let root = std::path::Path::new(&crate::domain::config::get_movie_dir())
             .canonicalize()
             .map_err(|error| error.to_string())?;
-        if !path.starts_with(root) {
-            return Err("Video is outside the library".into());
-        }
+        let path = playable_library_path(&video, &root)?;
         let payload = json!({ "videoId": video_id, "video": video.video, "collection": video.collection,
             "path": path, "startTime": start_time.filter(|time| time.is_finite() && *time >= 0.0).unwrap_or(0.0) }).to_string();
         return native_call("openPlayer", payload).await;
@@ -34,6 +28,90 @@ pub async fn android_player_open(
         let _ = (state, video_id, start_time);
         Err("Native playback is only available on Android".into())
     }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn playable_library_path(
+    video: &crate::domain::models::VideoDetails,
+    root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    use crate::domain::models::VideoState;
+    if !matches!(video.state, VideoState::Ready | VideoState::NeedThumbnail) {
+        return Err("This library item is not ready to play".into());
+    }
+    let path = video
+        .get_full_path()
+        .canonicalize()
+        .map_err(|_| "This library item is unavailable")?;
+    if !path.starts_with(root) || !path.is_file() {
+        return Err("Video is outside the library or unavailable".into());
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+pub async fn android_playlist_open(
+    state: tauri::State<'_, SharedState>,
+    playlist_id: String,
+    start_video_id: Option<String>,
+    shuffle: Option<bool>,
+) -> Result<Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let playlist = state
+            .get_repository()
+            .retrieve_playlist(&playlist_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let root = std::path::Path::new(&crate::domain::config::get_movie_dir())
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let payload = playlist_player_payload(
+            playlist,
+            &root,
+            start_video_id.as_deref(),
+            shuffle.unwrap_or(false),
+        )?;
+        return native_call("openPlayer", payload.to_string()).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (state, playlist_id, start_video_id, shuffle);
+        Err("Native playback is only available on Android".into())
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn playlist_player_payload(
+    playlist: crate::domain::models::PlaylistDetails,
+    root: &std::path::Path,
+    start_video_id: Option<&str>,
+    shuffle: bool,
+) -> Result<Value, String> {
+    let items: Vec<Value> = playlist
+        .videos
+        .iter()
+        .filter_map(|video| {
+            let path = playable_library_path(video, root).ok()?;
+            Some(
+                json!({ "videoId": video.checksum.to_string(), "video": video.video,
+            "collection": video.collection, "path": path, "startTime": 0 }),
+            )
+        })
+        .collect();
+    if items.is_empty() {
+        return Err("This playlist has no available items to play".into());
+    }
+    if let Some(id) = start_video_id {
+        if !items
+            .iter()
+            .any(|item| item["videoId"].as_str() == Some(id))
+        {
+            return Err("This playlist item is unavailable".into());
+        }
+    }
+    Ok(json!({ "playlistId": playlist.id, "playlistName": playlist.name,
+        "items": items, "startVideoId": start_video_id, "shuffle": shuffle }))
 }
 
 #[tauri::command]
@@ -120,21 +198,29 @@ pub async fn android_video_export(
 
 #[cfg(target_os = "android")]
 async fn library_files(state: &SharedState, video_id: &str) -> Result<Vec<Value>, String> {
-    let videos = crate::domain::algorithm::get_videos_for_series_or_id(
-        state.get_repository(), video_id,
-    ).await.map_err(|error| error.to_string())?;
+    let videos =
+        crate::domain::algorithm::get_videos_for_series_or_id(state.get_repository(), video_id)
+            .await
+            .map_err(|error| error.to_string())?;
     if videos.is_empty() {
         return Err("No videos found".into());
     }
     let root = std::path::Path::new(&crate::domain::config::get_movie_dir())
-        .canonicalize().map_err(|error| error.to_string())?;
-    videos.into_iter().map(|video| {
-        let path = video.get_full_path().canonicalize().map_err(|error| error.to_string())?;
-        if !path.starts_with(&root) || !path.is_file() {
-            return Err("Video is outside the library or unavailable".into());
-        }
-        Ok(json!({ "path": path, "video": video.video }))
-    }).collect()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    videos
+        .into_iter()
+        .map(|video| {
+            let path = video
+                .get_full_path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            if !path.starts_with(&root) || !path.is_file() {
+                return Err("Video is outside the library or unavailable".into());
+            }
+            Ok(json!({ "path": path, "video": video.video }))
+        })
+        .collect()
 }
 
 #[cfg(target_os = "android")]
@@ -146,4 +232,59 @@ async fn native_call(method: &'static str, payload: String) -> Result<Value, Str
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
     serde_json::from_str(&output).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+    use crate::domain::models::{PlaylistDetails, VideoDetails, VideoState};
+
+    #[test]
+    fn queue_uses_only_ready_files_inside_the_library_and_keeps_ids_as_strings() {
+        let root =
+            std::env::temp_dir().join(format!("playlist-paths-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("ready.mp3"), b"audio").unwrap();
+        std::fs::create_dir(root.join("directory.mp3")).unwrap();
+        let video = VideoDetails {
+            checksum: i64::MAX,
+            video: "ready.mp3".into(),
+            dir_path: Some(root.clone()),
+            ..Default::default()
+        };
+        let playlist = || PlaylistDetails {
+            id: "playlist".into(),
+            name: "Mix".into(),
+            videos: vec![
+                video.clone(),
+                VideoDetails {
+                    checksum: 2,
+                    video: "missing.mp3".into(),
+                    ..video.clone()
+                },
+                VideoDetails {
+                    checksum: 3,
+                    state: VideoState::Exception,
+                    ..video.clone()
+                },
+                VideoDetails {
+                    checksum: 4,
+                    video: "directory.mp3".into(),
+                    ..video.clone()
+                },
+                VideoDetails {
+                    checksum: 5,
+                    video: "../outside.mp3".into(),
+                    ..video.clone()
+                },
+            ],
+        };
+        let payload = playlist_player_payload(playlist(), &root, None, true).unwrap();
+        assert_eq!(payload["items"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["items"][0]["videoId"], i64::MAX.to_string());
+        assert_eq!(payload["items"][0]["startTime"], 0);
+        assert!(playlist_player_payload(playlist(), &root, Some("2"), false).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

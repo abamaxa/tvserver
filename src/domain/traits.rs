@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::messages::{MediaItem, RemoteMessage, TaskState};
 use super::models::{
     BookDetails, CollectionItem, DownloadableItem, SaveBookProgressRequest, SearchResults,
-    VideoDetails,
+    VideoDetails, PlaylistDetails, PlaylistSummary,
 };
 use anyhow;
 use async_trait::async_trait;
@@ -273,7 +273,19 @@ pub trait ProcessSpawner: Sync + Send {
 pub type Spawner = Arc<dyn ProcessSpawner>;
 
 #[async_trait]
-pub trait Databaser: Sync + Send {
+pub trait PlaylistDatabaser: Sync + Send {
+    async fn list_playlists(&self) -> Result<Vec<PlaylistSummary>, sqlx::Error>;
+    async fn retrieve_playlist(&self, id: &str) -> Result<PlaylistDetails, sqlx::Error>;
+    async fn create_playlist(&self, name: &str) -> Result<PlaylistDetails, sqlx::Error>;
+    async fn rename_playlist(&self, id: &str, name: &str) -> Result<(), sqlx::Error>;
+    async fn delete_playlist(&self, id: &str) -> Result<(), sqlx::Error>;
+    async fn add_playlist_video(&self, id: &str, checksum: i64) -> Result<(), sqlx::Error>;
+    async fn remove_playlist_video(&self, id: &str, checksum: i64) -> Result<(), sqlx::Error>;
+    async fn reorder_playlist(&self, id: &str, checksums: &[i64]) -> Result<(), sqlx::Error>;
+}
+
+#[async_trait]
+pub trait Databaser: PlaylistDatabaser + Sync + Send {
     async fn save_book(&self, details: &BookDetails) -> Result<i64, sqlx::Error>;
     async fn list_book_collections(
         &self,

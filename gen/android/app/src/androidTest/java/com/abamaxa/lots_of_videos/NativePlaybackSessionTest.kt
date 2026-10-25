@@ -25,6 +25,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -123,6 +124,79 @@ class NativePlaybackSessionTest {
             assertEquals(session, state().getString("sessionId"))
             assertTrue(state().getBoolean("paused"))
             await("Paused video picture did not reconnect after unlock") { videoPictureVisible() }
+        }
+    }
+    @Test fun playlistAdvancesWhileLockedAndRetainsSettingsAndMediaSkipControls() {
+        open().use { scenario ->
+            val path = state().getString("currentSrc")
+            val items = JSONArray()
+            for (index in 0..2) items.put(JSONObject().put("videoId", "playlist-$index")
+                .put("video", "Playlist item $index").put("collection", "Playlist regression fixtures")
+                .put("path", path).put("startTime", 0))
+            main { NativeBridge.playback!!.open(JSONObject().put("playlistId", "regression-playlist")
+                .put("playlistName", "Regression mix").put("items", items)) }
+            awaitState("First playlist item did not start") { it.optString("videoId") == "playlist-0" && it.optBoolean("playing") && it.optDouble("duration") > 0 }
+            val sessionId = state().getString("sessionId")
+            main {
+                NativeBridge.playback!!.apply {
+                    setBackgroundAudio(true)
+                    setDisplayMode("visualizer")
+                    control(JSONObject().put("action", "rate").put("rate", 1.25))
+                    control(JSONObject().put("action", "volume").put("volume", 67))
+                    seekTo((snapshot().getDouble("duration") * 1000).toLong() - 2500)
+                }
+            }
+            shell("input keyevent KEYCODE_SLEEP")
+            awaitState("Playlist did not advance with the screen locked", 30000) {
+                it.optString("videoId") == "playlist-1" && it.optBoolean("playing") && it.optInt("decodedAudio") > 0
+            }
+            assertEquals(sessionId, state().getString("sessionId"))
+            assertTrue(state().getBoolean("backgroundAudio"))
+            assertEquals("visualizer", state().getString("displayMode"))
+            assertEquals(1.25, state().getDouble("playbackRate"), 0.01)
+            assertEquals(67, state().getInt("volume"))
+            assertEquals(1, state().getInt("queueIndex"))
+            assertEquals(3, state().getInt("queueLength"))
+            val controller = controller()
+            controller.transportControls.skipToPrevious()
+            awaitState("Media previous did not select the previous item") { it.optString("videoId") == "playlist-0" && it.optBoolean("playing") }
+            controller.transportControls.skipToNext()
+            awaitState("Media next did not select the next item") { it.optString("videoId") == "playlist-1" && it.optBoolean("playing") }
+            wake()
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            // Keep controls visible while Android finishes its unlock/orientation
+            // animation; otherwise Espresso can outwait the three-second timeout.
+            main { NativeBridge.playback!!.pause() }
+            awaitState("Pause after unlock did not settle") { it.optBoolean("paused") }
+            scenario.onActivity { activity ->
+                findControl(activity.window.decorView, "Video playback")?.performClick()
+                activity.onUserInteraction()
+            }
+            onView(withContentDescription("Next item")).perform(click())
+            awaitState("Player next did not select the last item") { it.optString("videoId") == "playlist-2" && it.optBoolean("playing") && it.optDouble("duration") > 0 }
+            main { NativeBridge.playback!!.seekTo((state().getDouble("duration") * 1000).toLong() - 1500) }
+            awaitState("Playback did not stop at the end of the playlist", 20000) { it.optBoolean("closed") }
+        }
+    }
+    @Test fun playlistSkipsFilesRemovedAfterOpeningAndKeepsItsPositionAtTheBoundary() {
+        open().use {
+            val path = state().getString("currentSrc")
+            val temporary = File(context.cacheDir, "playlist-disposable-next.mp4")
+            clips.add(temporary)
+            File(path).copyTo(temporary, overwrite = true)
+            val items = JSONArray()
+            for (index in 0..2) items.put(JSONObject().put("videoId", "skip-$index")
+                .put("video", "Skip test $index").put("path", if (index == 1) temporary.absolutePath else path))
+            main { NativeBridge.playback!!.open(JSONObject().put("playlistId", "skip-regression").put("items", items)) }
+            awaitState("Skip playlist did not start") { it.optString("videoId") == "skip-0" && it.optBoolean("playing") }
+            temporary.delete()
+            main { NativeBridge.playback!!.control(JSONObject().put("action", "next")) }
+            awaitState("Removed item was not skipped") { it.optString("videoId") == "skip-2" && it.optBoolean("playing") }
+            main { NativeBridge.playback!!.control(JSONObject().put("action", "previous")) }
+            awaitState("Previous did not skip removed item") { it.optString("videoId") == "skip-0" && it.optBoolean("playing") }
+            main { NativeBridge.playback!!.control(JSONObject().put("action", "previous")) }
+            assertEquals(0, state().getInt("queueIndex"))
+            assertEquals("skip-0", state().getString("videoId"))
         }
     }
     @Test fun pausedDisplaySwitchPreservesPositionAndResumesFromTheSeekTarget() {

@@ -1,4 +1,5 @@
 mod book;
+mod playlist;
 mod conversion;
 mod search_results;
 mod video;
@@ -11,6 +12,7 @@ pub use book::{
     DEFAULT_BOOK_THUMBNAIL,
 };
 pub use conversion::{Conversion, AVAILABLE_CONVERSIONS};
+pub use playlist::{PlaylistDetails, PlaylistSummary};
 pub use search_results::{DownloadableItem, SearchResults, TaskListResults};
 pub use video::{CollectionItem, CollectionDetails, SeriesDetails, VideoDetails, VideoState, VideoMetadata};
 pub use youtube::{Id, Item, Snippet, YoutubeResponse};

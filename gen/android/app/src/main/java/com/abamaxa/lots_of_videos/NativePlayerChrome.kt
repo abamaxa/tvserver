@@ -24,7 +24,7 @@ import java.util.Locale
 
 /** Presentation only: the Activity routes actions to its existing durable playback session. */
 internal class NativePlayerChrome(context: Context, private val action: (Action) -> Unit) : FrameLayout(context) {
-    enum class Action { BACK, STOP, TOGGLE, REWIND, FORWARD, VIDEO, VISUALIZER, BACKGROUND, SETTINGS, AUDIO, SUBTITLES, SPEED }
+    enum class Action { BACK, STOP, TOGGLE, REWIND, FORWARD, PREVIOUS, NEXT, VIDEO, VISUALIZER, BACKGROUND, SETTINGS, AUDIO, SUBTITLES, SPEED }
     val progress = SeekBar(context)
     val backgroundAudio = Switch(context)
     var safeInsets: Insets = Insets.NONE
@@ -36,6 +36,8 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
     private val elapsed = label(12f, WHITE)
     private val duration = label(12f, MUTED)
     private val toggle: ImageButton
+    private val previous: ImageButton
+    private val next: ImageButton
     private val video: RadioButton
     private val visualizer: RadioButton
     private var updating = false
@@ -62,12 +64,18 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         addView(header, LayoutParams(-1, dp(108), Gravity.TOP))
 
         val transport = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+        previous = icon(NativePlayerIcon.Kind.PREVIOUS, "Previous item", Action.PREVIOUS)
+        transport.addView(previous, row(48, 56))
         transport.addView(icon(NativePlayerIcon.Kind.REWIND, "Back 10 seconds", Action.REWIND,
             size = 30, fill = 0x33000000), row(56, 56))
         toggle = icon(NativePlayerIcon.Kind.PAUSE, "Pause", Action.TOGGLE, size = 32, fill = WHITE, ink = INK)
         transport.addView(toggle, row(72, 72).apply { setMargins(dp(28), 0, dp(28), 0) })
         transport.addView(icon(NativePlayerIcon.Kind.FORWARD, "Forward 30 seconds", Action.FORWARD,
             size = 30, fill = 0x33000000), row(56, 56))
+        next = icon(NativePlayerIcon.Kind.NEXT, "Next item", Action.NEXT)
+        transport.addView(next, row(48, 56))
+        previous.visibility = View.GONE
+        next.visibility = View.GONE
         addView(transport, LayoutParams(-2, -2, Gravity.CENTER))
 
         footer.orientation = LinearLayout.VERTICAL
@@ -148,7 +156,16 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
     fun bind(state: JSONObject, dragging: Boolean) {
         updating = true
         title.text = state.optString("video")
-        collection.text = state.optString("collection")
+        val playlist = state.optString("playlistName", "")
+        collection.text = if (playlist.isNotEmpty())
+            "$playlist · ${state.optInt("queueIndex") + 1} of ${state.optInt("queueLength")}" else state.optString("collection")
+        val queued = state.optString("playlistId", "").isNotEmpty()
+        previous.visibility = if (queued) View.VISIBLE else View.GONE
+        next.visibility = if (queued) View.VISIBLE else View.GONE
+        previous.isEnabled = state.optBoolean("hasPrevious")
+        next.isEnabled = state.optBoolean("hasNext")
+        previous.alpha = if (previous.isEnabled) 1f else 0.35f
+        next.alpha = if (next.isEnabled) 1f else 0.35f
         collection.visibility = if (collection.text.isNullOrBlank()) View.GONE else View.VISIBLE
         backgroundAudio.isChecked = state.optBoolean("backgroundAudio")
         backgroundAudio.setTextColor(if (backgroundAudio.isChecked) WHITE else MUTED)

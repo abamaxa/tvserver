@@ -229,6 +229,15 @@ node tests/android_background_download_smoke.cjs emulator-5554 --transfers
 `NativeDownloadsTest` checks real Android jobs/services, screen-off CPU wake
 locks, progress notifications, independent cancellation and system-stop cleanup.
 
+On an idle emulator, the playlist smoke test checks the real Tauri commands and
+playlist UI, then restarts the app to verify SQLite persistence. It creates and
+removes one temporary playlist and uses existing library references without
+modifying their files:
+
+```shell
+node tests/android_playlists_smoke.cjs emulator-5554
+```
+
 ## Configuration
 
 The tvserver daemon is configured through the following environment variables
