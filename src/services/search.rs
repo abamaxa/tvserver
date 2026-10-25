@@ -1,4 +1,4 @@
-use crate::domain::messages::{DownloadRequest, LocalMessageSender};
+use crate::domain::messages::{DownloadRequest, DownloadSource, LocalMessageSender};
 use crate::domain::models::VideoDetails;
 use crate::domain::services::{CopyServer, DownloadMonitor};
 use crate::domain::traits::{Downloader, Searcher, Databaser};
@@ -84,9 +84,10 @@ impl SearchService {
         Ok(())
     }
 
-    pub async fn download_videos(&self, host_url: String, videos: Vec<VideoDetails>, sender: LocalMessageSender) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn download_videos(&self, source: DownloadSource, videos: Vec<VideoDetails>, sender: LocalMessageSender) -> Result<(), Box<dyn std::error::Error>> {
+        let host_url = super::download_source::RemoteLibrary::new(source.clone())?.host_url();
         // Use the CopyServer to download videos
-        let progresser = self.copy_server.download_videos(host_url.clone(), videos).await?;
+        let progresser = self.copy_server.download_videos(source, videos).await?;
         
         // Create a placeholder download request for task monitoring
         let request = DownloadRequest {

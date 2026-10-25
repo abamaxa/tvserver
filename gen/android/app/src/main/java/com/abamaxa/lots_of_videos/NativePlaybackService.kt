@@ -281,7 +281,7 @@ class NativePlaybackService : Service() {
         val player = playback ?: return
         val enabled = uiVisible && surface != null && displayMode == "video"
         val refreshPausedFrame = enabled && !videoOutputEnabled && !desiredPlaying && player.isSeekable
-        val position = player.time.coerceAtLeast(0)
+        val position = if (desiredPlaying) player.time.coerceAtLeast(0) else lastPosition
         player.setVideoTrackEnabled(enabled)
         videoOutputEnabled = enabled
         // Enabling VLC's video track while paused creates an empty output. A precise
@@ -314,12 +314,21 @@ class NativePlaybackService : Service() {
             return
         }
         resumeOnFocusGain = false
+        // Decoding a paused still can advance VLC's internal preroll clock.
+        // Resume from the held user position rather than that decoder timestamp.
+        // An explicit seek can already be pending. Submitting it again while
+        // resuming can stall VLC's decoder after an audio-track change.
+        val resumePosition = lastPosition.takeIf {
+            !desiredPlaying && playback?.isSeekable == true && playback?.time != lastPosition
+        }
         desiredPlaying = true
         playback?.play()
+        if (resumePosition != null) playback?.setTime(resumePosition, false)
         publish()
     }
 
     fun pause(abandon: Boolean = true) {
+        if (desiredPlaying) lastPosition = playback?.time?.takeIf { it >= 0 } ?: lastPosition
         desiredPlaying = false
         playback?.pause()
         if (abandon) abandonFocus()
@@ -336,13 +345,16 @@ class NativePlaybackService : Service() {
         hasFocus = false
     }
 
-    fun seek(seconds: Int) = seekTo((playback?.time ?: lastPosition) + seconds * 1000L)
+    fun seek(seconds: Int) = seekTo((if (desiredPlaying) playback?.time ?: lastPosition else lastPosition) + seconds * 1000L)
 
     fun seekTo(position: Long) {
         playback?.let {
             // A paused fast seek can settle at a later keyframe after the UI has
             // already shown its requested time. Keep paused stills at the exact time.
-            if (it.isSeekable) it.setTime(position.coerceIn(0, it.length.coerceAtLeast(0)), desiredPlaying)
+            if (it.isSeekable) {
+                lastPosition = position.coerceIn(0, it.length.coerceAtLeast(0))
+                it.setTime(lastPosition, desiredPlaying)
+            }
         }
         publish()
     }
@@ -369,7 +381,9 @@ class NativePlaybackService : Service() {
     fun snapshot(): JSONObject {
         val player = playback
         if (!closing && player != null) {
-            lastPosition = player.time.takeIf { it >= 0 } ?: lastPosition
+            // While paused, the user timeline stays fixed even when VLC decodes
+            // preroll to restore a video surface or change its output tracks.
+            if (desiredPlaying) lastPosition = player.time.takeIf { it >= 0 } ?: lastPosition
             lastDuration = player.length.takeIf { it > 0 } ?: lastDuration
         }
         val stats = media?.stats

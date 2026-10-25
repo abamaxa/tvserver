@@ -5,6 +5,7 @@ mod media_store;
 mod monitor;
 mod pirate_bay;
 mod search;
+pub mod download_source;
 mod soundcloud;
 mod sharing;
 mod task_manager;
