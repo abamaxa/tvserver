@@ -35,7 +35,7 @@ try:
     cards = [n for n in root.iter('node') if n.get('resource-id', '').endswith('/snapshot')]
     helpers = [n for n in cards if 'lots_of_videos.test' in n.get('content-desc', '')
                or 'Lots of Videos tests' in n.get('content-desc', '')]
-    apps = [n for n in cards if n.get('content-desc') == 'lots-of-videos']
+    apps = [n for n in cards if n.get('content-desc') in ('Lots of Videos', 'lots-of-videos')]
     target = (helpers or apps or [None])[0]
     assert target is not None, 'Open MainActivity before checking Recent apps'
     x1, y1, x2, y2 = map(int, re.findall(r'\d+', target.get('bounds')))
