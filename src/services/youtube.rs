@@ -44,18 +44,8 @@ impl MediaSearcher<DownloadableItem> for YoutubeClient {
 }
 
 async fn keyless_search(query: &str) -> anyhow::Result<Vec<DownloadableItem>> {
-    let mut command = crate::adaptors::youtube_runtime::command().await?;
-    let query = format!("ytsearch25:{}", query.trim().chars().take(200).collect::<String>());
-    command.args.extend([
-        "--flat-playlist", "--dump-single-json", "--skip-download", "--quiet",
-        "--no-warnings", "--socket-timeout", "15", "--extractor-retries", "1", "--", &query,
-    ].into_iter().map(String::from));
-    let output = tokio::time::timeout(std::time::Duration::from_secs(45),
-        tokio::process::Command::new(command.program).args(command.args).kill_on_drop(true).output()
-    ).await.map_err(|_| anyhow::anyhow!("YouTube search timed out; please try again"))??;
-    anyhow::ensure!(output.status.success(), "YouTube search failed: {}",
-        String::from_utf8_lossy(&output.stderr).chars().take(600).collect::<String>());
-    parse_keyless_results(&output.stdout)
+    let data = super::ytdlp_search::search(query, "ytsearch", "YouTube").await?;
+    parse_keyless_results(&data)
 }
 
 fn parse_keyless_results(data: &[u8]) -> anyhow::Result<Vec<DownloadableItem>> {
@@ -72,7 +62,7 @@ fn parse_keyless_results(data: &[u8]) -> anyhow::Result<Vec<DownloadableItem>> {
             link: format!("https://www.youtube.com/watch?v={id}"),
             engine: crate::domain::SearchEngineType::YouTube,
         })
-    }).take(25).collect())
+    }).take(super::ytdlp_search::MAX_RESULTS).collect())
 }
 
 impl YoutubeClient {

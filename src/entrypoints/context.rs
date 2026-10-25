@@ -17,7 +17,7 @@ use crate::domain::traits::FileStorer;
 use crate::domain::traits::{BookCheckerHandle, Checker, ProcessSpawner, Repository, Storer};
 use crate::domain::SearchEngineType;
 use crate::services::{
-    MediaStore, PirateClient, SearchEngine, SearchService, SharingService, TaskManager, YoutubeClient,
+    MediaStore, PirateClient, SearchEngine, SearchService, SharingService, SoundcloudClient, TaskManager, YoutubeClient,
 };
 
 use super::book_runtime::{unavailable_book_checker, AvailableBookRuntime, BookRuntime};
@@ -155,12 +155,18 @@ pub async fn create_context() -> anyhow::Result<Context> {
     let youtube_search = Arc::new(SearchEngine::new(
         SearchEngineType::YouTube,
         Arc::new(YoutubeClient::new(&get_google_key(), web_fetcher.clone())),
+        youtube_fetcher.clone(),
+    ));
+
+    let soundcloud_search = Arc::new(SearchEngine::new(
+        SearchEngineType::SoundCloud,
+        Arc::new(SoundcloudClient),
         youtube_fetcher,
     ));
 
     let search_service = SearchService::new(
         task_manager.clone(),
-        vec![torrent_search, youtube_search],
+        vec![torrent_search, youtube_search, soundcloud_search],
         repository.clone(),
     );
 

@@ -68,6 +68,7 @@ pub fn register(shared_state: SharedState) -> Router {
         .route("/api/control/ws", any(ws_control_handler))
         .route("/api/search/pirate", get(pirate_search))
         .route("/api/search/youtube", get(youtube_search))
+        .route("/api/search/soundcloud", get(soundcloud_search))
         .route("/api/conversion", get(list_conversions))
         .with_state(shared_state)
 }
@@ -115,6 +116,13 @@ async fn pirate_search(state: State<SharedState>, params: QueryParams) -> impl I
 async fn youtube_search(state: State<SharedState>, params: QueryParams) -> impl IntoResponse {
     let search = state.get_search();
     let downloader = search.get_search_engine(&SearchEngineType::YouTube);
+    do_search(downloader, &params).await
+}
+
+#[debug_handler]
+async fn soundcloud_search(state: State<SharedState>, params: QueryParams) -> impl IntoResponse {
+    let search = state.get_search();
+    let downloader = search.get_search_engine(&SearchEngineType::SoundCloud);
     do_search(downloader, &params).await
 }
 
