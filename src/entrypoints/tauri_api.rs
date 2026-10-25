@@ -100,6 +100,20 @@ pub async fn youtube_search(
 
 #[cfg(not(feature = "webserver"))]
 #[tauri::command]
+pub async fn soundcloud_search(
+    state: tauri::State<'_, SharedState>,
+    query: String
+) -> Result<SearchResults<DownloadableItem>, String> {
+    let search = state.get_search();
+    let downloader = search.get_search_engine(&SearchEngineType::SoundCloud);
+    match downloader.search(&query).await {
+        Ok(results) => Ok(results),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(not(feature = "webserver"))]
+#[tauri::command]
 pub async fn list_root_collection(
     state: tauri::State<'_, SharedState>
 ) -> Result<MediaItem, String> {
@@ -395,6 +409,7 @@ pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
         tasks_list,
         pirate_search,
         youtube_search,
+        soundcloud_search,
         list_root_collection,
         list_collection,
         list_root_books,

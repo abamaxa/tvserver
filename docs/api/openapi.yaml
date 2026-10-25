@@ -583,6 +583,22 @@ paths:
           $ref: '#/components/responses/UnauthorizedResponse'
         '500':
           $ref: '#/components/responses/SearchResponse'
+  /api/search/soundcloud:
+    get:
+      tags: [Search]
+      operationId: searchSoundCloud
+      summary: Search SoundCloud tracks using yt-dlp
+      parameters:
+        - $ref: '#/components/parameters/SearchQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/SearchResponse'
+        '400':
+          $ref: '#/components/responses/SearchResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedResponse'
+        '500':
+          $ref: '#/components/responses/SearchResponse'
   /api/conversion:
     get:
       tags: [Media]
@@ -873,7 +889,7 @@ components:
             type: string
     SearchEngineType:
       type: string
-      enum: [YouTube, Torrent, CopyServer]
+      enum: [YouTube, Torrent, CopyServer, SoundCloud]
     TaskType:
       type: string
       enum: [Transmission, AsyncProcess]

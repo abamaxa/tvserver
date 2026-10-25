@@ -493,6 +493,7 @@ fn openapi_contract_typed_parses_and_meets_project_requirements() {
         ("/api/remote/ws", &["get"]),
         ("/api/search/pirate", &["get"]),
         ("/api/search/youtube", &["get"]),
+        ("/api/search/soundcloud", &["get"]),
         ("/api/stream-audio/{audio_index}/{path}", &["get"]),
         ("/api/stream/{path}", &["get"]),
         ("/api/tasks", &["get", "post"]),
@@ -1131,6 +1132,13 @@ fn remote_request_schemas_accept_runtime_valid_serde_payloads() {
             "{schema_name} schema rejected a runtime-valid unknown property"
         );
     }
+
+    let soundcloud_request = serde_json::json!({
+        "name": "Track", "link": "https://soundcloud.com/artist/track",
+        "engine": "SoundCloud", "series": null
+    });
+    serde_json::from_value::<DownloadRequest>(soundcloud_request.clone()).unwrap();
+    assert!(schema_accepts(&document, &schemas["DownloadRequest"], &soundcloud_request));
 
     let pong_schema = schemas["RemoteMessage"]["oneOf"]
         .as_array()

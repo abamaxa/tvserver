@@ -8,6 +8,7 @@ use crate::domain::config::get_downloads_dir;
 use crate::domain::traits::{DownloadProgress, DownloadProgressMonitor, Download, Spawner, Task};
 use crate::domain::messages::{DownloadInfo, DownloadRequest, TaskState};
 use crate::adaptors::youtube_runtime;
+use crate::domain::SearchEngineType;
 
 pub struct YoutubeTask {
     spawner: Spawner,
@@ -31,8 +32,9 @@ impl DownloadProgress for YoutubeTask {
 
 impl YoutubeTask {
     pub fn new(spawner: Spawner, request: DownloadRequest) -> Self {
+        let extension = if request.engine == SearchEngineType::SoundCloud { "mp3" } else { "mp4" };
         let destination = PathBuf::from(get_downloads_dir())
-            .join(format!("{}.mp4", download_filename(&request.name)));
+            .join(format!("{}.{extension}", download_filename(&request.name)));
 
         Self { spawner, request, monitor: RwLock::new(None), destination: destination }
     }
@@ -41,18 +43,27 @@ impl YoutubeTask {
 
         let mut command = youtube_runtime::command().await?;
 
-        let output_path = self.destination
-            .to_string_lossy()
-            .replace('%', "%%");
+        let audio_only = self.request.engine == SearchEngineType::SoundCloud;
+        let output_path = if audio_only {
+            // Let yt-dlp use the source extension before FFmpeg produces the final MP3.
+            format!("{}.%(ext)s", self.destination.with_extension("").to_string_lossy().replace('%', "%%"))
+        } else {
+            self.destination.to_string_lossy().replace('%', "%%")
+        };
 
         let link = if self.request.link.len() == 11 && self.request.link.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
             format!("https://www.youtube.com/watch?v={}", self.request.link)
         } else { self.request.link.clone() };
         command.args.extend([
             "--no-update", "--no-playlist", "--newline", "--socket-timeout", "20",
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "--merge-output-format", "mp4", "-o", &output_path, "--", &link,
         ].into_iter().map(String::from));
+        let format_args = if audio_only {
+            vec!["-f", "bestaudio/best", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
+        } else {
+            vec!["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4"]
+        };
+        command.args.extend(format_args.into_iter().map(String::from));
+        command.args.extend(["-o", &output_path, "--", &link].into_iter().map(String::from));
 
         let monitor =self.spawner
             .execute(
@@ -230,6 +241,69 @@ mod tests {
         assert_eq!(fs::read(&destination).await?, VIDEO);
         assert_eq!(info.downloaded_size, VIDEO.len() as i64);
         assert_eq!(info.files, vec![destination.to_string_lossy().to_string()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires yt-dlp, FFmpeg, ffprobe and a loopback HTTP listener"]
+    async fn downloads_soundcloud_audio_as_one_reported_mp3() -> anyhow::Result<()> {
+        // A short PCM WAV requires real audio conversion rather than an extension change.
+        let app = Router::new().route("/audio.wav", get(|| async {
+            let mut wav = b"RIFF".to_vec();
+            wav.extend(1636_u32.to_le_bytes());
+            wav.extend(b"WAVEfmt ");
+            wav.extend(16_u32.to_le_bytes());
+            wav.extend(1_u16.to_le_bytes());
+            wav.extend(1_u16.to_le_bytes());
+            wav.extend(8000_u32.to_le_bytes());
+            wav.extend(16000_u32.to_le_bytes());
+            wav.extend(2_u16.to_le_bytes());
+            wav.extend(16_u16.to_le_bytes());
+            wav.extend(b"data");
+            wav.extend(1600_u32.to_le_bytes());
+            wav.resize(1644, 0);
+            ([(header::CONTENT_TYPE, "audio/wav")], wav)
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let directory = std::env::temp_dir().join(format!("tvserver-soundcloud-{}-{}", std::process::id(), address.port()));
+        fs::create_dir_all(&directory).await?;
+        let fixture = DownloadFixture {
+            directory,
+            server: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+        };
+        let destination = fixture.directory.join("100% café track.mp3");
+        let task = YoutubeTask {
+            spawner: Arc::new(TokioProcessSpawner::new()),
+            request: DownloadRequest {
+                name: "100% café track".into(),
+                link: format!("http://{address}/audio.wav"),
+                engine: SearchEngineType::SoundCloud,
+                series: None,
+            },
+            monitor: RwLock::new(None),
+            destination: destination.clone(),
+        };
+        task.start().await?;
+        let info = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let info = task.observe().await;
+                if info.finished { break info; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await?;
+        assert!(info.error_message.is_empty(), "download failed: {}; {}", info.error_message, info.progress_message);
+        assert_eq!(info.files, vec![destination.to_string_lossy().to_string()]);
+        assert_eq!(info.downloaded_size, fs::metadata(&destination).await?.len() as i64);
+        let output = tokio::process::Command::new("ffprobe")
+            .args(["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json"])
+            .arg(&destination).output().await?;
+        assert!(output.status.success());
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(metadata["streams"].as_array().unwrap().len(), 1);
+        assert_eq!(metadata["streams"][0]["codec_type"], "audio");
+        assert_eq!(metadata["streams"][0]["codec_name"], "mp3");
+        assert!(matches!(crate::domain::algorithm::classify_media_kind(&destination), crate::domain::algorithm::MediaKind::Video));
         Ok(())
     }
 }
