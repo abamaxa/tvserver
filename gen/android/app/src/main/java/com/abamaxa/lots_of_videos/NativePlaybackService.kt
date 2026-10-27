@@ -59,6 +59,8 @@ class NativePlaybackService : Service() {
     private var errorMessage: String? = null
     private var sessionId = ""
     private var focusRequest: AudioFocusRequest? = null
+    private var audioDelayMs = 0L
+    private var softwareVideo = false
     private val videoCallback = object : IVLCVout.Callback {
         override fun onSurfacesCreated(output: IVLCVout) {
             val player = playback ?: return
@@ -117,6 +119,8 @@ class NativePlaybackService : Service() {
         NativeBridge.playback = this
         audioManager = getSystemService(AudioManager::class.java)
         audioSessionId = audioManager.generateAudioSessionId()
+        audioDelayMs = getSharedPreferences("native-playback", MODE_PRIVATE)
+            .getLong("audio-delay-ms", 0L).coerceIn(-5000L, 5000L)
         wakeLock = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:playback")
         if (Build.VERSION.SDK_INT >= 26) getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -217,21 +221,14 @@ class NativePlaybackService : Service() {
                             // VLC initializes its audio output asynchronously and resets
                             // volume then. Restore it after that output is actually ready.
                             player.setVolume(volume)
+                            player.setAudioDelay(audioDelayMs * 1000L)
                         }
-                        if (startPosition > 0 && player.isSeekable) {
-                            player.setTime(startPosition)
-                            startPosition = 0
-                        }
+                        restoreStartPosition(player)
                         if (!desiredPlaying) player.pause()
                         updateVideoOutput()
                         publish()
                     }
-                    MediaPlayer.Event.SeekableChanged -> {
-                        if (startPosition > 0 && player.isSeekable) {
-                            player.setTime(startPosition)
-                            startPosition = 0
-                        }
-                    }
+                    MediaPlayer.Event.SeekableChanged, MediaPlayer.Event.LengthChanged -> restoreStartPosition(player)
                     MediaPlayer.Event.EncounteredError -> {
                         errorMessage = "This video could not be played."
                         pause()
@@ -248,8 +245,10 @@ class NativePlaybackService : Service() {
                     MediaPlayer.Event.Paused -> publish()
                 }
             }
-            media = Media(vlc, Uri.fromFile(File(request.getString("path")))).also {
-                it.setHWDecoderEnabled(true, false)
+            val path = request.getString("path")
+            softwareVideo = NativeVideoDecoder.requiresSoftware(path)
+            media = Media(vlc, Uri.fromFile(File(path))).also {
+                it.setHWDecoderEnabled(!softwareVideo, false)
                 player.media = it
             }
             session.isActive = true
@@ -262,6 +261,16 @@ class NativePlaybackService : Service() {
 
     fun addListener(listener: (JSONObject) -> Unit) { listeners.add(listener); listener(snapshot()) }
     fun removeListener(listener: (JSONObject) -> Unit) { listeners.remove(listener) }
+
+    private fun restoreStartPosition(player: MediaPlayer) {
+        val duration = player.length
+        if (startPosition <= 0 || !player.isSeekable || duration <= 0) return
+        val position = startPosition
+        startPosition = 0
+        // A saved EOF can come from an older app or a slightly different
+        // metadata duration. Leave completed items at the beginning.
+        if (position < duration - minOf(1000L, duration / 50)) player.setTime(position, false)
+    }
 
     fun attachSurface(view: VLCVideoLayout) {
         if (surface === view) return
@@ -394,6 +403,17 @@ class NativePlaybackService : Service() {
     fun tracks(subtitles: Boolean): Array<MediaPlayer.TrackDescription> =
         (if (subtitles) playback?.spuTracks else playback?.audioTracks) ?: emptyArray()
 
+    fun setAudioDelay(milliseconds: Long): Boolean {
+        val delay = milliseconds.coerceIn(-5000L, 5000L)
+        // LibVLC uses microseconds; a negative value advances late audio.
+        if (playback?.setAudioDelay(delay * 1000L) != true) return false
+        audioDelayMs = delay
+        getSharedPreferences("native-playback", MODE_PRIVATE).edit()
+            .putLong("audio-delay-ms", delay).apply()
+        publish()
+        return true
+    }
+
     fun control(request: JSONObject) {
         when (request.optString("action")) {
             "seek" -> seek(request.optInt("seconds"))
@@ -406,6 +426,7 @@ class NativePlaybackService : Service() {
             "previous" -> previous()
             "subtitle" -> playback?.setSpuTrack(request.optInt("track", -1))
             "audio" -> playback?.setAudioTrack(request.optInt("track", -1))
+            "audioDelay" -> setAudioDelay(request.optLong("milliseconds"))
             "rate" -> playback?.setRate(request.optDouble("rate", 1.0).toFloat().coerceIn(0.25f, 4f))
             "volume" -> playback?.setVolume(request.optInt("volume", 100).coerceIn(0, 100))
         }
@@ -447,6 +468,8 @@ class NativePlaybackService : Service() {
             .put("currentTime", lastPosition / 1000.0).put("duration", lastDuration / 1000.0)
             .put("paused", !desiredPlaying || closing).put("playing", player?.isPlaying == true && !closing)
             .put("playbackRate", player?.rate?.toDouble() ?: 1.0).put("volume", player?.volume ?: 100)
+            .put("audioDelayMs", (player?.audioDelay ?: audioDelayMs * 1000L) / 1000L)
+            .put("videoDecoder", if (softwareVideo) "software" else "auto")
             .put("currentSubtitleTrack", player?.spuTrack ?: -1).put("currentAudioTrack", player?.audioTrack ?: -1)
             .put("audioTracks", player?.audioTracksCount ?: 0).put("decodedAudio", stats?.decodedAudio ?: 0)
             .put("decodedVideo", stats?.decodedVideo ?: 0).put("backgroundAudio", backgroundAudio)

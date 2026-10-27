@@ -65,7 +65,14 @@ impl YoutubeTask {
                 "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
             ]
         } else {
-            vec!["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4"]
+            // Prefer synchronized, efficient hardware playback on Android.
+            // Existing AV1 downloads use VLC's software decoder there.
+            let format = if cfg!(target_os = "android") {
+                "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4][vcodec^=avc1]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+            } else {
+                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+            };
+            vec!["-f", format, "--merge-output-format", "mp4"]
         };
         command.args.extend(format_args.into_iter().map(String::from));
         command.args.extend(["-o", &output_path, "--", &link].into_iter().map(String::from));

@@ -21,6 +21,7 @@ import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
 import androidx.test.espresso.matcher.ViewMatchers.withText
+import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
@@ -81,16 +82,16 @@ class NativePlaybackSessionTest {
         context.getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_MUSIC, previousVolume, 0)
         setTutorial(previousTutorial)
     }
-    private fun open(asset: String = "native-audio-session-test.mp4"): ActivityScenario<NativePlayerActivity> {
+    private fun open(asset: String = "native-audio-session-test.mp4", startTime: Double = 0.0): ActivityScenario<NativePlayerActivity> {
         val clip = File(context.cacheDir, "session-test-$asset")
         clips.add(clip)
         instrumentation.context.assets.open(asset).use { input -> clip.outputStream().use { input.copyTo(it) } }
         val intent = Intent(context, NativePlayerActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             .putExtra("video", JSONObject().put("videoId", "session-test-$asset")
                 .put("video", clip.name).put("collection", "Native regression fixtures")
-                .put("path", clip.absolutePath).toString())
+                .put("path", clip.absolutePath).put("startTime", startTime).toString())
         val scenario = ActivityScenario.launch<NativePlayerActivity>(intent)
-        awaitState("Decoder did not start", 45000) { !it.optBoolean("closed") && it.optBoolean("playing") && it.optInt("decodedAudio") > 0 }
+        awaitState("Decoder did not start", if (startTime > 0) 10000 else 45000) { !it.optBoolean("closed") && it.optBoolean("playing") && it.optInt("decodedAudio") > 0 }
         scenario.onActivity { activity ->
             // The decoder may become ready after controls have auto-hidden.
             // Reveal them as a user would before the test operates a control.
@@ -107,6 +108,146 @@ class NativePlaybackSessionTest {
         @Suppress("DEPRECATION")
         val token = notification().extras.getParcelable<android.media.session.MediaSession.Token>(Notification.EXTRA_MEDIA_SESSION)!!
         return MediaController(context, token)
+    }
+    @Test fun completedSavedPositionStartsAtBeginning() {
+        var duration = 0.0
+        open("native-av-sync-test.mp4").use {
+            awaitState("Duration unavailable") { it.optDouble("duration") > 0 }
+            duration = state().getDouble("duration")
+            main { NativeBridge.playback!!.seekTo((duration * 1000).toLong() - 800) }
+            awaitState("Video did not finish") { it.optBoolean("closed") }
+        }
+        open("native-av-sync-test.mp4", startTime = duration).use {
+            assertFalse("Replayed video immediately closed", state().optBoolean("closed"))
+            assertTrue("Replayed video started at the saved end", state().getDouble("currentTime") < duration / 2)
+        }
+    }
+    @Test fun videoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av-sync-test.mp4")
+    @Test fun downloadedAv1VideoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av1-sync-test.mp4")
+    @Test fun syncProbeRejectsDelayedAudio() {
+        val preferences = context.getSharedPreferences("native-playback", android.content.Context.MODE_PRIVATE)
+        val previous = preferences.getLong("audio-delay-ms", 0L)
+        try {
+            try {
+                verifyAudioVideoSync("native-av-sync-test.mp4", 1000L)
+                fail("Sync probe accepted audio delayed by a full second")
+            } catch (error: AssertionError) {
+                assertTrue("Probe failed for another reason: ${error.message}",
+                    error.message?.contains("Audio/video disagree") == true)
+            }
+        } finally {
+            preferences.edit().putLong("audio-delay-ms", previous).commit()
+            main { NativeBridge.playback?.setAudioDelay(previous) }
+        }
+    }
+    @Test fun audioSyncAdvancesSoundAndIsRememberedAcrossPlaybackSessions() {
+        val preferences = context.getSharedPreferences("native-playback", android.content.Context.MODE_PRIVATE)
+        val previous = preferences.getLong("audio-delay-ms", 0L)
+        fun showSync(scenario: ActivityScenario<NativePlayerActivity>) {
+            main { NativeBridge.playback!!.pause() }
+            awaitState("Playback did not pause for settings") { it.optBoolean("paused") }
+            scenario.onActivity { it.onUserInteraction() }
+            onView(withContentDescription("Playback settings")).perform(click())
+            onView(withText("Audio sync")).inRoot(isDialog()).perform(click())
+        }
+        try {
+            open("native-av-sync-test.mp4").use { scenario ->
+                main { assertTrue(NativeBridge.playback!!.setAudioDelay(0)) }
+                showSync(scenario)
+                onView(withContentDescription("Sound earlier by 50 milliseconds")).inRoot(isDialog()).perform(click())
+                awaitState("Earlier did not advance the actual audio output") { it.optLong("audioDelayMs") == -50L }
+                onView(withText("Done")).inRoot(isDialog()).perform(click())
+                main {
+                    NativeBridge.playback!!.apply {
+                        pause()
+                        seekTo(7000)
+                        setDisplayMode("visualizer")
+                        setDisplayMode("video")
+                    }
+                }
+                assertEquals(-50L, state().getLong("audioDelayMs"))
+                main { NativeBridge.playback!!.stopPlayback() }
+            }
+            open("native-av-sync-test.mp4").use { scenario ->
+                awaitState("Saved audio correction was not restored") { it.optLong("audioDelayMs") == -50L }
+                showSync(scenario)
+                onView(withText("Reset")).inRoot(isDialog()).perform(click())
+                awaitState("Reset did not restore default audio timing") { it.optLong("audioDelayMs") == 0L }
+            }
+        } finally {
+            preferences.edit().putLong("audio-delay-ms", previous).commit()
+            main { NativeBridge.playback?.setAudioDelay(previous) }
+        }
+    }
+    private fun verifyAudioVideoSync(asset: String, forcedDelay: Long? = null) {
+        // Green frames contain an 880 Hz tone; red frames are silent. Both
+        // streams change at the same timestamps, with long GOPs and B frames
+        // like downloaded MP4s. Compare the actual picture and PCM output.
+        open(asset).use {
+            assertEquals("Wrong decoder policy for $asset",
+                if (asset.contains("av1")) "software" else "auto", state().getString("videoDecoder"))
+            if (forcedDelay != null) main { assertTrue(NativeBridge.playback!!.setAudioDelay(forcedDelay)) }
+            NativeAudioAnalysis(state().getInt("audioSessionId")).use { analysis ->
+                fun checkSync() {
+                    var compared = 0
+                    var mismatches = 0
+                    val readings = mutableListOf<String>()
+                    val deadline = SystemClock.elapsedRealtime() + 6500
+                    while (SystemClock.elapsedRealtime() < deadline) {
+                        var position = 0.0
+                        main { position = NativeBridge.playback!!.snapshot().getDouble("currentTime") }
+                        // Allow the codec/output buffers to settle after a seek
+                        // and avoid comparing across a tone/color boundary.
+                        val phase = position % 2.0
+                        if (phase in 0.4..1.6) {
+                            analysis.frame()
+                            val before = analysis.rms
+                            val captureStart = SystemClock.elapsedRealtime()
+                            val image = instrumentation.uiAutomation.takeScreenshot()
+                                ?: throw AssertionError("Playback screenshot unavailable")
+                            val pixel = image.getPixel(image.width / 2, image.height / 3)
+                            image.recycle()
+                            analysis.frame()
+                            val captureTime = SystemClock.elapsedRealtime() - captureStart
+                            var afterPosition = 0.0
+                            main { afterPosition = NativeBridge.playback!!.snapshot().getDouble("currentTime") }
+                            val green = Color.green(pixel) > Color.red(pixel) * 2
+                            val red = Color.red(pixel) > Color.green(pixel) * 2
+                            // Screenshot capture and PCM sampling are asynchronous.
+                            // Compare only stable audio away from a timestamp edge;
+                            // otherwise a healthy transition looks like a sync error.
+                            val stable = (before > 0.005) == (analysis.rms > 0.005) &&
+                                afterPosition % 2.0 in 0.4..1.6 && captureTime < 300
+                            if ((green || red) && stable) {
+                                compared++
+                                readings.add("t=$position green=$green rms=$before/${analysis.rms} capture=${captureTime}ms")
+                                if (green != (analysis.rms > 0.005)) mismatches++
+                            }
+                        }
+                        SystemClock.sleep(60)
+                    }
+                    assertTrue("No decoded picture/audio samples were compared", compared >= 4)
+                    assertTrue("Audio/video disagree in $mismatches of $compared samples: $readings ${state()}",
+                        mismatches <= 1)
+                }
+                checkSync()
+                if (forcedDelay != null) return
+                main { NativeBridge.playback!!.seekTo(8500) }
+                SystemClock.sleep(700)
+                checkSync()
+                main {
+                    NativeBridge.playback!!.apply {
+                        pause()
+                        seekTo(16500)
+                        setDisplayMode("visualizer")
+                        setDisplayMode("video")
+                        play()
+                    }
+                }
+                SystemClock.sleep(700)
+                checkSync()
+            }
+        }
     }
     @Test fun defaultScreenOffPausesAndDoesNotResumeOnUnlock() {
         open().use { scenario ->
