@@ -69,6 +69,25 @@ test after yt-dlp is installed in the downloads directory:
 cargo test --no-default-features --features webserver --lib downloads_one_file_with_a_fixed_output_name -- --ignored
 ```
 
+SoundCloud search shows only tracks whose metadata confirms an accessible full
+audio stream. It excludes blocked, preview-only, non-streamable and DRM-only
+tracks, including entries with unknown availability. Short complete tracks are
+still eligible. Search inspects up to 100 candidates in one API request and
+returns up to 25 full tracks in relevance order, using the managed yt-dlp runtime
+without a separate API key. Availability reflects the requesting device or
+server's region and can change between searching and downloading.
+
+Downloads also exclude streams marked as previews, including the fallback
+format. Preview-only tracks fail with an explanation instead of being imported
+as complete MP3s. Offline regression tests use the bundled yt-dlp package:
+
+```shell
+python3 -B -m unittest discover -s tests -p soundcloud_search_test.py
+PYTHONPATH="$PWD/gen/android/app/src/main/assets/ytdlp/yt-dlp" \
+  DOWNLOAD_DIR="${TMPDIR:-/tmp}/tvserver-soundcloud-tests" \
+  cargo test --no-default-features --features webserver --lib adaptors::youtube_fetcher::tests::soundcloud_ -- --include-ignored
+```
+
 ### Android playback and downloads
 
 Android uses an embedded LibVLC player, including MKV and E-AC-3 decoding,

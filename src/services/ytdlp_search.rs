@@ -26,6 +26,13 @@ pub(super) async fn search(query: &str, prefix: &str, source: &str) -> anyhow::R
         .into_iter()
         .map(String::from),
     );
+    run(command, source).await
+}
+
+pub(super) async fn run(
+    command: youtube_runtime::YtdlpCommand,
+    source: &str,
+) -> anyhow::Result<Vec<u8>> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(45),
         tokio::process::Command::new(command.program)
