@@ -75,6 +75,11 @@ Android uses an embedded LibVLC player, including MKV and E-AC-3 decoding,
 seeking, track selection, playback speed and saved resume positions. Tapping a
 video opens immersive landscape playback. Controls hide after three seconds of
 playback and reappear when the screen is tapped; paused controls stay visible.
+AV1 files use VLC's software decoder to avoid the audio/video timing mismatch
+observed with MediaCodec on Samsung devices. Other codecs retain hardware
+decoding and VLC's existing fallback. Android YouTube downloads prefer H.264/AAC
+when available, with the previous format fallback for sources without H.264.
+This also reduces the need for software decoding on future downloads.
 The library returns to the phone's orientation and respects system bars and
 display cutouts. The APK
 bundles Python 3.12, FFmpeg/FFprobe, QuickJS, and the official yt-dlp executable
@@ -107,6 +112,16 @@ continues. The notification and lock-screen controls provide play/pause, seeking
 and Stop. **Stop** in the player also releases the decoder and playback service.
 Unlocking or reopening the player reconnects to the same session; it does not
 automatically resume a paused video.
+Selecting a completed video again starts it from the beginning, including older
+saved positions at the end of a file. Unfinished videos keep their resume position.
+
+Open **Playback settings → Audio sync** to correct audio timing while watching.
+Choose **Earlier** when sound follows the picture, or **Later** when sound leads
+it. Each step adjusts audio by 50 ms, up to five seconds in either direction.
+The correction is saved on this device and restored for subsequent videos and
+playlist items. **Reset** restores the default timing. This is an adjustable
+correction; automatic compensation for a particular speaker or Bluetooth device
+still depends on its reported output latency.
 
 `NativePlaybackService` owns the single LibVLC player, Android `MediaSession`,
 audio focus, foreground notification and playback wake lock. The Activity only
@@ -196,6 +211,17 @@ adb -s emulator-5554 shell am instrument -w -r \
 The session tests use disposable files under the app's cache directory and grant
 audio-analysis permission on the test device. They restore the device's media
 volume and immersive tutorial setting. They never delete downloads or databases.
+Audio/video sync tests compare the actual displayed picture with session-scoped
+PCM analysis: green frames contain a tone and red frames are silent. H.264/AAC
+and AV1/AAC fixtures cover initial playback, seeking and display changes. Generate
+them with `tests/generate_native_av_sync_fixtures.sh` (FFmpeg with libx264 and
+libsvtav1). These checks measure playback inside Android; physical speaker or
+Bluetooth latency still requires listening on the device.
+The opt-in `NativeAudioSyncListeningTest` plays a sample copied to
+`cache/sync-listening-sample.mp4` in a disposable debug installation; run it with
+the instrumentation argument `-e listen true`. It is skipped in the normal suite.
+Create `cache/sync-listening-done` in that installation to finish the listening
+check early. The probe does not change timing settings or decoder selection.
 The protected headset-removal broadcast is simulated as the system UID on a
 userdebug emulator; that one check is skipped on phones, where a physical
 wired/Bluetooth disconnect should be verified.

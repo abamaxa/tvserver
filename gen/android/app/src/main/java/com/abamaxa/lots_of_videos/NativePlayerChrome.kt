@@ -24,7 +24,7 @@ import java.util.Locale
 
 /** Presentation only: the Activity routes actions to its existing durable playback session. */
 internal class NativePlayerChrome(context: Context, private val action: (Action) -> Unit) : FrameLayout(context) {
-    enum class Action { BACK, STOP, TOGGLE, REWIND, FORWARD, PREVIOUS, NEXT, VIDEO, VISUALIZER, BACKGROUND, SETTINGS, AUDIO, SUBTITLES, SPEED }
+    enum class Action { BACK, STOP, TOGGLE, REWIND, FORWARD, PREVIOUS, NEXT, VIDEO, VISUALIZER, BACKGROUND, SETTINGS, AUDIO, SUBTITLES, SPEED, SYNC }
     val progress = SeekBar(context)
     val backgroundAudio = Switch(context)
     var safeInsets: Insets = Insets.NONE
@@ -198,7 +198,7 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         }
     }
 
-    fun settingsContent(audio: String, subtitles: String, speed: String, choose: (Action) -> Unit, close: () -> Unit): View {
+    fun settingsContent(audio: String, subtitles: String, speed: String, sync: String, choose: (Action) -> Unit, close: () -> Unit): View {
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), dp(12))
@@ -212,6 +212,7 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         panel.addView(heading)
         for ((name, value, kind, selection) in listOf(
             Setting("Audio track", audio, NativePlayerIcon.Kind.AUDIO, Action.AUDIO),
+            Setting("Audio sync", sync, NativePlayerIcon.Kind.SPEED, Action.SYNC),
             Setting("Subtitles", subtitles, NativePlayerIcon.Kind.SUBTITLES, Action.SUBTITLES),
             Setting("Playback speed", speed, NativePlayerIcon.Kind.SPEED, Action.SPEED))) {
             val item = LinearLayout(context).apply {

@@ -20,7 +20,10 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -192,6 +195,7 @@ class NativePlayerActivity : Activity() {
             NativePlayerChrome.Action.AUDIO -> chooseTrack(false)
             NativePlayerChrome.Action.SUBTITLES -> chooseTrack(true)
             NativePlayerChrome.Action.SPEED -> chooseSpeed()
+            NativePlayerChrome.Action.SYNC -> chooseAudioSync()
         }
         showControls()
     }
@@ -203,7 +207,7 @@ class NativePlayerActivity : Activity() {
         val speed = state.optDouble("playbackRate", 1.0).toString().removeSuffix(".0") + "×"
         val dialog = Dialog(this)
         settingsDialog = dialog
-        dialog.setContentView(chrome.settingsContent(audio, subtitles, speed, { selected ->
+        dialog.setContentView(chrome.settingsContent(audio, subtitles, speed, audioSyncLabel(state.optLong("audioDelayMs")), { selected ->
             dialog.dismiss()
             playerAction(selected)
         }, { dialog.dismiss() }))
@@ -234,6 +238,52 @@ class NativePlayerActivity : Activity() {
                 service?.control(JSONObject().put("action", "rate").put("rate", rates[index]))
                 dialog.dismiss()
             }.setOnDismissListener { dialogClosed() }.show()
+    }
+
+    private fun audioSyncLabel(delay: Long): String = when {
+        delay < 0 -> "${-delay} ms earlier"
+        delay > 0 -> "$delay ms later"
+        else -> "Default timing"
+    }
+
+    private fun chooseAudioSync() {
+        var delay = state.optLong("audioDelayMs")
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(chrome.dp(24), chrome.dp(8), chrome.dp(24), chrome.dp(8))
+        }
+        panel.addView(TextView(this).apply {
+            text = "If sound follows the picture, choose Earlier. Your correction is remembered on this device."
+        })
+        val reading = TextView(this).apply {
+            text = audioSyncLabel(delay)
+            gravity = Gravity.CENTER
+            setPadding(0, chrome.dp(16), 0, chrome.dp(8))
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        panel.addView(reading)
+        fun adjust(value: Long) {
+            val next = value.coerceIn(-5000L, 5000L)
+            if (service?.setAudioDelay(next) == true) {
+                delay = next
+                reading.text = audioSyncLabel(delay)
+            } else Toast.makeText(this, "Audio sync is not available yet", Toast.LENGTH_SHORT).show()
+        }
+        val buttons = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        for ((label, action) in listOf<Pair<String, () -> Unit>>(
+            "Earlier" to { adjust(delay - 50) }, "Later" to { adjust(delay + 50) })) {
+            buttons.addView(Button(this).apply {
+                text = label
+                contentDescription = "Sound ${label.lowercase()} by 50 milliseconds"
+                setOnClickListener { action() }
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+        }
+        panel.addView(buttons)
+        dialogOpened()
+        AlertDialog.Builder(this).setTitle("Audio sync").setView(panel)
+            .setNeutralButton("Reset") { _, _ -> adjust(0) }
+            .setPositiveButton("Done", null)
+            .setOnDismissListener { dialogClosed() }.show()
     }
 
     private fun hideSystemBars() {
