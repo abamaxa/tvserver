@@ -65,6 +65,31 @@ pub(crate) async fn command() -> anyhow::Result<YtdlpCommand> {
     }
 }
 
+/// Run embedded Python with the managed yt-dlp import path as its first argument.
+pub(crate) async fn python_command(script: &str) -> anyhow::Result<YtdlpCommand> {
+    #[cfg(target_os = "android")]
+    {
+        let runtime = android_runtime().await?;
+        return Ok(YtdlpCommand {
+            program: "/system/bin/env".into(),
+            args: runtime.script_args(script),
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let python = python_with_pip()
+            .ok_or_else(|| anyhow::anyhow!("No Python interpreter with pip found for yt-dlp"))?;
+        Ok(YtdlpCommand {
+            program: python.to_string_lossy().into_owned(),
+            args: vec![
+                "-c".into(),
+                script.into(),
+                package_dir().to_string_lossy().into_owned(),
+            ],
+        })
+    }
+}
+
 #[cfg(any(target_os = "android", test))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct AndroidRuntime {
@@ -86,6 +111,12 @@ impl AndroidRuntime {
             .map(|(key, value)| format!("{key}={value}"))
             .collect();
         args.push(self.python.clone());
+        args
+    }
+
+    fn script_args(&self, script: &str) -> Vec<String> {
+        let mut args = self.python_args();
+        args.extend(["-c".into(), script.into(), self.script.clone()]);
         args
     }
 }
@@ -312,6 +343,12 @@ mod tests {
                 "SSL_CERT_FILE=/private/CA file.pem",
                 "/data/app/package/lib/arm64/libpython.so"
             ]
+        );
+        assert_eq!(
+            runtime.script_args("print('query & value')"),
+            [runtime.python_args(), vec![
+                "-c".into(), "print('query & value')".into(), "/private/yt-dlp".into()
+            ]].concat()
         );
     }
 

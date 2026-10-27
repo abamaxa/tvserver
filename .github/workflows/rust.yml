@@ -42,5 +42,12 @@ jobs:
       run: make build
     - name: Run unit tests
       run: make test-unit
+    - name: Test SoundCloud search metadata
+      run: python3 -B -m unittest discover -s tests -p soundcloud_search_test.py
+    - name: Test SoundCloud download formats
+      env:
+        DOWNLOAD_DIR: ${{ runner.temp }}/tvserver-soundcloud-downloads
+        PYTHONPATH: ${{ github.workspace }}/gen/android/app/src/main/assets/ytdlp/yt-dlp
+      run: cargo test --no-default-features --features webserver --lib adaptors::youtube_fetcher::tests::soundcloud_ -- --include-ignored
     - name: Run integration tests
       run: make test-integration

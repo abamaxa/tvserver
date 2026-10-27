@@ -58,7 +58,12 @@ impl YoutubeTask {
             "--no-update", "--no-playlist", "--newline", "--socket-timeout", "20",
         ].into_iter().map(String::from));
         let format_args = if audio_only {
-            vec!["-f", "bestaudio/best", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
+            // Restricted tracks may expose only 30-second previews. Never
+            // import those as complete tracks, including through the fallback.
+            vec![
+                "-f", "bestaudio[format_id!$=_preview]/best[format_id!$=_preview]",
+                "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
+            ]
         } else {
             vec!["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4"]
         };
@@ -86,13 +91,24 @@ impl YoutubeTask {
             Some(monitor) => monitor.get_state().await,
             None => TaskState {..Default::default()},
         };
+
+        let error_message = if self.request.engine == SearchEngineType::SoundCloud
+            && state.error_string.contains("Requested format is not available")
+        {
+            concat!(
+                "SoundCloud did not provide a full track for download. ",
+                "Only a preview may be available; some tracks require SoundCloud Go+."
+            ).to_string()
+        } else {
+            state.error_string
+        };
         
         DownloadInfo {
             total_size: None,
             downloaded_size,
             uploaded_size: None,
             finished: state.finished,
-            error_message: state.error_string,
+            error_message,
             progress_message: state.process_details,
             files: vec![self.destination.to_string_lossy().to_string()],
         }
@@ -160,6 +176,7 @@ impl YoutubeFetcher {
 mod tests {
     use super::*;
     use crate::adaptors::TokioProcessSpawner;
+    use crate::domain::traits::ProcessSpawner;
     use crate::domain::SearchEngineType;
     use axum::{http::header, routing::get, Router};
     use std::time::Duration;
@@ -304,6 +321,200 @@ mod tests {
         assert_eq!(metadata["streams"][0]["codec_type"], "audio");
         assert_eq!(metadata["streams"][0]["codec_name"], "mp3");
         assert!(matches!(crate::domain::algorithm::classify_media_kind(&destination), crate::domain::algorithm::MediaKind::Video));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn soundcloud_full_stream_failures_explain_previews_and_preserve_other_errors() {
+        use crate::domain::traits::MockTaskMonitor;
+
+        const UNAVAILABLE: &str = "failed with code 1: ERROR: Requested format is not available";
+        for (engine, error) in [
+            (SearchEngineType::SoundCloud, UNAVAILABLE),
+            (SearchEngineType::YouTube, UNAVAILABLE),
+            (SearchEngineType::SoundCloud, "HTTP Error 429: Too Many Requests"),
+        ] {
+            let diagnostic = error.to_string();
+            let mut monitor = MockTaskMonitor::new();
+            monitor.expect_get_state().returning(move || TaskState {
+                finished: true,
+                error_string: diagnostic.clone(),
+                ..Default::default()
+            });
+            let task = YoutubeTask {
+                spawner: Arc::new(TokioProcessSpawner::new()),
+                request: DownloadRequest {
+                    name: "Track".into(),
+                    link: "https://soundcloud.com/artist/track".into(),
+                    engine: engine.clone(),
+                    series: None,
+                },
+                monitor: RwLock::new(Some(Arc::new(monitor))),
+                destination: std::env::temp_dir().join("tvserver-missing-soundcloud/track.mp3"),
+            };
+            let info = task.observe().await;
+            assert!(info.finished);
+            if engine == SearchEngineType::SoundCloud && error == UNAVAILABLE {
+                assert!(info.error_message.contains("full track"));
+                assert!(info.error_message.contains("preview"));
+                assert!(info.error_message.contains("SoundCloud Go+"));
+            } else {
+                assert_eq!(info.error_message, error);
+            }
+        }
+    }
+
+    /// Replay extractor metadata through the real download command without
+    /// depending on SoundCloud's current catalog, credentials, or network.
+    struct InfoFileSpawner(PathBuf);
+
+    #[async_trait]
+    impl ProcessSpawner for InfoFileSpawner {
+        async fn execute(&self, name: &str, cmd: &str, args: Vec<&str>) -> Task {
+            let url_index = args.iter().rposition(|arg| *arg == "--").unwrap();
+            let mut args = args[..url_index].to_vec();
+            let info_file = self.0.to_str().unwrap();
+            args.extend(["--enable-file-urls", "--load-info-json", info_file]);
+            TokioProcessSpawner::new().execute(name, cmd, args).await
+        }
+    }
+
+    struct SoundcloudFixture(PathBuf);
+
+    impl Drop for SoundcloudFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl SoundcloudFixture {
+        async fn new() -> anyhow::Result<Self> {
+            let directory = std::env::temp_dir()
+                .join(format!("tvserver-soundcloud-formats-{}", rand::random::<u64>()));
+            fs::create_dir_all(&directory).await?;
+            Ok(Self(directory))
+        }
+
+        async fn download(
+            &self,
+            sources: &[(&str, u32)],
+        ) -> anyhow::Result<(DownloadInfo, PathBuf)> {
+            let mut formats = Vec::new();
+            for (index, (format_id, seconds)) in sources.iter().enumerate() {
+                let source = self.0.join(format!("source-{index}.wav"));
+                let data_size = 16000 * seconds;
+                let mut wav = b"RIFF".to_vec();
+                wav.extend((36 + data_size).to_le_bytes());
+                wav.extend(b"WAVEfmt ");
+                wav.extend(16_u32.to_le_bytes());
+                wav.extend(1_u16.to_le_bytes());
+                wav.extend(1_u16.to_le_bytes());
+                wav.extend(8000_u32.to_le_bytes());
+                wav.extend(16000_u32.to_le_bytes());
+                wav.extend(2_u16.to_le_bytes());
+                wav.extend(16_u16.to_le_bytes());
+                wav.extend(b"data");
+                wav.extend(data_size.to_le_bytes());
+                wav.resize(44 + data_size as usize, 0);
+                fs::write(&source, wav).await?;
+                formats.push(serde_json::json!({
+                    "format_id": format_id,
+                    "url": reqwest::Url::from_file_path(&source).unwrap().as_str(),
+                    "ext": "wav",
+                    "vcodec": "none",
+                    "preference": if format_id.ends_with("_preview") { -10 } else { 0 },
+                }));
+            }
+            let info_file = self.0.join("track.info.json");
+            fs::write(
+                &info_file,
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "fixture",
+                    "title": "Fixture track",
+                    "extractor": "soundcloud",
+                    "extractor_key": "Soundcloud",
+                    "duration": sources.iter().map(|(_, seconds)| *seconds).max(),
+                    "formats": formats,
+                }))?,
+            )
+            .await?;
+            let destination = self.0.join("track.mp3");
+            let task = YoutubeTask {
+                spawner: Arc::new(InfoFileSpawner(info_file)),
+                request: DownloadRequest {
+                    name: "Fixture track".into(),
+                    link: "https://soundcloud.com/artist/track".into(),
+                    engine: SearchEngineType::SoundCloud,
+                    series: None,
+                },
+                monitor: RwLock::new(None),
+                destination: destination.clone(),
+            };
+            task.start().await?;
+            let info = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let info = task.observe().await;
+                    if info.finished {
+                        break info;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await?;
+            Ok((info, destination))
+        }
+    }
+
+    async fn mp3_duration(path: &Path) -> anyhow::Result<f64> {
+        let output = tokio::process::Command::new("ffprobe")
+            .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
+            .arg(path)
+            .output()
+            .await?;
+        anyhow::ensure!(
+            output.status.success(),
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(std::str::from_utf8(&output.stdout)?.trim().parse()?)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires yt-dlp and FFmpeg"]
+    async fn soundcloud_preview_only_download_is_rejected() -> anyhow::Result<()> {
+        let fixture = SoundcloudFixture::new().await?;
+        let (info, destination) = fixture.download(&[("http_mp3_1_0_preview", 29)]).await?;
+        assert!(
+            !info.error_message.is_empty(),
+            "A 29-second preview must not be reported as a complete download"
+        );
+        assert!(info.error_message.contains("preview"), "{}", info.error_message);
+        assert!(
+            !destination.exists(),
+            "A rejected preview must not leave an MP3 in the library"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires yt-dlp, FFmpeg and ffprobe"]
+    async fn soundcloud_download_keeps_the_full_stream_duration() -> anyhow::Result<()> {
+        let fixture = SoundcloudFixture::new().await?;
+        let (info, destination) = fixture
+            .download(&[("http_mp3_1_0_preview", 29), ("hls_aac_160k", 60)])
+            .await?;
+        assert!(info.error_message.is_empty(), "{}", info.error_message);
+        assert!((mp3_duration(&destination).await? - 60.0).abs() < 0.5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires yt-dlp, FFmpeg and ffprobe"]
+    async fn soundcloud_allows_genuinely_short_full_tracks() -> anyhow::Result<()> {
+        let fixture = SoundcloudFixture::new().await?;
+        let (info, destination) = fixture.download(&[("http_mp3_1_0", 29)]).await?;
+        assert!(info.error_message.is_empty(), "{}", info.error_message);
+        assert!((mp3_duration(&destination).await? - 29.0).abs() < 0.5);
         Ok(())
     }
 }
