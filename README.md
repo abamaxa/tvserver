@@ -157,6 +157,18 @@ backend directory):
 python3 tests/android_apk_alignment.py gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ```
 
+Release builds also need a first-use runtime check: an existing unpacked Python
+installation can hide shrinker errors. The offline probe below runs the real
+`NativeBridge.prepareRuntime` with fresh temporary storage and imports yt-dlp,
+its solver and TLS. It preserves the library and removes its test package.
+It requires JDK 21 and the same Android debug signing key as the installed APK.
+Use `--apk <path>` to sign a temporary copy of an unsigned release APK and install
+it before probing; omit it to check the current installation:
+
+```shell
+python3 tests/android_release_runtime_smoke.py --serial emulator-5554 --apk gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+```
+
 The downloader SDK's `libpython.zip.so` and `libffmpeg.zip.so` are ZIP data
 archives, so they have no ELF segments to align. Executable `.so` files must all
 pass this check. Also verify APK ZIP alignment with Android Build Tools'
