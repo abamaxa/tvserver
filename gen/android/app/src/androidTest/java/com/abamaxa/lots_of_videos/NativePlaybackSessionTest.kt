@@ -196,38 +196,40 @@ class NativePlaybackSessionTest {
                 fun checkSync() {
                     var compared = 0
                     var mismatches = 0
+                    var previousPicture: Boolean? = null
+                    var pictureChangedAt = SystemClock.elapsedRealtime()
                     val readings = mutableListOf<String>()
                     val deadline = SystemClock.elapsedRealtime() + 6500
                     while (SystemClock.elapsedRealtime() < deadline) {
                         var position = 0.0
                         main { position = NativeBridge.playback!!.snapshot().getDouble("currentTime") }
-                        // Allow the codec/output buffers to settle after a seek
-                        // and avoid comparing across a tone/color boundary.
-                        val phase = position % 2.0
-                        if (phase in 0.4..1.6) {
-                            analysis.frame()
-                            val before = analysis.rms
-                            val captureStart = SystemClock.elapsedRealtime()
-                            val image = instrumentation.uiAutomation.takeScreenshot()
-                                ?: throw AssertionError("Playback screenshot unavailable")
-                            val pixel = image.getPixel(image.width / 2, image.height / 3)
-                            image.recycle()
-                            analysis.frame()
-                            val captureTime = SystemClock.elapsedRealtime() - captureStart
-                            var afterPosition = 0.0
-                            main { afterPosition = NativeBridge.playback!!.snapshot().getDouble("currentTime") }
-                            val green = Color.green(pixel) > Color.red(pixel) * 2
-                            val red = Color.red(pixel) > Color.green(pixel) * 2
-                            // Screenshot capture and PCM sampling are asynchronous.
-                            // Compare only stable audio away from a timestamp edge;
-                            // otherwise a healthy transition looks like a sync error.
-                            val stable = (before > 0.005) == (analysis.rms > 0.005) &&
-                                afterPosition % 2.0 in 0.4..1.6 && captureTime < 300
-                            if ((green || red) && stable) {
-                                compared++
-                                readings.add("t=$position green=$green rms=$before/${analysis.rms} capture=${captureTime}ms")
-                                if (green != (analysis.rms > 0.005)) mismatches++
-                            }
+                        analysis.frame()
+                        val before = analysis.rms
+                        val captureStart = SystemClock.elapsedRealtime()
+                        val image = instrumentation.uiAutomation.takeScreenshot()
+                            ?: throw AssertionError("Playback screenshot unavailable")
+                        val pixel = image.getPixel(image.width / 2, image.height / 3)
+                        image.recycle()
+                        analysis.frame()
+                        val captureTime = SystemClock.elapsedRealtime() - captureStart
+                        var afterPosition = 0.0
+                        main { afterPosition = NativeBridge.playback!!.snapshot().getDouble("currentTime") }
+                        val green = Color.green(pixel) > Color.red(pixel) * 2
+                        val red = Color.red(pixel) > Color.green(pixel) * 2
+                        val picture = if (green || red) green else null
+                        val now = SystemClock.elapsedRealtime()
+                        if (picture == null || picture != previousPicture) pictureChangedAt = now
+                        previousPicture = picture
+                        // VLC's cached position can lag a picture transition. Observe
+                        // actual picture stability as well as the timestamp margins,
+                        // so screenshot/PCM capture skew is not counted as drift.
+                        val stable = picture != null && now - pictureChangedAt >= 400 &&
+                            position % 2.0 in 0.4..1.6 && afterPosition % 2.0 in 0.4..1.6 &&
+                            (before > 0.005) == (analysis.rms > 0.005) && captureTime < 300
+                        if (stable) {
+                            compared++
+                            readings.add("t=$position green=$green rms=$before/${analysis.rms} capture=${captureTime}ms")
+                            if (green != (analysis.rms > 0.005)) mismatches++
                         }
                         SystemClock.sleep(60)
                     }
