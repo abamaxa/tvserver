@@ -203,7 +203,9 @@ It requires JDK 21 and Android SDK 36. Use `--apk <path>` to sign a temporary
 copy of an unsigned release APK and install it before probing. This reuses the
 standard Android debug key, creating one on a fresh runner if needed. Existing
 keys are kept. CI prepares the key before building any APKs, so cached debug
-APKs, the release probe and debug instrumentation retain the same certificate:
+APKs, the release probe and debug instrumentation retain the same certificate.
+Gradle receives that signing key explicitly for both debug APKs, and CI verifies
+the finished APK certificates before starting the emulator:
 
 ```shell
 python3 tests/android_release_runtime_smoke.py --prepare-signing-key
