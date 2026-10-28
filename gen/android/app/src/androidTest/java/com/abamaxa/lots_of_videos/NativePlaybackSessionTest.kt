@@ -188,6 +188,11 @@ class NativePlaybackSessionTest {
                 if (asset.contains("av1")) "software" else "auto", state().getString("videoDecoder"))
             if (forcedDelay != null) main { assertTrue(NativeBridge.playback!!.setAudioDelay(forcedDelay)) }
             NativeAudioAnalysis(state().getInt("audioSessionId")).use { analysis ->
+                // Attaching the output observer is asynchronous. Initial empty
+                // capture buffers are not evidence that decoded audio is late.
+                await("Audio analysis did not observe the playing tone", 10000) {
+                    analysis.frame() != null && analysis.rms > 0.005
+                }
                 fun checkSync() {
                     var compared = 0
                     var mismatches = 0
@@ -442,14 +447,53 @@ class NativePlaybackSessionTest {
                 resumedAt = SystemClock.elapsedRealtime()
                 NativeBridge.playback!!.play()
             }
-            awaitState("Playback did not resume from the paused position") {
-                it.optBoolean("playing") && it.optDouble("currentTime") > position / 1000.0 + 0.25
-            }
+            awaitResumedPosition(position, resumedAt)
+        }
+    }
+    private fun awaitResumedPosition(position: Long, resumedAt: Long, timeoutMillis: Long = 15000) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+        var previousPosition: Double? = null
+        var current = JSONObject()
+        var elapsed = 0.0
+        while (SystemClock.elapsedRealtime() < deadline) {
             main {
-                val current = NativeBridge.playback!!.snapshot()
-                val elapsed = (SystemClock.elapsedRealtime() - resumedAt) / 1000.0
-                assertTrue("Playback resumed from a decoder preroll timestamp: $current",
-                    current.getDouble("currentTime") <= position / 1000.0 + elapsed * 1.5 + 0.4)
+                current = NativeBridge.playback!!.snapshot()
+                elapsed = (SystemClock.elapsedRealtime() - resumedAt) / 1000.0
+            }
+            val time = current.optDouble("currentTime")
+            val withinBound = current.optBoolean("playing") && time > position / 1000.0 + 0.25 &&
+                time <= position / 1000.0 + elapsed * 1.5 + 0.4
+            // A Playing notification can precede completion of the precise seek.
+            // Keep the original error bound and require two advancing observations.
+            if (withinBound) {
+                val previous = previousPosition
+                if (previous != null && time > previous + 0.25) return
+                if (previous == null) previousPosition = time
+            } else previousPosition = null
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("Playback did not settle at saved position $position: elapsed=$elapsed $current")
+    }
+    @Test fun resumePositionCheckRejectsWrongPosition() {
+        open().use {
+            main {
+                NativeBridge.playback!!.apply {
+                    pause()
+                    control(JSONObject().put("action", "rate").put("rate", 1.5))
+                    seekTo(22000)
+                }
+            }
+            main { NativeBridge.playback!!.play() }
+            awaitState("Negative control did not resume from the wrong position") {
+                it.optBoolean("playing") && it.optDouble("currentTime") > 22.25
+            }
+            val checkedAt = SystemClock.elapsedRealtime()
+            try {
+                awaitResumedPosition(17000, checkedAt, 1500)
+                fail("Resume position check accepted a five-second position error")
+            } catch (error: AssertionError) {
+                assertTrue("Position check failed for another reason: ${error.message}",
+                    error.message?.contains("Playback did not settle at saved position") == true)
             }
         }
     }

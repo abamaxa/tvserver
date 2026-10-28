@@ -55,6 +55,7 @@ class NativePlaybackService : Service() {
     private var closing = false
     private var startPosition = 0L
     private var lastPosition = 0L
+    private var pendingResumePosition: Long? = null
     private var lastDuration = 0L
     private var errorMessage: String? = null
     private var sessionId = ""
@@ -228,6 +229,10 @@ class NativePlaybackService : Service() {
                             player.setAudioDelay(audioDelayMs * 1000L)
                         }
                         restoreStartPosition(player)
+                        if (desiredPlaying) pendingResumePosition?.let { position ->
+                            pendingResumePosition = null
+                            player.setTime(position, false)
+                        }
                         if (!desiredPlaying) player.pause()
                         updateVideoOutput()
                         publish()
@@ -364,18 +369,18 @@ class NativePlaybackService : Service() {
         resumeOnFocusGain = false
         // Decoding a paused still can advance VLC's internal preroll clock.
         // Resume from the held user position rather than that decoder timestamp.
-        // An explicit seek can already be pending. Submitting it again while
-        // resuming can stall VLC's decoder after an audio-track change.
-        val resumePosition = lastPosition.takeIf {
-            !desiredPlaying && playback?.isSeekable == true && playback?.time != lastPosition
+        // Wait for VLC to resume before restoring the position, so its paused
+        // frame/audio-track operations cannot overwrite the new seek.
+        if (!desiredPlaying) pendingResumePosition = lastPosition.takeIf {
+            playback?.isSeekable == true && playback?.time != lastPosition
         }
         desiredPlaying = true
         playback?.play()
-        if (resumePosition != null) playback?.setTime(resumePosition, false)
         publish()
     }
 
     fun pause(abandon: Boolean = true) {
+        pendingResumePosition = null
         if (desiredPlaying) lastPosition = playback?.time?.takeIf { it >= 0 } ?: lastPosition
         desiredPlaying = false
         playback?.pause()
@@ -396,6 +401,7 @@ class NativePlaybackService : Service() {
     fun seek(seconds: Int) = seekTo((if (desiredPlaying) playback?.time ?: lastPosition else lastPosition) + seconds * 1000L)
 
     fun seekTo(position: Long) {
+        pendingResumePosition = null
         playback?.let {
             // A paused fast seek can settle at a later keyframe after the UI has
             // already shown its requested time. Keep paused stills at the exact time.
@@ -583,6 +589,7 @@ class NativePlaybackService : Service() {
     }
 
     private fun releaseDecoder() {
+        pendingResumePosition = null
         if (playback == null && engine == null) return
         abandonFocus()
         playback?.run { vlcVout.removeCallback(videoCallback); setEventListener(null); stop(); detachViews(); release() }
