@@ -16,7 +16,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.SeekBar
-import android.widget.Switch
 import android.widget.TextView
 import androidx.core.graphics.Insets
 import org.json.JSONObject
@@ -24,9 +23,8 @@ import java.util.Locale
 
 /** Presentation only: the Activity routes actions to its existing durable playback session. */
 internal class NativePlayerChrome(context: Context, private val action: (Action) -> Unit) : FrameLayout(context) {
-    enum class Action { BACK, STOP, TOGGLE, REWIND, FORWARD, PREVIOUS, NEXT, VIDEO, VISUALIZER, BACKGROUND, SETTINGS, AUDIO, SUBTITLES, SPEED, SYNC }
+    enum class Action { BACK, STOP, TOGGLE, REWIND, FORWARD, PREVIOUS, NEXT, VIDEO, VISUALIZER, WATCH, LISTEN, SETTINGS, AUDIO, SUBTITLES, SPEED, SYNC }
     val progress = SeekBar(context)
-    val backgroundAudio = Switch(context)
     var safeInsets: Insets = Insets.NONE
         private set
     private val header = LinearLayout(context)
@@ -40,7 +38,9 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
     private val next: ImageButton
     private val video: RadioButton
     private val visualizer: RadioButton
-    private var updating = false
+    private val watch: RadioButton
+    private val listen: RadioButton
+    private val modeHint = label(11f, MUTED)
     private var insetsApplied = false
 
     init {
@@ -105,7 +105,7 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         timeline.addView(duration, row(58, 40))
         footer.addView(timeline, LinearLayout.LayoutParams(-1, dp(40)))
 
-        val options = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+        val options = LinearLayout(context).apply { gravity = Gravity.CENTER }
         val modes = LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
             background = shape(0x660D131C, 25, 0x24FFFFFF)
@@ -116,29 +116,30 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         modes.addView(video, row(104, 44))
         modes.addView(visualizer, row(125, 44))
         options.addView(modes, row(-2, 50))
-        options.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-        backgroundAudio.apply {
-            text = "Screen-off audio"
-            contentDescription = "Keep audio playing with screen off"
-            textSize = 12f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(MUTED)
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), 0, dp(14), 0)
-            compoundDrawablePadding = dp(8)
-            setCompoundDrawablesRelativeWithIntrinsicBounds(NativePlayerIcon(context, NativePlayerIcon.Kind.AUDIO, MUTED, 18), null, null, null)
-            showText = false
-            switchPadding = dp(12)
-            switchMinWidth = dp(32)
-            thumbDrawable = shape(WHITE, 50).apply { setSize(dp(18), dp(18)) }
-            trackDrawable = shape(WHITE, 50).apply { setSize(dp(32), dp(14)) }
-            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
-            thumbTintList = ColorStateList(states, intArrayOf(ACCENT, 0xFFB5BDC9.toInt()))
-            trackTintList = ColorStateList(states, intArrayOf(0xFF3D786D.toInt(), 0xFF414A57.toInt()))
-            setOnCheckedChangeListener { _, _ -> if (!updating) action(Action.BACKGROUND) }
-        }
-        options.addView(backgroundAudio, row(-2, 48))
         footer.addView(options, LinearLayout.LayoutParams(-1, dp(50)))
+        val playbackModes = LinearLayout(context).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = shape(0x660D131C, 25, 0x24FFFFFF)
+        }
+        watch = mode("Watch", NativePlayerIcon.Kind.VIDEO, Action.WATCH)
+        listen = mode("Listen", NativePlayerIcon.Kind.AUDIO, Action.LISTEN)
+        watch.contentDescription = "Watch mode"
+        listen.contentDescription = "Listen mode"
+        playbackModes.addView(watch, row(104, 44))
+        playbackModes.addView(listen, row(104, 44))
+        if (resources.configuration.screenWidthDp >= 600) {
+            options.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            options.addView(playbackModes, row(-2, 50))
+        } else {
+            footer.addView(playbackModes, LinearLayout.LayoutParams(-2, dp(50)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(8)
+            })
+        }
+        modeHint.gravity = Gravity.CENTER
+        modeHint.setPadding(0, dp(6), 0, 0)
+        footer.addView(modeHint, LinearLayout.LayoutParams(-1, -2))
         addView(footer, LayoutParams(-1, -2, Gravity.BOTTOM))
         setDisplayMode("video")
         applyInsets(Insets.NONE)
@@ -154,12 +155,11 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
     }
 
     fun bind(state: JSONObject, dragging: Boolean) {
-        updating = true
         title.text = state.optString("video")
         val playlist = state.optString("playlistName", "")
         collection.text = if (playlist.isNotEmpty())
             "$playlist · ${state.optInt("queueIndex") + 1} of ${state.optInt("queueLength")}" else state.optString("collection")
-        val queued = state.optString("playlistId", "").isNotEmpty()
+        val queued = state.optInt("queueLength") > 1 || state.optString("playlistId", "").isNotEmpty()
         previous.visibility = if (queued) View.VISIBLE else View.GONE
         next.visibility = if (queued) View.VISIBLE else View.GONE
         previous.isEnabled = state.optBoolean("hasPrevious")
@@ -167,10 +167,11 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         previous.alpha = if (previous.isEnabled) 1f else 0.35f
         next.alpha = if (next.isEnabled) 1f else 0.35f
         collection.visibility = if (collection.text.isNullOrBlank()) View.GONE else View.VISIBLE
-        backgroundAudio.isChecked = state.optBoolean("backgroundAudio")
-        backgroundAudio.setTextColor(if (backgroundAudio.isChecked) WHITE else MUTED)
-        backgroundAudio.background = shape(if (backgroundAudio.isChecked) 0x333EA58F else 0x330D131C,
-            24, if (backgroundAudio.isChecked) 0x6674DFC6 else 0x24FFFFFF)
+        val listening = state.optString("playbackMode", "watch") == "listen"
+        selectMode(watch, !listening, NativePlayerIcon.Kind.VIDEO)
+        selectMode(listen, listening, NativePlayerIcon.Kind.AUDIO)
+        modeHint.text = if (listening) "Keep playing while browsing or with the screen off"
+            else "Back stops playback and saves your place"
         setDisplayMode(state.optString("displayMode", "video"))
         val time = (state.optDouble("currentTime") * 1000).toLong().coerceAtLeast(0)
         val length = (state.optDouble("duration") * 1000).toLong().coerceAtLeast(0)
@@ -182,20 +183,23 @@ internal class NativePlayerChrome(context: Context, private val action: (Action)
         toggle.contentDescription = description
         if (Build.VERSION.SDK_INT >= 26) toggle.tooltipText = description
         toggle.setImageDrawable(NativePlayerIcon(context, if (paused) NativePlayerIcon.Kind.PLAY else NativePlayerIcon.Kind.PAUSE, INK, 32))
-        updating = false
     }
 
     fun setDisplayMode(mode: String) {
         for ((button, selected, kind) in listOf(
             Triple(video, mode != "visualizer", NativePlayerIcon.Kind.VIDEO),
             Triple(visualizer, mode == "visualizer", NativePlayerIcon.Kind.VISUALIZER))) {
-            button.isSelected = selected
-            button.isChecked = selected
-            button.setTextColor(if (selected) INK else MUTED)
-            button.background = ripple(if (selected) ACCENT else Color.TRANSPARENT, 22)
-            button.setCompoundDrawablesRelativeWithIntrinsicBounds(
-                NativePlayerIcon(context, kind, if (selected) INK else MUTED, 17), null, null, null)
+            selectMode(button, selected, kind)
         }
+    }
+
+    private fun selectMode(button: RadioButton, selected: Boolean, kind: NativePlayerIcon.Kind) {
+        button.isSelected = selected
+        button.isChecked = selected
+        button.setTextColor(if (selected) INK else MUTED)
+        button.background = ripple(if (selected) ACCENT else Color.TRANSPARENT, 22)
+        button.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            NativePlayerIcon(context, kind, if (selected) INK else MUTED, 17), null, null, null)
     }
 
     fun settingsContent(audio: String, subtitles: String, speed: String, sync: String, choose: (Action) -> Unit, close: () -> Unit): View {

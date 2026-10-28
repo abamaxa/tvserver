@@ -59,4 +59,19 @@ class NativePlaybackQueueTest {
             fail("Empty playlist must be rejected")
         } catch (_: IllegalArgumentException) {}
     }
+
+    @Test fun appendingPreservesTheCurrentItemAndTheRemainingShuffleOrder() {
+        val queue = NativePlaybackQueue()
+        queue.load(request(true).put("startVideoId", "2"))
+        val remaining = mutableListOf<String>()
+        while (queue.hasNext) remaining.add(queue.move(1)!!.getString("videoId"))
+        queue.move(-queue.index)
+        queue.append(item("new"))
+        assertEquals("mix", queue.playlistId)
+        assertEquals(0, queue.index)
+        assertEquals(4, queue.size)
+        for (id in remaining) assertEquals(id, queue.move(1)!!.getString("videoId"))
+        assertEquals("new", queue.move(1)!!.getString("videoId"))
+        assertFalse(queue.hasNext)
+    }
 }

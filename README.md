@@ -123,14 +123,18 @@ interrupting other transfers. Android system stops are reported as terminal task
 errors. Force-stop, reboot and recovery after process death are separate from
 screen-off execution; download queue restoration is not implemented.
 
-Video is the default for every new playback session. The native player has
-independent **Video / Visualizer** controls and a **Keep audio playing with screen
-off** switch, initially off. With that switch off, locking the phone or leaving
-the player pauses playback. With it on, Back returns to the library while audio
-continues. The notification and lock-screen controls provide play/pause, seeking,
-and Stop. **Stop** in the player also releases the decoder and playback service.
-Unlocking or reopening the player reconnects to the same session; it does not
-automatically resume a paused video.
+The native player has independent **Video / Visualizer** display controls and
+**Watch / Listen** playback modes. Audio-only items default to Listen; videos
+default to Watch. The selected mode is remembered on this device for each playlist
+and is preserved when its queue advances, including mixed audio/video queues.
+Watch pauses when locked and stops on Back, retaining the resume position.
+Listen keeps playing while browsing or with the screen off. A mini-player in the
+library offers play/pause, next, stop, and reopening the full player without
+restarting its decoder or queue. The notification and lock-screen controls provide
+play/pause, seeking, next/previous, and Stop. **Stop** also releases the decoder and
+playback service. Reopening the player reconnects to the same session; it does not
+automatically resume paused playback. **Add to queue** appends a library item to
+the current session; saved playlist edits take effect the next time it is opened.
 Selecting a completed video again starts it from the beginning, including older
 saved positions at the end of a file. Unfinished videos keep their resume position.
 
@@ -195,13 +199,26 @@ Release builds also need a first-use runtime check: an existing unpacked Python
 installation can hide shrinker errors. The offline probe below runs the real
 `NativeBridge.prepareRuntime` with fresh temporary storage and imports yt-dlp,
 its solver and TLS. It preserves the library and removes its test package.
-It requires JDK 21 and the same Android debug signing key as the installed APK.
-Use `--apk <path>` to sign a temporary copy of an unsigned release APK and install
-it before probing; omit it to check the current installation:
+It requires JDK 21 and Android SDK 36. Use `--apk <path>` to sign a temporary
+copy of an unsigned release APK and install it before probing. This reuses the
+standard Android debug key, creating one on a fresh runner if needed. Existing
+keys are kept. CI prepares the key before building any APKs, so cached debug
+APKs, the release probe and debug instrumentation retain the same certificate.
+Gradle receives that signing key explicitly for both debug APKs, and CI verifies
+the finished APK certificates before starting the emulator:
+
+```shell
+python3 tests/android_release_runtime_smoke.py --prepare-signing-key
+```
+
+To sign, install and probe an unsigned release APK:
 
 ```shell
 python3 tests/android_release_runtime_smoke.py --serial emulator-5554 --apk gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
 ```
+
+Omit `--apk` to check the current installation, which requires its matching debug
+signing key.
 
 The downloader SDK's `libpython.zip.so` and `libffmpeg.zip.so` are ZIP data
 archives, so they have no ELF segments to align. Executable `.so` files must all

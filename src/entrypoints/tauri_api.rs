@@ -417,6 +417,7 @@ pub async fn download_source_thumbnail(
 pub fn register_commands() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         super::android::android_player_open,
+        super::android::android_player_enqueue,
         super::android::android_playlist_open,
         super::android::android_player_control,
         super::android::android_player_status,

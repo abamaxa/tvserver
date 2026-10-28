@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise first-use extraction inside the installed, minified Android app.
 
-Requires JDK 21, Android SDK 36, and the debug signing key used by the target APK.
-With --apk, a temporary copy is signed with that key and installed as an update.
+Requires JDK 21 and Android SDK 36. Existing installations need their matching
+Android debug signing key. With --apk, a temporary copy is signed and installed as
+an update; the standard debug key is created if it is missing on a fresh runner.
 The probe uses fresh, disposable runtime storage without clearing the app's data.
 """
 import argparse
@@ -26,11 +27,32 @@ def run(*arguments):
     )
 
 
+def prepare_debug_key(keystore, keytool):
+    if keystore.is_file():
+        return
+    keystore.parent.mkdir(parents=True, exist_ok=True)
+    run(keytool, "-genkeypair", "-keystore", keystore,
+        "-storetype", "JKS", "-storepass", "android", "-keypass", "android",
+        "-alias", "androiddebugkey", "-dname", "CN=Android Debug,O=Android,C=US",
+        "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-noprompt")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serial", required=True)
-    parser.add_argument("--apk", type=Path)
+    parser.add_argument("--serial")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--apk", type=Path)
+    mode.add_argument("--prepare-signing-key", action="store_true",
+                      help="Prepare the shared debug key before building APKs; only a JDK is needed")
     args = parser.parse_args()
+    java_home = os.environ.get("JAVA_HOME")
+    javac = Path(java_home) / "bin/javac" if java_home else Path(shutil.which("javac") or "javac")
+    keystore = Path.home() / ".android/debug.keystore"
+    if args.prepare_signing_key:
+        prepare_debug_key(keystore, javac.with_name("keytool"))
+        return
+    if not args.serial:
+        parser.error("--serial is required unless --prepare-signing-key is used")
     default_sdk = Path.home() / ("Library/Android/sdk" if sys.platform == "darwin" else "Android/Sdk")
     sdk = Path(os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT") or default_sdk)
     android_jar = sdk / "platforms/android-36/android.jar"
@@ -38,12 +60,11 @@ def main():
         (path for path in (sdk / "build-tools").iterdir() if (path / "apksigner").is_file()),
         key=lambda path: tuple(map(int, re.findall(r"\d+", path.name))),
     )
-    java_home = os.environ.get("JAVA_HOME")
-    javac = Path(java_home) / "bin/javac" if java_home else Path(shutil.which("javac") or "javac")
     jar = javac.with_name("jar")
-    keystore = Path.home() / ".android/debug.keystore"
     adb = [sdk / "platform-tools/adb", "-s", args.serial]
     assert android_jar.is_file(), f"Android SDK 36 is missing: {android_jar}"
+    if args.apk:
+        prepare_debug_key(keystore, javac.with_name("keytool"))
     assert keystore.is_file(), f"Build a debug APK first to create {keystore}"
 
     with tempfile.TemporaryDirectory(prefix="lov-release-runtime-") as directory:

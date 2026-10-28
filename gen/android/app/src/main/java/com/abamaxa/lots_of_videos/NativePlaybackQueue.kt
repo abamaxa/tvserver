@@ -43,4 +43,11 @@ internal class NativePlaybackQueue {
         index = next
         return items[index]
     }
+
+    fun append(item: JSONObject) {
+        require(item.optString("videoId").isNotEmpty() && item.optString("path").isNotEmpty()) {
+            "This item is unavailable"
+        }
+        items = items + item
+    }
 }

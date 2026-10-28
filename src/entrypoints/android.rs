@@ -9,23 +9,62 @@ pub async fn android_player_open(
 ) -> Result<Value, String> {
     #[cfg(target_os = "android")]
     {
-        let checksum = video_id.parse::<i64>().map_err(|_| "Invalid video ID")?;
-        let video = state
-            .get_repository()
-            .retrieve_video(checksum)
-            .await
-            .map_err(|error| error.to_string())?;
-        let root = std::path::Path::new(&crate::domain::config::get_movie_dir())
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        let path = playable_library_path(&video, &root)?;
-        let payload = json!({ "videoId": video_id, "video": video.video, "collection": video.collection,
-            "path": path, "startTime": start_time.filter(|time| time.is_finite() && *time >= 0.0).unwrap_or(0.0) }).to_string();
-        return native_call("openPlayer", payload).await;
+        let payload = library_player_payload(state.inner(), &video_id, start_time).await?;
+        return native_call("openPlayer", payload.to_string()).await;
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = (state, video_id, start_time);
+        Err("Native playback is only available on Android".into())
+    }
+}
+
+#[cfg(target_os = "android")]
+async fn library_player_payload(
+    state: &SharedState,
+    video_id: &str,
+    start_time: Option<f64>,
+) -> Result<Value, String> {
+    let checksum = video_id.parse::<i64>().map_err(|_| "Invalid video ID")?;
+    let video = state
+        .get_repository()
+        .retrieve_video(checksum)
+        .await
+        .map_err(|error| error.to_string())?;
+    let root = std::path::Path::new(&crate::domain::config::get_movie_dir())
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    video_player_payload(&video, &root, start_time)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn video_player_payload(
+    video: &crate::domain::models::VideoDetails,
+    root: &std::path::Path,
+    start_time: Option<f64>,
+) -> Result<Value, String> {
+    let path = playable_library_path(video, root)?;
+    let audio_only = video.metadata.width == 0
+        && video.metadata.height == 0
+        && video.metadata.audio_tracks > 0;
+    Ok(json!({ "videoId": video.checksum.to_string(), "video": video.video,
+        "collection": video.collection, "path": path, "audioOnly": audio_only,
+        "startTime": start_time.filter(|time| time.is_finite() && *time >= 0.0).unwrap_or(0.0) }))
+}
+
+#[tauri::command]
+pub async fn android_player_enqueue(
+    state: tauri::State<'_, SharedState>,
+    video_id: String,
+) -> Result<Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let item = library_player_payload(state.inner(), &video_id, None).await?;
+        return native_call("controlPlayer", json!({"action": "enqueue", "item": item}).to_string()).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (state, video_id);
         Err("Native playback is only available on Android".into())
     }
 }
@@ -91,13 +130,7 @@ fn playlist_player_payload(
     let items: Vec<Value> = playlist
         .videos
         .iter()
-        .filter_map(|video| {
-            let path = playable_library_path(video, root).ok()?;
-            Some(
-                json!({ "videoId": video.checksum.to_string(), "video": video.video,
-            "collection": video.collection, "path": path, "startTime": 0 }),
-            )
-        })
+        .filter_map(|video| video_player_payload(video, root, None).ok())
         .collect();
     if items.is_empty() {
         return Err("This playlist has no available items to play".into());
@@ -120,14 +153,18 @@ pub async fn android_player_control(
     seconds: Option<i32>,
     track: Option<i32>,
     rate: Option<f64>,
+    mode: Option<String>,
 ) -> Result<Value, String> {
     #[cfg(target_os = "android")]
     {
-        native_call("controlPlayer", json!({"action": action, "seconds": seconds, "track": track.unwrap_or(-1), "rate": rate}).to_string()).await
+        if action == "show" {
+            return native_call("openPlayer", json!({}).to_string()).await;
+        }
+        native_call("controlPlayer", json!({"action": action, "seconds": seconds, "track": track.unwrap_or(-1), "rate": rate, "mode": mode}).to_string()).await
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (action, seconds, track, rate);
+        let _ = (action, seconds, track, rate, mode);
         Err("Native playback is only available on Android".into())
     }
 }
@@ -283,7 +320,18 @@ mod playlist_tests {
         let payload = playlist_player_payload(playlist(), &root, None, true).unwrap();
         assert_eq!(payload["items"].as_array().unwrap().len(), 1);
         assert_eq!(payload["items"][0]["videoId"], i64::MAX.to_string());
-        assert_eq!(payload["items"][0]["startTime"], 0);
+        assert_eq!(payload["items"][0]["startTime"], 0.0);
+        // The default mode follows the stream metadata, including audio in a
+        // video-named file. Native queue transitions retain the session's mode.
+        let mut audio = video.clone();
+        audio.metadata.width = 0;
+        audio.metadata.height = 0;
+        audio.metadata.audio_tracks = 1;
+        assert_eq!(video_player_payload(&audio, &root, None).unwrap()["audioOnly"], true);
+        audio.metadata.width = 1920;
+        audio.metadata.height = 1080;
+        assert_eq!(video_player_payload(&audio, &root, Some(42.0)).unwrap()["audioOnly"], false);
+        assert_eq!(video_player_payload(&audio, &root, Some(42.0)).unwrap()["startTime"], 42.0);
         assert!(playlist_player_payload(playlist(), &root, Some("2"), false).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

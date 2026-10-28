@@ -30,6 +30,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Test release signing prerequisites
+        run: python3 -B -m unittest discover -s tests -p android_release_runtime_smoke_test.py -v
+      - name: Prepare shared Android debug signing key
+        # Create this before Tauri caches a signed debug APK so the release probe
+        # and later Gradle instrumentation use the same certificate.
+        run: python3 -B tests/android_release_runtime_smoke.py --prepare-signing-key
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -73,6 +79,25 @@ jobs:
           JS
       - name: Build native test app
         run: npm run tauri -- android build --debug --target x86_64 --apk --ci --config "$RUNNER_TEMP/android-test.conf.json"
+      - name: Build and verify instrumentation APK signatures
+        working-directory: gen/android
+        run: |
+          # Use one certificate for the app, instrumentation and release probe.
+          ./gradlew --no-daemon :app:assembleUniversalDebug :app:assembleUniversalDebugAndroidTest --rerun-tasks \
+            -x :app:rustBuildUniversalDebug -PabiList=x86_64 \
+            -Pandroid.injected.signing.store.file="$HOME/.android/debug.keystore" \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android \
+            -Pandroid.injected.signing.store.type=JKS
+          expected_certificate=$(keytool -exportcert -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | sha256sum | cut -d ' ' -f 1)
+          for apk in app/build/outputs/apk/universal/debug/app-universal-debug.apk app/build/outputs/apk/androidTest/universal/debug/app-universal-debug-androidTest.apk; do
+            actual_certificate=$("$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            if [[ "$actual_certificate" != "$expected_certificate" ]]; then
+              echo "::error::APK signing certificate does not match the shared debug key: $apk"
+              exit 1
+            fi
+          done
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -92,7 +117,7 @@ jobs:
             # the release-minified Java extraction path with fresh runtime data.
             ./gradlew --no-daemon :app:assembleUniversalRelease -x :app:rustBuildUniversalRelease -PabiList=x86_64
             python3 ../../tests/android_release_runtime_smoke.py --serial emulator-5554 --apk app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
-            ./gradlew --no-daemon :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug -PabiList=x86_64
+            ./gradlew --no-daemon :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug -PabiList=x86_64 -Pandroid.injected.signing.store.file="$HOME/.android/debug.keystore" -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android -Pandroid.injected.signing.store.type=JKS
       - name: Upload Android test reports
         if: always()
         uses: actions/upload-artifact@v4

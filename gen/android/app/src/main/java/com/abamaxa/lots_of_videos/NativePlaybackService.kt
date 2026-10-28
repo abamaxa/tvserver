@@ -55,6 +55,7 @@ class NativePlaybackService : Service() {
     private var closing = false
     private var startPosition = 0L
     private var lastPosition = 0L
+    private var pendingResumePosition: Long? = null
     private var lastDuration = 0L
     private var errorMessage: String? = null
     private var sessionId = ""
@@ -77,8 +78,8 @@ class NativePlaybackService : Service() {
     }
     var audioSessionId = 0
         private set
-    var backgroundAudio = false
-        private set
+    private var playbackMode = NativePlaybackMode.WATCH
+    val backgroundAudio get() = playbackMode == NativePlaybackMode.LISTEN
     var displayMode = "video"
         private set
     var uiVisible = false
@@ -172,14 +173,18 @@ class NativePlaybackService : Service() {
             return
         }
         try {
-            openItem(queue.load(request))
+            val item = queue.load(request)
+            val savedMode = if (queue.playlistId.isEmpty()) null else NativePlaybackMode.from(
+                getSharedPreferences("native-playback", MODE_PRIVATE)
+                    .getString("playlist-mode:${queue.playlistId}", "") ?: "")
+            openItem(item, mode = savedMode ?: NativePlaybackMode.defaultFor(item))
         } catch (error: Exception) {
             errorMessage = error.message ?: "This playlist could not be opened"
             stopPlayback()
         }
     }
 
-    private fun openItem(request: JSONObject, continuation: Boolean = false) {
+    private fun openItem(request: JSONObject, continuation: Boolean = false, mode: NativePlaybackMode = playbackMode) {
         val rate = if (continuation) playback?.rate ?: 1f else 1f
         val volume = if (continuation) playback?.volume ?: 100 else 100
         if (playback != null) pause()
@@ -188,7 +193,7 @@ class NativePlaybackService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foreground = false
             sessionId = UUID.randomUUID().toString()
-            backgroundAudio = false
+            playbackMode = mode
             displayMode = "video"
         }
         closing = false
@@ -224,6 +229,10 @@ class NativePlaybackService : Service() {
                             player.setAudioDelay(audioDelayMs * 1000L)
                         }
                         restoreStartPosition(player)
+                        if (desiredPlaying) pendingResumePosition?.let { position ->
+                            pendingResumePosition = null
+                            player.setTime(position, false)
+                        }
                         if (!desiredPlaying) player.pause()
                         updateVideoOutput()
                         publish()
@@ -296,10 +305,13 @@ class NativePlaybackService : Service() {
         updateVideoOutput()
     }
 
-    fun setBackgroundAudio(enabled: Boolean) {
+    fun setPlaybackMode(value: String) {
         if (closing || playback == null) return
-        backgroundAudio = enabled
-        if (enabled) {
+        val mode = NativePlaybackMode.from(value) ?: return
+        playbackMode = mode
+        if (queue.playlistId.isNotEmpty()) getSharedPreferences("native-playback", MODE_PRIVATE).edit()
+            .putString("playlist-mode:${queue.playlistId}", mode.value).apply()
+        if (backgroundAudio) {
             // Called by the visible player, before it can go into the background.
             startService(Intent(this, NativePlaybackService::class.java))
             promoteToForeground()
@@ -357,18 +369,18 @@ class NativePlaybackService : Service() {
         resumeOnFocusGain = false
         // Decoding a paused still can advance VLC's internal preroll clock.
         // Resume from the held user position rather than that decoder timestamp.
-        // An explicit seek can already be pending. Submitting it again while
-        // resuming can stall VLC's decoder after an audio-track change.
-        val resumePosition = lastPosition.takeIf {
-            !desiredPlaying && playback?.isSeekable == true && playback?.time != lastPosition
+        // Wait for VLC to resume before restoring the position, so its paused
+        // frame/audio-track operations cannot overwrite the new seek.
+        if (!desiredPlaying) pendingResumePosition = lastPosition.takeIf {
+            playback?.isSeekable == true && playback?.time != lastPosition
         }
         desiredPlaying = true
         playback?.play()
-        if (resumePosition != null) playback?.setTime(resumePosition, false)
         publish()
     }
 
     fun pause(abandon: Boolean = true) {
+        pendingResumePosition = null
         if (desiredPlaying) lastPosition = playback?.time?.takeIf { it >= 0 } ?: lastPosition
         desiredPlaying = false
         playback?.pause()
@@ -389,6 +401,7 @@ class NativePlaybackService : Service() {
     fun seek(seconds: Int) = seekTo((if (desiredPlaying) playback?.time ?: lastPosition else lastPosition) + seconds * 1000L)
 
     fun seekTo(position: Long) {
+        pendingResumePosition = null
         playback?.let {
             // A paused fast seek can settle at a later keyframe after the UI has
             // already shown its requested time. Keep paused stills at the exact time.
@@ -424,6 +437,11 @@ class NativePlaybackService : Service() {
             "stop" -> stopPlayback()
             "next" -> skip(1)
             "previous" -> previous()
+            "mode" -> setPlaybackMode(request.optString("mode"))
+            "enqueue" -> {
+                if (closing || playback == null) errorMessage = "Start playback before adding to the queue."
+                else queue.append(request.getJSONObject("item"))
+            }
             "subtitle" -> playback?.setSpuTrack(request.optInt("track", -1))
             "audio" -> playback?.setAudioTrack(request.optInt("track", -1))
             "audioDelay" -> setAudioDelay(request.optLong("milliseconds"))
@@ -473,6 +491,7 @@ class NativePlaybackService : Service() {
             .put("currentSubtitleTrack", player?.spuTrack ?: -1).put("currentAudioTrack", player?.audioTrack ?: -1)
             .put("audioTracks", player?.audioTracksCount ?: 0).put("decodedAudio", stats?.decodedAudio ?: 0)
             .put("decodedVideo", stats?.decodedVideo ?: 0).put("backgroundAudio", backgroundAudio)
+            .put("playbackMode", playbackMode.value).put("uiVisible", uiVisible)
             .put("displayMode", displayMode).put("sessionId", sessionId).put("audioSessionId", audioSessionId)
             .put("playlistId", queue.playlistId).put("playlistName", queue.playlistName)
             .put("queueIndex", queue.index).put("queueLength", queue.size).put("shuffle", queue.shuffled)
@@ -570,6 +589,7 @@ class NativePlaybackService : Service() {
     }
 
     private fun releaseDecoder() {
+        pendingResumePosition = null
         if (playback == null && engine == null) return
         abandonFocus()
         playback?.run { vlcVout.removeCallback(videoCallback); setEventListener(null); stop(); detachViews(); release() }
