@@ -119,9 +119,12 @@ object NativeBridge {
     @JvmStatic
     fun openPlayer(activity: Activity, payload: String): String {
         activity.runOnUiThread {
-            activity.startActivity(Intent(activity, NativePlayerActivity::class.java)
+            val intent = Intent(activity, NativePlayerActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra("video", payload))
+            // An empty request only reconnects the window to the existing queue.
+            val request = JSONObject(payload)
+            if (request.has("videoId") || request.has("items")) intent.putExtra("video", payload)
+            activity.startActivity(intent)
         }
         return "{}"
     }
@@ -149,6 +152,9 @@ object NativeBridge {
     @JvmStatic
     fun controlPlayer(payload: String): String {
         val request = JSONObject(payload)
+        if (request.optString("action") == "enqueue" &&
+            (playback == null || JSONObject(playerState).optBoolean("closed", true)))
+            return JSONObject().put("error", "Start playback before adding to the queue.").toString()
         Handler(Looper.getMainLooper()).post { playback?.control(request) }
         return playerState
     }

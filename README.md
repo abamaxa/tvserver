@@ -123,14 +123,18 @@ interrupting other transfers. Android system stops are reported as terminal task
 errors. Force-stop, reboot and recovery after process death are separate from
 screen-off execution; download queue restoration is not implemented.
 
-Video is the default for every new playback session. The native player has
-independent **Video / Visualizer** controls and a **Keep audio playing with screen
-off** switch, initially off. With that switch off, locking the phone or leaving
-the player pauses playback. With it on, Back returns to the library while audio
-continues. The notification and lock-screen controls provide play/pause, seeking,
-and Stop. **Stop** in the player also releases the decoder and playback service.
-Unlocking or reopening the player reconnects to the same session; it does not
-automatically resume a paused video.
+The native player has independent **Video / Visualizer** display controls and
+**Watch / Listen** playback modes. Audio-only items default to Listen; videos
+default to Watch. The selected mode is remembered on this device for each playlist
+and is preserved when its queue advances, including mixed audio/video queues.
+Watch pauses when locked and stops on Back, retaining the resume position.
+Listen keeps playing while browsing or with the screen off. A mini-player in the
+library offers play/pause, next, stop, and reopening the full player without
+restarting its decoder or queue. The notification and lock-screen controls provide
+play/pause, seeking, next/previous, and Stop. **Stop** also releases the decoder and
+playback service. Reopening the player reconnects to the same session; it does not
+automatically resume paused playback. **Add to queue** appends a library item to
+the current session; saved playlist edits take effect the next time it is opened.
 Selecting a completed video again starts it from the beginning, including older
 saved positions at the end of a file. Unfinished videos keep their resume position.
 

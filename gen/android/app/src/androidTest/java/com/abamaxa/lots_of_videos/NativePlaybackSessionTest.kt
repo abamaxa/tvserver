@@ -82,14 +82,14 @@ class NativePlaybackSessionTest {
         context.getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_MUSIC, previousVolume, 0)
         setTutorial(previousTutorial)
     }
-    private fun open(asset: String = "native-audio-session-test.mp4", startTime: Double = 0.0): ActivityScenario<NativePlayerActivity> {
+    private fun open(asset: String = "native-audio-session-test.mp4", startTime: Double = 0.0, audioOnly: Boolean = false): ActivityScenario<NativePlayerActivity> {
         val clip = File(context.cacheDir, "session-test-$asset")
         clips.add(clip)
         instrumentation.context.assets.open(asset).use { input -> clip.outputStream().use { input.copyTo(it) } }
         val intent = Intent(context, NativePlayerActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             .putExtra("video", JSONObject().put("videoId", "session-test-$asset")
                 .put("video", clip.name).put("collection", "Native regression fixtures")
-                .put("path", clip.absolutePath).put("startTime", startTime).toString())
+                .put("path", clip.absolutePath).put("startTime", startTime).put("audioOnly", audioOnly).toString())
         val scenario = ActivityScenario.launch<NativePlayerActivity>(intent)
         awaitState("Decoder did not start", if (startTime > 0) 10000 else 45000) { !it.optBoolean("closed") && it.optBoolean("playing") && it.optInt("decodedAudio") > 0 }
         scenario.onActivity { activity ->
@@ -267,6 +267,80 @@ class NativePlaybackSessionTest {
             await("Paused video picture did not reconnect after unlock") { videoPictureVisible() }
         }
     }
+    @Test fun watchStopsOnBackAndListenReopensWithoutRestarting() {
+        open().use {
+            assertEquals("watch", state().getString("playbackMode"))
+            awaitState("Watch playback did not advance") { it.optDouble("currentTime") > 1 }
+            val position = state().getDouble("currentTime")
+            onView(withContentDescription("Back")).perform(click())
+            awaitState("Watch mode kept playing after Back") { it.optBoolean("closed") }
+            assertTrue("Watch mode lost its saved position: ${state()}", state().getDouble("currentTime") >= position - 0.25)
+        }
+        open(audioOnly = true).use {
+            assertEquals("listen", state().getString("playbackMode"))
+            val session = state().getString("sessionId")
+            val position = state().getDouble("currentTime")
+            onView(withContentDescription("Back")).perform(click())
+            awaitState("Listen mode stopped after Back") {
+                !it.optBoolean("uiVisible") && !it.optBoolean("closed") &&
+                    it.optBoolean("playing") && it.optDouble("currentTime") > position + 1
+            }
+            ActivityScenario.launch<NativePlayerActivity>(Intent(context, NativePlayerActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)).use {
+                awaitState("Player did not reconnect") { it.optBoolean("uiVisible") && it.optBoolean("playing") }
+                assertEquals(session, state().getString("sessionId"))
+                assertTrue(state().getDouble("currentTime") > position)
+            }
+        }
+    }
+    @Test fun playlistRemembersBothModesAndMixedMediaKeepsTheSessionChoice() {
+        val playlistId = "mode-regression-${java.util.UUID.randomUUID()}"
+        val preferences = context.getSharedPreferences("native-playback", android.content.Context.MODE_PRIVATE)
+        try {
+            open().use {
+                val path = state().getString("currentSrc")
+                val items = JSONArray()
+                    .put(JSONObject().put("videoId", "music-video").put("path", path).put("audioOnly", false))
+                    .put(JSONObject().put("videoId", "audio-track").put("path", path).put("audioOnly", true))
+                val playlist = JSONObject().put("playlistId", playlistId).put("items", items)
+                main { NativeBridge.playback!!.open(playlist) }
+                awaitState("Playlist did not start") { it.optString("videoId") == "music-video" && it.optBoolean("playing") }
+                assertEquals("watch", state().getString("playbackMode"))
+                main { NativeBridge.playback!!.setPlaybackMode("listen") }
+                main { NativeBridge.playback!!.control(JSONObject().put("action", "next")) }
+                awaitState("Mixed-media next did not start") { it.optString("videoId") == "audio-track" && it.optBoolean("playing") }
+                assertEquals("listen", state().getString("playbackMode"))
+                main { NativeBridge.playback!!.open(playlist) }
+                awaitState("Remembered playlist did not restart") { it.optString("videoId") == "music-video" && it.optBoolean("playing") }
+                assertEquals("listen", state().getString("playbackMode"))
+                main { NativeBridge.playback!!.setPlaybackMode("watch") }
+                main { NativeBridge.playback!!.open(playlist.put("startVideoId", "audio-track")) }
+                awaitState("Audio selection did not start") { it.optString("videoId") == "audio-track" && it.optBoolean("playing") }
+                assertEquals("watch", state().getString("playbackMode"))
+                assertEquals("watch", preferences.getString("playlist-mode:$playlistId", null))
+            }
+        } finally { preferences.edit().remove("playlist-mode:$playlistId").commit() }
+    }
+    @Test fun addingToTheQueueWhileBrowsingPreservesPlaybackAndAdvancesInListenMode() {
+        open(audioOnly = true).use { scenario ->
+            val before = state()
+            val item = JSONObject().put("videoId", "queued-music-video").put("video", "Music video")
+                .put("path", before.getString("currentSrc")).put("audioOnly", false)
+            scenario.moveToState(Lifecycle.State.CREATED)
+            main { NativeBridge.playback!!.control(JSONObject().put("action", "enqueue").put("item", item)) }
+            assertEquals(before.getString("sessionId"), state().getString("sessionId"))
+            assertEquals(before.getString("videoId"), state().getString("videoId"))
+            assertEquals(2, state().getInt("queueLength"))
+            assertFalse(state().getBoolean("paused"))
+            awaitState("Track duration unavailable") { it.optDouble("duration") > 0 }
+            main { NativeBridge.playback!!.seekTo((state().getDouble("duration") * 1000).toLong() - 1500) }
+            awaitState("Appended item did not play while browsing", 45000) {
+                it.optString("videoId") == "queued-music-video" && it.optBoolean("playing") && it.optInt("decodedAudio") > 0
+            }
+            assertEquals("listen", state().getString("playbackMode"))
+            assertEquals(before.getString("sessionId"), state().getString("sessionId"))
+        }
+    }
     @Test fun playlistAdvancesWhileLockedAndRetainsSettingsAndMediaSkipControls() {
         open().use { scenario ->
             val path = state().getString("currentSrc")
@@ -280,7 +354,7 @@ class NativePlaybackSessionTest {
             val sessionId = state().getString("sessionId")
             main {
                 NativeBridge.playback!!.apply {
-                    setBackgroundAudio(true)
+                    setPlaybackMode("listen")
                     setDisplayMode("visualizer")
                     control(JSONObject().put("action", "rate").put("rate", 1.25))
                     control(JSONObject().put("action", "volume").put("volume", 67))
@@ -455,7 +529,7 @@ class NativePlaybackSessionTest {
         var original: NativePlaybackService? = null
         val scenario = open()
         try {
-            onView(withContentDescription("Keep audio playing with screen off")).perform(click())
+            onView(withContentDescription("Listen mode")).perform(click())
             val session = state().getString("sessionId")
             main { original = NativeBridge.playback }
             val start = state().getDouble("currentTime")
@@ -499,7 +573,7 @@ class NativePlaybackSessionTest {
     }
     @Test fun interruptionsResumeOnlyWhenAppropriate() {
         open().use { scenario ->
-            onView(withContentDescription("Keep audio playing with screen off")).perform(click())
+            onView(withContentDescription("Listen mode")).perform(click())
             scenario.moveToState(Lifecycle.State.CREATED)
             val audio = context.getSystemService(AudioManager::class.java)
             val interruption = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
@@ -529,7 +603,7 @@ class NativePlaybackSessionTest {
         assumeTrue("Protected broadcast simulation needs a userdebug emulator", Build.TYPE == "userdebug" &&
             Build.HARDWARE in listOf("ranchu", "goldfish"))
         open().use { scenario ->
-            onView(withContentDescription("Keep audio playing with screen off")).perform(click())
+            onView(withContentDescription("Listen mode")).perform(click())
             scenario.moveToState(Lifecycle.State.CREATED)
             val result = shell("su 1000 am broadcast -a android.media.AUDIO_BECOMING_NOISY -p ${context.packageName}")
             assertTrue(result, result.contains("Broadcast completed"))
