@@ -202,13 +202,21 @@ its solver and TLS. It preserves the library and removes its test package.
 It requires JDK 21 and Android SDK 36. Use `--apk <path>` to sign a temporary
 copy of an unsigned release APK and install it before probing. This reuses the
 standard Android debug key, creating one on a fresh runner if needed. Existing
-keys are kept so the target, probe and later debug instrumentation use the same
-signature. Omit `--apk` to check the current installation, which requires its
-matching debug signing key:
+keys are kept. CI prepares the key before building any APKs, so cached debug
+APKs, the release probe and debug instrumentation retain the same certificate:
+
+```shell
+python3 tests/android_release_runtime_smoke.py --prepare-signing-key
+```
+
+To sign, install and probe an unsigned release APK:
 
 ```shell
 python3 tests/android_release_runtime_smoke.py --serial emulator-5554 --apk gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
 ```
+
+Omit `--apk` to check the current installation, which requires its matching debug
+signing key.
 
 The downloader SDK's `libpython.zip.so` and `libffmpeg.zip.so` are ZIP data
 archives, so they have no ELF segments to align. Executable `.so` files must all

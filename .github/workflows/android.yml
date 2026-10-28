@@ -32,6 +32,10 @@ jobs:
           java-version: '21'
       - name: Test release signing prerequisites
         run: python3 -B -m unittest discover -s tests -p android_release_runtime_smoke_test.py -v
+      - name: Prepare shared Android debug signing key
+        # Create this before Tauri caches a signed debug APK so the release probe
+        # and later Gradle instrumentation use the same certificate.
+        run: python3 -B tests/android_release_runtime_smoke.py --prepare-signing-key
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools

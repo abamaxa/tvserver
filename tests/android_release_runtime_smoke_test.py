@@ -56,7 +56,7 @@ class ReleaseRuntimeSigningTest(unittest.TestCase):
             "-noprompt",
         )
 
-    def run_until_signing(self, install_apk=True):
+    def run_until_signing(self, install_apk=True, prepare_only=False):
         def command(*arguments):
             self.commands.append(tuple(str(value) for value in arguments))
             if Path(arguments[0]).name == "keytool":
@@ -65,9 +65,13 @@ class ReleaseRuntimeSigningTest(unittest.TestCase):
             self.assertTrue(self.keystore.is_file(), "Signing started without a debug key")
             raise SigningReady()
 
-        arguments = ["release-runtime-smoke", "--serial", "test-emulator"]
-        if install_apk:
-            arguments.extend(["--apk", str(self.apk)])
+        arguments = ["release-runtime-smoke"]
+        if prepare_only:
+            arguments.append("--prepare-signing-key")
+        else:
+            arguments.extend(["--serial", "test-emulator"])
+            if install_apk:
+                arguments.extend(["--apk", str(self.apk)])
         with patch.object(Path, "home", return_value=self.home), \
                 patch.dict(os.environ, {
                     "ANDROID_HOME": str(self.sdk),
@@ -83,6 +87,21 @@ class ReleaseRuntimeSigningTest(unittest.TestCase):
         self.assertEqual(sum(Path(command[0]).name == "keytool" for command in self.commands), 1)
         self.real_run(self.keytool, "-list", "-keystore", self.keystore,
                       "-storepass", "android", "-alias", "androiddebugkey")
+
+    def test_prepares_key_before_build_and_reuses_it_for_apk(self):
+        # CI prepares signing before installing an Android SDK or building APKs.
+        unavailable_sdk = self.root / "sdk-not-installed"
+        self.sdk.rename(unavailable_sdk)
+        try:
+            self.run_until_signing(prepare_only=True)
+        finally:
+            unavailable_sdk.rename(self.sdk)
+        build_key = self.keystore.read_bytes()
+        self.commands.clear()
+        with self.assertRaises(SigningReady):
+            self.run_until_signing()
+        self.assertEqual(self.keystore.read_bytes(), build_key)
+        self.assertFalse(any(Path(command[0]).name == "keytool" for command in self.commands))
 
     def test_reuses_existing_key_without_modifying_it(self):
         self.create_existing_key()
