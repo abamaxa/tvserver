@@ -30,6 +30,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Test release signing prerequisites
+        run: python3 -B -m unittest discover -s tests -p android_release_runtime_smoke_test.py -v
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools

@@ -199,9 +199,12 @@ Release builds also need a first-use runtime check: an existing unpacked Python
 installation can hide shrinker errors. The offline probe below runs the real
 `NativeBridge.prepareRuntime` with fresh temporary storage and imports yt-dlp,
 its solver and TLS. It preserves the library and removes its test package.
-It requires JDK 21 and the same Android debug signing key as the installed APK.
-Use `--apk <path>` to sign a temporary copy of an unsigned release APK and install
-it before probing; omit it to check the current installation:
+It requires JDK 21 and Android SDK 36. Use `--apk <path>` to sign a temporary
+copy of an unsigned release APK and install it before probing. This reuses the
+standard Android debug key, creating one on a fresh runner if needed. Existing
+keys are kept so the target, probe and later debug instrumentation use the same
+signature. Omit `--apk` to check the current installation, which requires its
+matching debug signing key:
 
 ```shell
 python3 tests/android_release_runtime_smoke.py --serial emulator-5554 --apk gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk

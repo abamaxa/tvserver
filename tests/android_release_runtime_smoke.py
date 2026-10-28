@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise first-use extraction inside the installed, minified Android app.
 
-Requires JDK 21, Android SDK 36, and the debug signing key used by the target APK.
-With --apk, a temporary copy is signed with that key and installed as an update.
+Requires JDK 21 and Android SDK 36. Existing installations need their matching
+Android debug signing key. With --apk, a temporary copy is signed and installed as
+an update; the standard debug key is created if it is missing on a fresh runner.
 The probe uses fresh, disposable runtime storage without clearing the app's data.
 """
 import argparse
@@ -44,6 +45,14 @@ def main():
     keystore = Path.home() / ".android/debug.keystore"
     adb = [sdk / "platform-tools/adb", "-s", args.serial]
     assert android_jar.is_file(), f"Android SDK 36 is missing: {android_jar}"
+    if args.apk and not keystore.is_file():
+        # A standalone release build need not create Gradle's default debug key.
+        # Use one shared key for the target, probe and later debug instrumentation.
+        keystore.parent.mkdir(parents=True, exist_ok=True)
+        run(javac.with_name("keytool"), "-genkeypair", "-keystore", keystore,
+            "-storetype", "JKS", "-storepass", "android", "-keypass", "android",
+            "-alias", "androiddebugkey", "-dname", "CN=Android Debug,O=Android,C=US",
+            "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000", "-noprompt")
     assert keystore.is_file(), f"Build a debug APK first to create {keystore}"
 
     with tempfile.TemporaryDirectory(prefix="lov-release-runtime-") as directory:
