@@ -2,6 +2,20 @@ use super::SharedState;
 use serde_json::{json, Value};
 
 #[tauri::command]
+pub async fn android_settings_open(state: tauri::State<'_, SharedState>) -> Result<Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let tasks_active = state.get_task_manager().get_current_state().await.iter().any(|task| !task.finished);
+        return native_call("openSettings", json!({"tasksActive": tasks_active}).to_string()).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = state;
+        Err("App settings are only available on Android".into())
+    }
+}
+
+#[tauri::command]
 pub async fn android_player_open(
     state: tauri::State<'_, SharedState>,
     video_id: String,

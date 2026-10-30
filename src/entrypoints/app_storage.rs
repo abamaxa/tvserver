@@ -1,6 +1,6 @@
 use std::{fs, io, path::PathBuf};
 
-/// Private Android storage, resolved by Tauri before any backend service starts.
+/// Android storage, resolved before any backend service starts. SQLite stays private.
 pub(super) struct AppStorage {
     data_dir: PathBuf,
     cache_dir: PathBuf,
@@ -14,9 +14,9 @@ pub(super) struct AppStorage {
 }
 
 impl AppStorage {
-    pub(super) fn initialize(data_dir: PathBuf, cache_dir: PathBuf) -> io::Result<Self> {
-        let movie_dir = data_dir.join("movies");
-        let book_dir = data_dir.join("books");
+    pub(super) fn initialize(data_dir: PathBuf, cache_dir: PathBuf, media_root: PathBuf) -> io::Result<Self> {
+        let movie_dir = media_root.join("movies");
+        let book_dir = media_root.join("books");
         let storage = Self {
             config_dir: data_dir.join("config"),
             downloads_dir: movie_dir.join(".downloads"),
@@ -79,11 +79,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_media_keeps_database_and_configuration_in_private_storage() {
+        let root = std::env::temp_dir().join(format!("android-sd-storage-{}", rand::random::<u64>()));
+        let data = root.join("private");
+        let sd_card = root.join("sd card");
+        let storage = AppStorage::initialize(data.clone(), root.join("cache"), sd_card.clone()).unwrap();
+        assert_eq!(storage.movie_dir, sd_card.join("movies"));
+        assert_eq!(storage.book_dir, sd_card.join("books"));
+        assert_eq!(storage.downloads_dir, sd_card.join("movies/.downloads"));
+        assert_eq!(storage.thumbnail_dir, sd_card.join("movies/.thumbnails"));
+        assert_eq!(storage.book_thumbnail_dir, sd_card.join("books/.thumbnails"));
+        assert_eq!(storage.database_path, data.join("tvserver.sqlite"));
+        assert_eq!(storage.config_dir, data.join("config"));
+        assert!(!data.join("movies").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn initializes_private_storage_and_preserves_files_on_restart() {
         let root = std::env::temp_dir().join(format!("android-storage-{}", rand::random::<u64>()));
         let data = root.join("app data");
         let cache = root.join("cache");
-        let storage = AppStorage::initialize(data.clone(), cache.clone()).unwrap();
+        let storage = AppStorage::initialize(data.clone(), cache.clone(), data.clone()).unwrap();
         assert!(storage.downloads_dir.is_dir());
         assert!(storage.thumbnail_dir.is_dir());
         assert!(storage.book_thumbnail_dir.is_dir());
@@ -97,7 +114,7 @@ mod tests {
         let media = storage.movie_dir.join("keep.mp4");
         fs::write(&media, b"existing media").unwrap();
         fs::write(&storage.database_path, b"existing database").unwrap();
-        let reopened = AppStorage::initialize(data, cache).unwrap();
+        let reopened = AppStorage::initialize(data.clone(), cache, data).unwrap();
         assert_eq!(fs::read(media).unwrap(), b"existing media");
         assert_eq!(fs::read(reopened.database_path).unwrap(), b"existing database");
         fs::remove_dir_all(root).unwrap();

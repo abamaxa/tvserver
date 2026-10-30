@@ -123,6 +123,8 @@ impl BookCheck {
                     continue;
                 }
             }
+            // Preserve records when removable storage disappears during reconciliation.
+            let _ = tokio::fs::read_dir(&self.book_root).await?;
             if let Err(error) = self
                 .repo
                 .delete_book_if_path_matches(

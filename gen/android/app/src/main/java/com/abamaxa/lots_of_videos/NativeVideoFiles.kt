@@ -5,14 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.webkit.MimeTypeMap
-import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
 
 /** Android storage boundary: share read-only content URIs and export user-selected copies. */
 object NativeVideoFiles {
     fun libraryFile(context: Context, request: JSONObject): File {
-        val root = File(context.filesDir.parentFile, "movies").canonicalFile
+        val root = File(NativeStorage.requireMediaRoot(context), "movies").canonicalFile
         val file = File(request.getString("path")).canonicalFile
         check(file.isFile && file.path.startsWith(root.path + File.separator)) {
             "Video is outside the library or unavailable"
@@ -28,7 +27,7 @@ object NativeVideoFiles {
         check(files.length() > 0) { "No videos found" }
         val sources = (0 until files.length()).map { libraryFile(context, files.getJSONObject(it)) }
         val uris = ArrayList(sources.map {
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", it)
+            LibraryFileProvider.uriForFile(context, it)
         })
         val types = sources.map { mimeType(it) }.distinct()
         val intent = Intent(if (uris.size == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE)

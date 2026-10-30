@@ -27,7 +27,13 @@
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true" />
+
+        <activity
+            android:name=".StorageLauncherActivity"
+            android:process=":settings"
+            android:exported="true"
+            android:theme="@style/Theme.tvserver">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -35,6 +41,13 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".AppSettingsActivity"
+            android:process=":settings"
+            android:exported="false"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode"
+            android:theme="@style/Theme.tvserver" />
 
         <activity
             android:name=".NativePlayerActivity"
@@ -62,13 +75,9 @@
         <receiver android:name=".NativeDownloadCancelReceiver" android:exported="false" />
 
         <provider
-          android:name="androidx.core.content.FileProvider"
+          android:name=".LibraryFileProvider"
           android:authorities="${applicationId}.fileprovider"
           android:exported="false"
-          android:grantUriPermissions="true">
-          <meta-data
-            android:name="android.support.FILE_PROVIDER_PATHS"
-            android:resource="@xml/file_paths" />
-        </provider>
+          android:grantUriPermissions="true" />
     </application>
 </manifest>
