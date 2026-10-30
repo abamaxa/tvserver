@@ -61,6 +61,7 @@ class NativePlaybackService : Service() {
     private var sessionId = ""
     private var focusRequest: AudioFocusRequest? = null
     private var audioDelayMs = 0L
+    private var sessionDefaults = NativePlaybackDefaults()
     private var softwareVideo = false
     private val videoCallback = object : IVLCVout.Callback {
         override fun onSurfacesCreated(output: IVLCVout) {
@@ -174,10 +175,11 @@ class NativePlaybackService : Service() {
         }
         try {
             val item = queue.load(request)
+            sessionDefaults = NativePlaybackDefaults.load(this)
             val savedMode = if (queue.playlistId.isEmpty()) null else NativePlaybackMode.from(
                 getSharedPreferences("native-playback", MODE_PRIVATE)
                     .getString("playlist-mode:${queue.playlistId}", "") ?: "")
-            openItem(item, mode = savedMode ?: NativePlaybackMode.defaultFor(item))
+            openItem(item, mode = savedMode ?: sessionDefaults.modeFor(item))
         } catch (error: Exception) {
             errorMessage = error.message ?: "This playlist could not be opened"
             stopPlayback()
@@ -185,7 +187,7 @@ class NativePlaybackService : Service() {
     }
 
     private fun openItem(request: JSONObject, continuation: Boolean = false, mode: NativePlaybackMode = playbackMode) {
-        val rate = if (continuation) playback?.rate ?: 1f else 1f
+        val rate = if (continuation) playback?.rate ?: sessionDefaults.rate else sessionDefaults.rate
         val volume = if (continuation) playback?.volume ?: 100 else 100
         if (playback != null) pause()
         releaseDecoder()
@@ -194,7 +196,8 @@ class NativePlaybackService : Service() {
             foreground = false
             sessionId = UUID.randomUUID().toString()
             playbackMode = mode
-            displayMode = "video"
+            displayMode = sessionDefaults.displayMode
+            audioDelayMs = sessionDefaults.audioDelayMs
         }
         closing = false
         details = request
@@ -258,6 +261,13 @@ class NativePlaybackService : Service() {
             softwareVideo = NativeVideoDecoder.requiresSoftware(path)
             media = Media(vlc, Uri.fromFile(File(path))).also {
                 it.setHWDecoderEnabled(!softwareVideo, false)
+                NativePlaybackDefaults.vlcLanguage(sessionDefaults.audioLanguage)?.let { language ->
+                    it.addOption(":audio-language=$language")
+                }
+                if (!sessionDefaults.subtitles) it.addOption(":sub-language=none")
+                else NativePlaybackDefaults.vlcLanguage(sessionDefaults.subtitleLanguage)?.let { language ->
+                    it.addOption(":sub-language=$language,any")
+                }
                 player.media = it
             }
             session.isActive = true
@@ -423,6 +433,7 @@ class NativePlaybackService : Service() {
         audioDelayMs = delay
         getSharedPreferences("native-playback", MODE_PRIVATE).edit()
             .putLong("audio-delay-ms", delay).apply()
+        NativeSettingsStore.update(this, NativePlaybackDefaults.STORE) { it.put("audioDelayMs", delay) }
         publish()
         return true
     }

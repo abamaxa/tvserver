@@ -79,6 +79,9 @@ jobs:
           JS
       - name: Build native test app
         run: npm run tauri -- android build --debug --target x86_64 --apk --ci --config "$RUNNER_TEMP/android-test.conf.json"
+      - name: Run storage migration unit tests
+        working-directory: gen/android
+        run: ./gradlew --no-daemon :app:testUniversalDebugUnitTest -x :app:rustBuildUniversalDebug -PabiList=x86_64
       - name: Build and verify instrumentation APK signatures
         working-directory: gen/android
         run: |
@@ -125,5 +128,7 @@ jobs:
           name: android-test-reports
           path: |
             gen/android/app/build/reports/androidTests/
+            gen/android/app/build/reports/tests/
+            gen/android/app/build/test-results/
             gen/android/app/build/outputs/androidTest-results/
           if-no-files-found: warn

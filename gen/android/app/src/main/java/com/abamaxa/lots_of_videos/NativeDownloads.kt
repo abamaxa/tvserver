@@ -185,7 +185,7 @@ internal object NativeDownloads {
             else -> "Starting download…"
         }
         val open = PendingIntent.getActivity(appContext, 0,
-            Intent(appContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            Intent(appContext, StorageLauncherActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val cancel = PendingIntent.getBroadcast(appContext, entry?.notificationId ?: LEGACY_NOTIFICATION,
             Intent(appContext, NativeDownloadCancelReceiver::class.java).apply {

@@ -23,7 +23,7 @@ class NativeVideoFilesTest {
     @Before fun setUp() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         context = instrumentation.targetContext
-        directory = File(context.filesDir.parentFile, "movies/.native-file-actions-test").apply { mkdirs() }
+        directory = File(NativeStorage.requireMediaRoot(context), "movies/.native-file-actions-test").apply { mkdirs() }
         video = File(directory, "Clip #1 & café.mp4")
         instrumentation.context.assets.open("native-player-ui-test.mp4").use { input ->
             video.outputStream().use { input.copyTo(it) }
@@ -73,7 +73,7 @@ class NativeVideoFilesTest {
     }
 
     @Test fun rejectsSiblingDirectoryWithTheSameLibraryPrefix() {
-        val sibling = File(context.filesDir.parentFile, "movies-native-file-actions-test").apply { mkdirs() }
+        val sibling = File(NativeStorage.requireMediaRoot(context), "movies-native-file-actions-test").apply { mkdirs() }
         val outside = File(sibling, video.name).apply { writeBytes(video.readBytes()) }
         try {
             assertThrows(IllegalStateException::class.java) { NativeVideoFiles.libraryFile(context, request(outside)) }
@@ -103,6 +103,19 @@ class NativeVideoFilesTest {
         assertThrows(IllegalStateException::class.java) {
             NativeVideoFiles.shareIntent(context, JSONObject().put("files", JSONArray()))
         }
+    }
+
+    @Test fun sharedProviderRejectsWritesAndTraversalAndReportsFileMetadata() {
+        val uri = LibraryFileProvider.uriForFile(context, video)
+        assertThrows(IllegalStateException::class.java) { context.contentResolver.openFileDescriptor(uri, "w") }
+        context.contentResolver.query(uri, null, null, null, null)!!.use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(video.name, cursor.getString(cursor.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)))
+            assertEquals(video.length(), cursor.getLong(cursor.getColumnIndexOrThrow(android.provider.OpenableColumns.SIZE)))
+        }
+        val traversal = Uri.Builder().scheme("content").authority("${context.packageName}.fileprovider")
+            .appendPath("video").appendPath("..").appendPath("tvserver.sqlite").build()
+        assertThrows(IllegalStateException::class.java) { context.contentResolver.openFileDescriptor(traversal, "r") }
     }
 
     @Test fun mixedFileTypesShareWithReadOnlyPermission() {

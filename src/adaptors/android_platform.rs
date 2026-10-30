@@ -89,7 +89,7 @@ pub(crate) fn call(method: &str, payload: Option<&str>) -> Result<String> {
                 "(Landroid/content/Context;)Ljava/lang/String;",
                 &[JValue::Object(context.activity.as_obj())],
             )?,
-            ("openPlayer" | "shareVideos" | "exportVideo" | "beginDownload", Some(payload)) => {
+            ("openPlayer" | "shareVideos" | "exportVideo" | "beginDownload" | "openSettings", Some(payload)) => {
                 let payload = env.new_string(payload)?;
                 env.call_static_method(
                     class,

@@ -45,6 +45,7 @@ class NativePlaybackSessionTest {
     private val clips = mutableListOf<File>()
     private var previousTutorial: String? = null
     private var previousVolume = 0
+    private var previousDefaults = JSONObject()
     private fun shell(command: String): String = instrumentation.uiAutomation.executeShellCommand(command).use {
         FileInputStream(it.fileDescriptor).bufferedReader().readText()
     }
@@ -67,6 +68,7 @@ class NativePlaybackSessionTest {
         finally { instrumentation.uiAutomation.dropShellPermissionIdentity() }
     }
     @Before fun prepare() {
+        previousDefaults = NativeSettingsStore.read(context, NativePlaybackDefaults.STORE)
         wake()
         previousTutorial = Settings.Secure.getString(context.contentResolver, "immersive_mode_confirmations")
         setTutorial("confirmed")
@@ -78,6 +80,10 @@ class NativePlaybackSessionTest {
     @After fun cleanup() {
         wake()
         main { NativeBridge.playback?.stopPlayback() }
+        NativeSettingsStore.update(context, NativePlaybackDefaults.STORE) { saved ->
+            saved.keys().asSequence().toList().forEach { saved.remove(it) }
+            previousDefaults.keys().forEach { key -> saved.put(key, previousDefaults.get(key)) }
+        }
         clips.forEach { it.delete() }
         context.getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_MUSIC, previousVolume, 0)
         setTutorial(previousTutorial)
@@ -108,6 +114,42 @@ class NativePlaybackSessionTest {
         @Suppress("DEPRECATION")
         val token = notification().extras.getParcelable<android.media.session.MediaSession.Token>(Notification.EXTRA_MEDIA_SESSION)!!
         return MediaController(context, token)
+    }
+    @Test fun playbackDefaultsApplyToNewSessionsAndQueueKeepsSessionOverrides() {
+        NativeSettingsStore.update(context, NativePlaybackDefaults.STORE) {
+            it.put("rate", 1.5).put("audioDelayMs", -150).put("videoMode", "listen")
+                .put("audioMode", "watch").put("displayMode", "visualizer")
+        }
+        open().use {
+            awaitState("New session did not apply playback defaults") {
+                it.optDouble("playbackRate") == 1.5 && it.optLong("audioDelayMs") == -150L
+            }
+            assertEquals("listen", state().getString("playbackMode"))
+            assertEquals("visualizer", state().getString("displayMode"))
+            val path = state().getString("currentSrc")
+            main { NativeBridge.playback!!.control(JSONObject().put("action", "rate").put("rate", 0.75)) }
+            NativeSettingsStore.update(context, NativePlaybackDefaults.STORE) {
+                it.put("rate", 1.25).put("audioDelayMs", 50).put("displayMode", "video").put("videoMode", "watch")
+            }
+            main {
+                NativeBridge.playback!!.control(JSONObject().put("action", "enqueue").put("item",
+                    JSONObject().put("videoId", "defaults-next").put("path", path).put("audioOnly", true)))
+                NativeBridge.playback!!.control(JSONObject().put("action", "next"))
+            }
+            awaitState("Queue discarded the session's speed override") {
+                it.optString("videoId") == "defaults-next" && it.optBoolean("playing") && it.optDouble("playbackRate") == 0.75
+            }
+            assertEquals("listen", state().getString("playbackMode"))
+            assertEquals("visualizer", state().getString("displayMode"))
+            assertEquals(-150L, state().getLong("audioDelayMs"))
+            main { NativeBridge.playback!!.open(JSONObject().put("videoId", "defaults-new-session").put("path", path)) }
+            awaitState("New session did not reload changed defaults") {
+                it.optString("videoId") == "defaults-new-session" && it.optBoolean("playing") &&
+                    it.optDouble("playbackRate") == 1.25 && it.optLong("audioDelayMs") == 50L
+            }
+            assertEquals("watch", state().getString("playbackMode"))
+            assertEquals("video", state().getString("displayMode"))
+        }
     }
     @Test fun completedSavedPositionStartsAtBeginning() {
         var duration = 0.0

@@ -88,6 +88,17 @@ PYTHONPATH="$PWD/gen/android/app/src/main/assets/ytdlp/yt-dlp" \
   cargo test --no-default-features --features webserver --lib adaptors::youtube_fetcher::tests::soundcloud_ -- --include-ignored
 ```
 
+### Android storage and playback defaults
+
+The Android library's **Settings** gear opens playback defaults and **Storage & data**.
+Defaults apply to new sessions, with saved playlist Watch/Listen modes taking precedence.
+**Change media storage** moves media and thumbnails to a writable SD card or back to
+internal storage while retaining SQLite, playlists and history internally. The move
+copies and verifies files in a separate process after stopping the backend; interrupted
+copies keep the original library. Missing cards open a recovery screen before the
+backend starts. **Erase all data** requires typing `ERASE` and uses Android's app-data
+reset to clear internal and mounted app-specific external data. Exported copies are kept.
+
 ### Android playback and downloads
 
 Android uses an embedded LibVLC player, including MKV and E-AC-3 decoding,

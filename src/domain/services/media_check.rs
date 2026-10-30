@@ -135,12 +135,12 @@ impl MediaCheck {
             ).collect();
         }
 
-        self.delete_orphaned_records(current_videos).await;
+        self.delete_orphaned_records(current_videos, root).await?;
 
         Ok(())
     }
 
-    async fn find_orphaned_records(&self) -> anyhow::Result<()> {
+    async fn find_orphaned_records(&self, root: &Path) -> anyhow::Result<()> {
         let collections = self.repo.list_collection("").await?;
 
         for collection in collections {
@@ -160,18 +160,21 @@ impl MediaCheck {
                 .filter(|v| !disk_files.contains(&v.video))
                 .collect();
 
-            self.delete_orphaned_records(orphans).await;
+            self.delete_orphaned_records(orphans, root).await?;
         }
 
         Ok(())
     }
 
-    async fn delete_orphaned_records(&self, videos: Vec<VideoDetails>) {
+    async fn delete_orphaned_records(&self, videos: Vec<VideoDetails>, root: &Path) -> anyhow::Result<()> {
         for video in videos {
+            // A disconnected library is unavailable, rather than empty.
+            let _ = tokio::fs::read_dir(root).await?;
             if let Err(err) = self.repo.delete_video(video.checksum).await {
                 tracing::error!("error deleting record {}: {} - {}", video.video, video.checksum, err.to_string());
             }
         }
+        Ok(())
     }
 }
 
@@ -181,7 +184,7 @@ impl MediaChecker for MediaCheck {
         let root = PathBuf::from(get_movie_dir());
         self.process_directory(root.clone(), &root).await?;
 
-        self.find_orphaned_records().await
+        self.find_orphaned_records(&root).await
     }
 }
 
@@ -192,6 +195,22 @@ mod tests {
     use anyhow::Result;
     use std::sync::Arc;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn disconnected_library_preserves_records_during_orphan_reconciliation() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("disconnected-scan-{}", rand::random::<u64>()));
+        tokio::fs::create_dir_all(&root).await?;
+        let repo: Repository = Arc::new(SqlRepository::new(":memory:", None).await?);
+        let mut video = VideoDetails::new("keep.mp4".into(), "".into(), &root.join("keep.mp4"), None);
+        video.checksum = 123;
+        repo.save_video(&video).await?;
+        let (tx, _rx) = mpsc::channel(16);
+        let scanner = MediaCheck::new(Arc::new(FileSystemStore::new(root.to_str().unwrap())), repo.clone(), tx);
+        tokio::fs::remove_dir_all(&root).await?;
+        assert!(scanner.delete_orphaned_records(vec![video], &root).await.is_err());
+        assert_eq!(repo.retrieve_video(123).await?.video, "keep.mp4");
+        Ok(())
+    }
 
 
     #[tokio::test]
