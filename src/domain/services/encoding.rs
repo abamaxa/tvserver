@@ -334,6 +334,25 @@ const BITMAP_SUBTITLE_CODECS: &[&str] = &[
     "xsub",
 ];
 
+fn subtitle_is_current(path: &Path, source_modified: Option<std::time::SystemTime>) -> bool {
+    use std::io::Read;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file()
+        || !source_modified.zip(metadata.modified().ok())
+            .is_some_and(|(source, subtitle)| subtitle >= source)
+    {
+        return false;
+    }
+
+    let mut header = [0; 6];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok() && &header == b"WEBVTT"
+}
+
 /// Extracts subtitles from a video file to VTT format
 pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpawner>) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let subtitle_tracks = match &video.metadata.subtitle_tracks {
@@ -346,13 +365,15 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
     let current_path = video.get_full_path();
     let file_stem = current_path.file_stem().unwrap_or_default();
     let parent_dir = current_path.parent().unwrap_or_else(|| Path::new(""));
+    let source_modified = fs::metadata(&current_path).and_then(|metadata| metadata.modified()).ok();
 
     let mut extracted_files = Vec::new();
     let mut attempted_tracks = 0;
-    // Track the subtitle stream index separately since we skip bitmap tracks
-    let mut subtitle_stream_index = 0;
+    // Remember which outputs were reusable before this pass, including languages
+    // shared by multiple tracks that currently use the same sidecar filename.
+    let mut cached_outputs = std::collections::HashMap::new();
 
-    for track in subtitle_tracks.iter() {
+    for (subtitle_stream_index, track) in subtitle_tracks.iter().enumerate() {
         // Skip bitmap-based subtitle codecs that can't be converted to text
         if let Some(codec) = &track.codec {
             if BITMAP_SUBTITLE_CODECS.contains(&codec.as_str()) {
@@ -362,7 +383,6 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
                     codec,
                     track.language
                 );
-                subtitle_stream_index += 1;
                 continue;
             }
         }
@@ -374,6 +394,14 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
         };
 
         let output_path = parent_dir.join(format!("{}-{}.vtt", file_stem.to_string_lossy(), lang_code));
+        if *cached_outputs.entry(output_path.clone())
+            .or_insert_with(|| subtitle_is_current(&output_path, source_modified)) {
+            extracted_files.push(output_path);
+            continue;
+        }
+        // A failed or interrupted process must not leave a partial file that a
+        // later metadata pass could mistake for a completed extraction.
+        let temporary_path = output_path.with_extension("tmp.vtt");
 
         let codec_info = track.codec.as_deref().unwrap_or("unknown");
         tracing::info!(
@@ -386,7 +414,7 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
         );
 
         let current_path_str = current_path.to_string_lossy();
-        let output_path_str = output_path.to_string_lossy();
+        let output_path_str = temporary_path.to_string_lossy();
 
         let task_cmd = format!("0:s:{}", subtitle_stream_index);
         let args = vec![
@@ -401,21 +429,38 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
         ];
 
         attempted_tracks += 1;
-        let task_name = format!("Extract Subtitles {}", video.video);
+        let task_name = format!(
+            "Extract Subtitles {} ({}; track {})",
+            video.video, lang_code, subtitle_stream_index + 1
+        );
         let task = spawner.execute(&task_name,"ffmpeg", args).await;
         // Wait for the task to complete (2 hour timeout)
-        tokio::time::timeout(
+        if tokio::time::timeout(
             tokio::time::Duration::from_secs(7200),
             task.wait_finished(),
-        ).await.ok();
+        ).await.is_err() {
+            task.terminate();
+            let _ = fs::remove_file(&temporary_path);
+            tracing::warn!("Subtitle extraction timed out for track {} in {}", track.id, video.video);
+            continue;
+        }
 
         // Get the task state
         let result = task.get_state().await;
 
         if result.error_string.is_empty() {
-            tracing::info!("Successfully extracted subtitle track {} to {}", track.id, output_path.display());
-            extracted_files.push(output_path);
+            match fs::rename(&temporary_path, &output_path) {
+                Ok(()) => {
+                    tracing::info!("Successfully extracted subtitle track {} to {}", track.id, output_path.display());
+                    extracted_files.push(output_path);
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&temporary_path);
+                    tracing::warn!("Could not save subtitle track {} for {}: {}", track.id, video.video, error);
+                }
+            }
         } else {
+            let _ = fs::remove_file(&temporary_path);
             tracing::warn!(
                 "Failed to extract subtitle track {} (codec: {}, language: {}): {} | ffmpeg output: {}",
                 track.id,
@@ -426,8 +471,6 @@ pub async fn extract_subtitles(video: &VideoDetails, spawner: Arc<dyn ProcessSpa
             );
             // Continue with other tracks even if one fails
         }
-
-        subtitle_stream_index += 1;
     }
 
     if extracted_files.is_empty() && attempted_tracks > 0 {
@@ -443,13 +486,153 @@ mod subtitle_tests {
     use super::*;
     use crate::domain::models::VideoMetadata;
     use crate::domain::traits::{MockTaskMonitor, Task};
+    use crate::services::TaskManager;
     use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingSubtitleSpawner {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ProcessSpawner for RecordingSubtitleSpawner {
+        async fn execute(&self, name: &str, cmd: &str, args: Vec<&str>) -> Task {
+            self.calls.lock().unwrap().push(args.iter().map(|arg| arg.to_string()).collect());
+            fs::write(args.last().unwrap(), "WEBVTT\n\n").unwrap();
+            let key = format!("{} {:?}", cmd, args);
+            let name = name.to_owned();
+            let mut task = MockTaskMonitor::new();
+            task.expect_wait_finished().returning(|| ());
+            task.expect_get_key().return_const(key.clone());
+            task.expect_get_state().returning(move || crate::domain::messages::TaskState {
+                key: key.clone(),
+                name: name.clone(),
+                display_name: name.clone(),
+                finished: true,
+                ..Default::default()
+            });
+            Arc::new(task)
+        }
+    }
+
+    #[tokio::test]
+    async fn subtitle_tracks_have_distinct_visible_task_names() {
+        let video = subtitle_video();
+        let spawner = Arc::new(RecordingSubtitleSpawner::default());
+        let manager = Arc::new(TaskManager::new(spawner.clone()));
+
+        let files = extract_subtitles(&video, manager.clone()).await.unwrap();
+
+        assert_eq!(files.len(), 4);
+        let tasks = manager.get_current_state().await;
+        assert_eq!(tasks.len(), 4);
+        let names: std::collections::HashSet<_> = tasks.iter().map(|task| &task.display_name).collect();
+        assert_eq!(names.len(), 4, "subtitle tracks should not produce indistinguishable task rows");
+        fs::remove_dir_all(video.dir_path.unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_subtitles_are_not_extracted_again() {
+        let video = subtitle_video();
+        let spawner = Arc::new(RecordingSubtitleSpawner::default());
+
+        let first = extract_subtitles(&video, spawner.clone()).await.unwrap();
+        assert_eq!(first.len(), 4);
+        for _ in 0..7 {
+            assert_eq!(extract_subtitles(&video, spawner.clone()).await.unwrap(), first);
+        }
+        assert_eq!(spawner.calls.lock().unwrap().len(), 4, "later metadata passes should reuse completed subtitles");
+        fs::remove_dir_all(video.dir_path.unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_empty_and_stale_subtitles_are_regenerated() {
+        let video = subtitle_video();
+        let spawner = Arc::new(RecordingSubtitleSpawner::default());
+        let files = extract_subtitles(&video, spawner.clone()).await.unwrap();
+        fs::write(&files[0], "not a VTT file").unwrap();
+        fs::write(&files[1], "").unwrap();
+        fs::File::open(&files[2]).unwrap().set_modified(std::time::UNIX_EPOCH).unwrap();
+
+        assert_eq!(extract_subtitles(&video, spawner.clone()).await.unwrap(), files);
+        assert_eq!(spawner.calls.lock().unwrap().len(), 7);
+        for file in files {
+            assert!(fs::read_to_string(&file).unwrap().starts_with("WEBVTT"));
+            assert!(!file.with_extension("tmp.vtt").exists());
+        }
+        fs::remove_dir_all(video.dir_path.unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn updated_video_requires_fresh_subtitles() {
+        let video = subtitle_video();
+        let spawner = Arc::new(RecordingSubtitleSpawner::default());
+        let files = extract_subtitles(&video, spawner.clone()).await.unwrap();
+        fs::File::open(video.get_full_path()).unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10)).unwrap();
+
+        assert_eq!(extract_subtitles(&video, spawner.clone()).await.unwrap(), files);
+        assert_eq!(spawner.calls.lock().unwrap().len(), 8);
+        fs::remove_dir_all(video.dir_path.unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_language_tracks_remain_distinguishable_and_reuse_existing_outputs() {
+        let mut video = subtitle_video();
+        video.metadata.subtitle_tracks.as_mut().unwrap()[1].language = "eng".into();
+        let spawner = Arc::new(RecordingSubtitleSpawner::default());
+        let manager = Arc::new(TaskManager::new(spawner.clone()));
+        let files = extract_subtitles(&video, manager.clone()).await.unwrap();
+        let tasks = manager.get_current_state().await;
+        let names: std::collections::HashSet<_> = tasks.iter().map(|task| &task.display_name).collect();
+
+        assert_eq!(names.len(), 4);
+        assert_eq!(extract_subtitles(&video, manager).await.unwrap(), files);
+        assert_eq!(spawner.calls.lock().unwrap().len(), 4);
+        fs::remove_dir_all(video.dir_path.unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bitmap_tracks_do_not_shift_text_stream_mappings() {
+        let mut video = subtitle_video();
+        video.metadata.subtitle_tracks.as_mut().unwrap()[0].codec = Some("dvb_subtitle".into());
+        let spawner = Arc::new(RecordingSubtitleSpawner::default());
+
+        assert_eq!(extract_subtitles(&video, spawner.clone()).await.unwrap().len(), 3);
+        let mappings: Vec<String> = spawner.calls.lock().unwrap().iter()
+            .map(|args| args[args.iter().position(|arg| arg == "-map").unwrap() + 1].clone())
+            .collect();
+        assert_eq!(mappings, ["0:s:1", "0:s:2", "0:s:3"]);
+        fs::remove_dir_all(video.dir_path.unwrap()).unwrap();
+    }
+
+    fn subtitle_video() -> VideoDetails {
+        let dir = std::env::temp_dir().join(format!("subtitle-task-test-{}", rand::random::<u64>()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("episode.mkv"), "video fixture").unwrap();
+        VideoDetails {
+            video: "episode.mkv".into(),
+            dir_path: Some(dir),
+            metadata: VideoMetadata {
+                subtitle_tracks: Some(serde_json::from_value(serde_json::json!([
+                    { "id": 2, "language": "eng", "codec": "subrip" },
+                    { "id": 3, "language": "spa", "codec": "subrip" },
+                    { "id": 4, "language": "fra", "codec": "subrip" },
+                    { "id": 5, "language": "deu", "codec": "subrip" }
+                ])).unwrap()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
 
     struct FailedSubtitleSpawner;
 
     #[async_trait]
     impl ProcessSpawner for FailedSubtitleSpawner {
-        async fn execute(&self, _: &str, _: &str, _: Vec<&str>) -> Task {
+        async fn execute(&self, _: &str, _: &str, args: Vec<&str>) -> Task {
+            fs::write(args.last().unwrap(), "WEBVTT\n\npartial output").unwrap();
             let mut task = MockTaskMonitor::new();
             task.expect_wait_finished().returning(|| ());
             task.expect_get_state().returning(|| crate::domain::messages::TaskState {
@@ -463,18 +646,15 @@ mod subtitle_tests {
     #[tokio::test]
     async fn skipped_bitmap_and_failed_text_subtitles_are_nonfatal() {
         for codec in ["dvb_subtitle", "subrip"] {
-            let video = VideoDetails {
-                video: "episode.mkv".into(),
-                dir_path: Some(PathBuf::from("/tmp")),
-                metadata: VideoMetadata {
-                    subtitle_tracks: Some(serde_json::from_value(serde_json::json!([
-                        { "id": 2, "language": "eng", "codec": codec }
-                    ])).unwrap()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
+            let mut video = subtitle_video();
+            let tracks = video.metadata.subtitle_tracks.as_mut().unwrap();
+            tracks.truncate(1);
+            tracks[0].codec = Some(codec.into());
             assert!(extract_subtitles(&video, Arc::new(FailedSubtitleSpawner)).await.unwrap().is_empty());
+            let dir = video.dir_path.unwrap();
+            assert!(!dir.join("episode-ENG.vtt").exists());
+            assert!(!dir.join("episode-ENG.tmp.vtt").exists());
+            fs::remove_dir_all(dir).unwrap();
         }
     }
 }
