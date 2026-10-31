@@ -254,7 +254,7 @@ class NativePlayerActivity : Activity() {
             setPadding(chrome.dp(24), chrome.dp(8), chrome.dp(24), chrome.dp(8))
         }
         panel.addView(TextView(this).apply {
-            text = "If sound follows the picture, choose Earlier. Your correction is remembered on this device."
+            text = "Bluetooth output timing is adjusted automatically. Use Earlier or Later for an additional correction, remembered for all videos on this device."
         })
         val reading = TextView(this).apply {
             text = audioSyncLabel(delay)

@@ -138,13 +138,19 @@ the current session; saved playlist edits take effect the next time it is opened
 Selecting a completed video again starts it from the beginning, including older
 saved positions at the end of a file. Unfinished videos keep their resume position.
 
-Open **Playback settings → Audio sync** to correct audio timing while watching.
+Bluetooth PCM playback automatically compensates for the active output's reported
+presentation delay. A short silent playback probe reads Android's output timestamps;
+it does not record audio or use the microphone. Timing is rechecked when the output
+changes, and the tablet speaker does not inherit the Bluetooth correction. Unsupported
+or unstable timestamps leave the optional manual adjustment available.
+
+Open **Playback settings → Audio sync** for an additional audio timing correction.
 Choose **Earlier** when sound follows the picture, or **Later** when sound leads
 it. Each step adjusts audio by 50 ms, up to five seconds in either direction.
 The correction is saved on this device and restored for subsequent videos and
-playlist items. **Reset** restores the default timing. This is an adjustable
-correction; automatic compensation for a particular speaker or Bluetooth device
-still depends on its reported output latency.
+playlist items. **Reset** removes the manual correction while retaining automatic
+Bluetooth timing. Reset any manual offset previously used to compensate for
+Bluetooth latency, so that delay is not compensated twice.
 
 `NativePlaybackService` owns the single LibVLC player, Android `MediaSession`,
 audio focus, foreground notification and playback wake lock. The Activity only
