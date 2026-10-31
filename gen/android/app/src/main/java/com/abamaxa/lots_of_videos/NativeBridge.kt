@@ -23,6 +23,16 @@ object NativeBridge {
     @JvmStatic external fun nativeDownloadStopped(id: String, reason: String)
 
     @JvmStatic
+    fun openSettings(activity: Activity, payload: String): String {
+        val request = JSONObject(payload)
+        activity.runOnUiThread {
+            activity.startActivity(Intent(activity, AppSettingsActivity::class.java)
+                .putExtra("downloadsActive", request.optBoolean("tasksActive") || NativeDownloads.entries().isNotEmpty()))
+        }
+        return "{}"
+    }
+
+    @JvmStatic
     fun beginDownload(activity: Activity, payload: String): String {
         activity.runOnUiThread { (activity as? MainActivity)?.requestDownloadNotifications() }
         return NativeDownloads.begin(activity.applicationContext, payload)

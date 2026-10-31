@@ -19,9 +19,12 @@ pub fn run_tauri() {
         .setup(|app| {
             #[cfg(target_os = "android")]
             {
+                let media_root = std::env::var_os("TVSERVER_MEDIA_ROOT")
+                    .ok_or_else(|| anyhow::anyhow!("Android media storage is unavailable"))?;
                 let storage = super::app_storage::AppStorage::initialize(
                     app.path().app_data_dir()?,
                     app.path().app_cache_dir()?,
+                    std::path::PathBuf::from(media_root),
                 )?;
                 storage.configure_environment();
                 crate::adaptors::android_platform::initialize(app)?;

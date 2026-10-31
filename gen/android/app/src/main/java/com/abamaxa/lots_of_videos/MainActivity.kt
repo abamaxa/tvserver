@@ -82,6 +82,8 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Resolve the persisted Android volume before Tauri starts Rust or opens SQLite.
+        android.system.Os.setenv("TVSERVER_MEDIA_ROOT", NativeStorage.requireMediaRoot(this).path, true)
         super.onCreate(savedInstanceState)
         savedInstanceState?.getString("pendingVideoExport")?.let { path ->
             pendingExport = runCatching {

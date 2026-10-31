@@ -1173,7 +1173,8 @@ impl FileStore for FileSystemStore {
         }
 
         let mut read_dir = fs::read_dir(path).await?;
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
+        // A removed SD card must fail the scan, not turn a partial listing into deleted records.
+        while let Some(entry) = read_dir.next_entry().await? {
             if let Ok(name) = entry.file_name().into_string() {
                 if entry.path().is_dir() {
                     directories.push(name);
