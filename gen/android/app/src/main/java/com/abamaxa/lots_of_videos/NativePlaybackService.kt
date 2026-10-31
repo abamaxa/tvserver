@@ -61,6 +61,8 @@ class NativePlaybackService : Service() {
     private var sessionId = ""
     private var focusRequest: AudioFocusRequest? = null
     private var audioDelayMs = 0L
+    private var outputLatencyUs = 0L
+    private lateinit var outputTiming: NativeAudioOutputLatency
     private var sessionDefaults = NativePlaybackDefaults()
     private var softwareVideo = false
     private val videoCallback = object : IVLCVout.Callback {
@@ -111,6 +113,7 @@ class NativePlaybackService : Service() {
     private val ticker = object : Runnable {
         override fun run() {
             if (closing) return
+            outputTiming.checkRoute()
             if (desiredPlaying) publish()
             handler.postDelayed(this, 1000)
         }
@@ -121,6 +124,11 @@ class NativePlaybackService : Service() {
         NativeBridge.playback = this
         audioManager = getSystemService(AudioManager::class.java)
         audioSessionId = audioManager.generateAudioSessionId()
+        outputTiming = NativeAudioOutputLatency(this) { latency ->
+            outputLatencyUs = latency
+            playback?.setAudioDelay(NativeAudioLatencyEstimate.effective(audioDelayMs, latency))
+            if (!closing) publish()
+        }
         audioDelayMs = getSharedPreferences("native-playback", MODE_PRIVATE)
             .getLong("audio-delay-ms", 0L).coerceIn(-5000L, 5000L)
         wakeLock = getSystemService(PowerManager::class.java)
@@ -229,7 +237,8 @@ class NativePlaybackService : Service() {
                             // VLC initializes its audio output asynchronously and resets
                             // volume then. Restore it after that output is actually ready.
                             player.setVolume(volume)
-                            player.setAudioDelay(audioDelayMs * 1000L)
+                            player.setAudioDelay(NativeAudioLatencyEstimate.effective(audioDelayMs, outputLatencyUs))
+                            outputTiming.checkRoute(force = true)
                         }
                         restoreStartPosition(player)
                         if (desiredPlaying) pendingResumePosition?.let { position ->
@@ -429,7 +438,7 @@ class NativePlaybackService : Service() {
     fun setAudioDelay(milliseconds: Long): Boolean {
         val delay = milliseconds.coerceIn(-5000L, 5000L)
         // LibVLC uses microseconds; a negative value advances late audio.
-        if (playback?.setAudioDelay(delay * 1000L) != true) return false
+        if (playback?.setAudioDelay(NativeAudioLatencyEstimate.effective(delay, outputLatencyUs)) != true) return false
         audioDelayMs = delay
         getSharedPreferences("native-playback", MODE_PRIVATE).edit()
             .putLong("audio-delay-ms", delay).apply()
@@ -497,7 +506,9 @@ class NativePlaybackService : Service() {
             .put("currentTime", lastPosition / 1000.0).put("duration", lastDuration / 1000.0)
             .put("paused", !desiredPlaying || closing).put("playing", player?.isPlaying == true && !closing)
             .put("playbackRate", player?.rate?.toDouble() ?: 1.0).put("volume", player?.volume ?: 100)
-            .put("audioDelayMs", (player?.audioDelay ?: audioDelayMs * 1000L) / 1000L)
+            .put("audioDelayMs", audioDelayMs)
+            .put("outputLatencyMs", outputLatencyUs / 1000L)
+            .put("effectiveAudioDelayMs", (player?.audioDelay ?: NativeAudioLatencyEstimate.effective(audioDelayMs, outputLatencyUs)) / 1000L)
             .put("videoDecoder", if (softwareVideo) "software" else "auto")
             .put("currentSubtitleTrack", player?.spuTrack ?: -1).put("currentAudioTrack", player?.audioTrack ?: -1)
             .put("audioTracks", player?.audioTracksCount ?: 0).put("decodedAudio", stats?.decodedAudio ?: 0)
@@ -619,6 +630,7 @@ class NativePlaybackService : Service() {
 
     override fun onDestroy() {
         if (!closing) stopPlayback()
+        outputTiming.close()
         handler.removeCallbacksAndMessages(null)
         unregisterReceiver(noisyReceiver)
         if (wakeLock.isHeld) wakeLock.release()
