@@ -6,18 +6,24 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Test suite (media timing is opt-in because capture timing varies on CI)
+        type: choice
+        options: [regression, media-timing]
+        default: regression
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.workflow }}-${{ github.ref }}
+  group: android-${{ github.workflow }}-${{ github.ref }}-${{ inputs.suite || 'regression' }}
   cancel-in-progress: true
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       NDK_VERSION: '26.2.11394342'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -31,10 +37,10 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Test release signing prerequisites
-        run: python3 -B -m unittest discover -s tests -p android_release_runtime_smoke_test.py -v
+        run: python3 -B -m unittest discover -s tests -p "android_*_test.py" -v
       - name: Prepare shared Android debug signing key
-        # Create this before Tauri caches a signed debug APK so the release probe
-        # and later Gradle instrumentation use the same certificate.
+        # Create this before Tauri caches a signed debug APK so the app and
+        # instrumentation APKs use the same certificate on every device shard.
         run: python3 -B tests/android_release_runtime_smoke.py --prepare-signing-key
       - uses: android-actions/setup-android@v3
         with:
@@ -85,8 +91,8 @@ jobs:
       - name: Build and verify instrumentation APK signatures
         working-directory: gen/android
         run: |
-          # Use one certificate for the app, instrumentation and release probe.
-          ./gradlew --no-daemon :app:assembleUniversalDebug :app:assembleUniversalDebugAndroidTest --rerun-tasks \
+          # Verify that the reusable app and instrumentation APKs match.
+          ./gradlew --no-daemon :app:assembleUniversalDebug :app:assembleUniversalDebugAndroidTest \
             -x :app:rustBuildUniversalDebug -PabiList=x86_64 \
             -Pandroid.injected.signing.store.file="$HOME/.android/debug.keystore" \
             -Pandroid.injected.signing.store.password=android \
@@ -101,6 +107,54 @@ jobs:
               exit 1
             fi
           done
+      - name: Build minified release APK
+        working-directory: gen/android
+        run: ./gradlew --no-daemon :app:assembleUniversalRelease -x :app:rustBuildUniversalRelease -PabiList=x86_64
+      - name: Stage APKs for device jobs
+        run: |
+          mkdir -p "$RUNNER_TEMP/android-test-apks"
+          cp gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk "$RUNNER_TEMP/android-test-apks/app-debug.apk"
+          cp gen/android/app/build/outputs/apk/androidTest/universal/debug/app-universal-debug-androidTest.apk "$RUNNER_TEMP/android-test-apks/app-test.apk"
+          cp gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk "$RUNNER_TEMP/android-test-apks/app-release.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-test-apks
+          path: ${{ runner.temp }}/android-test-apks/
+          compression-level: 0
+          retention-days: 3
+      - name: Upload build test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-test-reports
+          path: |
+            gen/android/app/build/reports/tests/
+            gen/android/app/build/test-results/
+          if-no-files-found: warn
+
+  device:
+    name: ${{ inputs.suite == 'media-timing' && 'Manual media timing' || format('Device tests ({0}/3)', matrix.shard) }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.suite == 'media-timing' && '[1]' || '[1,2,3]') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-36 build-tools;36.0.0
+          log-accepted-android-sdk-licenses: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-test-apks
+          path: android-test-apks
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -115,26 +169,29 @@ jobs:
           profile: pixel_5
           emulator-options: -no-window -gpu swangle -skin 540x1170 -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
-          working-directory: gen/android
           script: |
-            # Keep Pixel 5's logical dimensions while reducing software-rendered
-            # pixels and screenshot work by 75% on the shared CI runner.
+            # Preserve Pixel 5's logical layout with 75% fewer rendered pixels.
             adb shell wm density 220
-            adb shell wm size
-            adb shell wm density
-            # Reuse the JNI bridge already built above; the regression exercises
-            # the release-minified Java extraction path with fresh runtime data.
-            ./gradlew --no-daemon :app:assembleUniversalRelease -x :app:rustBuildUniversalRelease -PabiList=x86_64
-            python3 ../../tests/android_release_runtime_smoke.py --serial emulator-5554 --apk app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
-            ./gradlew --no-daemon :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug -PabiList=x86_64 -Pandroid.injected.signing.store.file="$HOME/.android/debug.keystore" -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android -Pandroid.injected.signing.store.type=JKS
-      - name: Upload Android test reports
+            python3 tests/android_instrumentation.py --serial emulator-5554 --shard ${{ matrix.shard }} --suite ${{ inputs.suite || 'regression' }}
+      - name: Upload device reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-test-reports
-          path: |
-            gen/android/app/build/reports/androidTests/
-            gen/android/app/build/reports/tests/
-            gen/android/app/build/test-results/
-            gen/android/app/build/outputs/androidTest-results/
+          name: android-device-reports-${{ matrix.shard }}
+          path: android-device-reports/
           if-no-files-found: warn
+
+  test:
+    # Preserve the existing required check name while waiting for every shard.
+    name: ${{ inputs.suite == 'media-timing' && 'manual timing result' || 'test' }}
+    if: always()
+    needs: [build, device]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful build and device jobs
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEVICE_RESULT: ${{ needs.device.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$DEVICE_RESULT" = success

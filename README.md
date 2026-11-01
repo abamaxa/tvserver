@@ -378,20 +378,39 @@ GitHub Actions runs `.github/workflows/rust.yml` and
 integration, and GitHub automation tests. Fixture-backed YouTube tests use a
 dummy API key and do not need `GOOGLE_KEY`, yt-dlp, or live YouTube access.
 
-The Android job builds an x86_64 debug APK with JDK 21, SDK 36 and NDK
-26.2.11394342, then runs every Kotlin instrumentation test on an API 35 emulator.
-This covers native playback, bundled Python/yt-dlp/FFmpeg/QuickJS, file sharing,
-export, and library path boundaries. It uploads instrumentation reports even
-when tests fail. The native test build uses a temporary minimal HTML asset so
+The Android workflow builds the debug, instrumentation and minified release APKs
+once with JDK 21, SDK 36 and NDK 26.2.11394342. Three parallel API 35 emulator
+jobs reuse those APKs and split the regression suite with AndroidJUnitRunner's
+`numShards` / `shardIndex` arguments. The first shard also checks fresh release
+runtime extraction. The final `test` check requires the build and every shard to
+pass; a failed shard does not cancel the others.
+
+The PR suite covers native playback, settings, bundled Python/yt-dlp/FFmpeg/QuickJS,
+file sharing, export, and library path boundaries. Each shard uploads its runner
+transcript and logcat, including ANR diagnostics on failure. The native test build
+uses a temporary minimal HTML asset so
 it can run in this repository without access to the private frontend. Frontend
 behavior is checked by the frontend repository's own CI workflow.
 
-After a normal Android build, run the same instrumentation suite locally:
+Three picture/PCM synchronization probes carry `@ManualMediaTiming`: H.264 sync,
+AV1 sync, and the deliberately delayed audio negative control. Their screenshot
+and audio sampling windows are sensitive to shared emulator load. They remain
+unchanged and can be run from **Actions → Android Kotlin tests → Run workflow →
+suite: media-timing**. This manual result is separate from the required `test`
+check. Deterministic lifecycle and resume-position regressions remain in PR CI.
+
+After a normal Android build, run the PR suite locally:
 
 ```shell
 cd gen/android
-./gradlew :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug
+./gradlew :app:connectedUniversalDebugAndroidTest -x :app:rustBuildUniversalDebug \
+  -Pandroid.testInstrumentationRunnerArguments.notAnnotation=com.abamaxa.lots_of_videos.ManualMediaTiming
 ```
+
+Use `annotation` instead of `notAnnotation` to run only the manual timing probes.
+Omit the filter to run both suites. To run one of the three PR shards locally,
+add `-Pandroid.testInstrumentationRunnerArguments.numShards=3` and
+`-Pandroid.testInstrumentationRunnerArguments.shardIndex=0` (or `1` / `2`).
 
 ## Obtaining a Google API Key
 

@@ -165,9 +165,9 @@ class NativePlaybackSessionTest {
             assertTrue("Replayed video started at the saved end", state().getDouble("currentTime") < duration / 2)
         }
     }
-    @Test fun videoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av-sync-test.mp4")
-    @Test fun downloadedAv1VideoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av1-sync-test.mp4")
-    @Test fun syncProbeRejectsDelayedAudio() {
+    @Test @ManualMediaTiming fun videoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av-sync-test.mp4")
+    @Test @ManualMediaTiming fun downloadedAv1VideoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av1-sync-test.mp4")
+    @Test @ManualMediaTiming fun syncProbeRejectsDelayedAudio() {
         val preferences = context.getSharedPreferences("native-playback", android.content.Context.MODE_PRIVATE)
         val previous = preferences.getLong("audio-delay-ms", 0L)
         try {
