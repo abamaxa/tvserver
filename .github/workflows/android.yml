@@ -113,12 +113,15 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_5
-          # Match the ANGLE/SwiftShader path used by local native media tests.
-          # The action's legacy SwiftShader default uses a different GLES path on Linux.
-          emulator-options: -no-window -gpu swangle -no-snapshot -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu swangle -skin 540x1170 -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           working-directory: gen/android
           script: |
+            # Keep Pixel 5's logical dimensions while reducing software-rendered
+            # pixels and screenshot work by 75% on the shared CI runner.
+            adb shell wm density 220
+            adb shell wm size
+            adb shell wm density
             # Reuse the JNI bridge already built above; the regression exercises
             # the release-minified Java extraction path with fresh runtime data.
             ./gradlew --no-daemon :app:assembleUniversalRelease -x :app:rustBuildUniversalRelease -PabiList=x86_64
