@@ -28,15 +28,18 @@ import org.json.JSONObject
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.interfaces.IMedia
 import org.videolan.libvlc.interfaces.IVLCVout
 import org.videolan.libvlc.util.VLCVideoLayout
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
 
 /** Sole owner of the decoder, sound, media session and progress, independent of any window. */
 class NativePlaybackService : Service() {
     inner class LocalBinder : Binder() { val service get() = this@NativePlaybackService }
     private val handler = Handler(Looper.getMainLooper())
+    private val decoderReleases = Executors.newSingleThreadExecutor { task -> Thread(task, "native-player-release") }
     private val listeners = mutableSetOf<(JSONObject) -> Unit>()
     private lateinit var audioManager: AudioManager
     private lateinit var session: MediaSession
@@ -250,6 +253,10 @@ class NativePlaybackService : Service() {
                         publish()
                     }
                     MediaPlayer.Event.SeekableChanged, MediaPlayer.Event.LengthChanged -> restoreStartPosition(player)
+                    MediaPlayer.Event.ESSelected -> {
+                        if (event.esChangedType == IMedia.Track.Type.Video && event.esChangedID >= 0)
+                            refreshPausedVideoFrame(player)
+                    }
                     MediaPlayer.Event.EncounteredError -> {
                         errorMessage = "This video could not be played."
                         pause()
@@ -318,7 +325,9 @@ class NativePlaybackService : Service() {
         surface = null
     }
 
-    fun setUiVisible(visible: Boolean) {
+    fun setUiVisible(visible: Boolean, expected: VLCVideoLayout) {
+        // A retiring Activity can stop after its replacement has already attached.
+        if (surface !== expected) return
         uiVisible = visible
         if (!visible && !backgroundAudio) pause() else publish()
         updateVideoOutput()
@@ -352,13 +361,17 @@ class NativePlaybackService : Service() {
     private fun updateVideoOutput() {
         val player = playback ?: return
         val enabled = uiVisible && surface != null && displayMode == "video"
-        val refreshPausedFrame = enabled && !videoOutputEnabled && !desiredPlaying && player.isSeekable
-        val position = if (desiredPlaying) player.time.coerceAtLeast(0) else lastPosition
+        val refreshPausedFrame = enabled && !videoOutputEnabled
         player.setVideoTrackEnabled(enabled)
         videoOutputEnabled = enabled
-        // Enabling VLC's video track while paused creates an empty output. A precise
-        // seek at the same timestamp decodes its still frame without playing audio.
-        if (refreshPausedFrame) player.setTime(position, false)
+        if (refreshPausedFrame) refreshPausedVideoFrame(player)
+    }
+
+    private fun refreshPausedVideoFrame(player: MediaPlayer) {
+        // Track selection and surface creation complete asynchronously, in either
+        // order. Seek only once video is selected, and retry on its ESSelected event.
+        if (!desiredPlaying && uiVisible && surface != null && displayMode == "video" &&
+            player.isSeekable && player.videoTrack >= 0) player.setTime(lastPosition, false)
     }
 
     private fun canPlay() = playback != null && !closing && (uiVisible || backgroundAudio)
@@ -390,9 +403,9 @@ class NativePlaybackService : Service() {
         // Resume from the held user position rather than that decoder timestamp.
         // Wait for VLC to resume before restoring the position, so its paused
         // frame/audio-track operations cannot overwrite the new seek.
-        if (!desiredPlaying) pendingResumePosition = lastPosition.takeIf {
-            playback?.isSeekable == true && playback?.time != lastPosition
-        }
+        // A queued paused seek can still change the decoder clock after this call,
+        // even when its currently reported time already matches the held position.
+        if (!desiredPlaying) pendingResumePosition = lastPosition.takeIf { playback?.isSeekable == true }
         desiredPlaying = true
         playback?.play()
         publish()
@@ -614,13 +627,27 @@ class NativePlaybackService : Service() {
         pendingResumePosition = null
         if (playback == null && engine == null) return
         abandonFocus()
-        playback?.run { vlcVout.removeCallback(videoCallback); setEventListener(null); stop(); detachViews(); release() }
+        val retiredPlayer = playback
+        val retiredMedia = media
+        val retiredEngine = engine
         playback = null
         videoOutputEnabled = false
-        media?.release()
         media = null
-        engine?.release()
         engine = null
+        // Views belong to the UI thread, but native stop/release can wait on the
+        // codec. Retire these instances before releasing them off the UI thread.
+        retiredPlayer?.run {
+            vlcVout.removeCallback(videoCallback)
+            setEventListener(null)
+            pause()
+            detachViews()
+        }
+        decoderReleases.execute {
+            retiredPlayer?.stop()
+            retiredPlayer?.release()
+            retiredMedia?.release()
+            retiredEngine?.release()
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -630,6 +657,7 @@ class NativePlaybackService : Service() {
 
     override fun onDestroy() {
         if (!closing) stopPlayback()
+        decoderReleases.shutdown()
         outputTiming.close()
         handler.removeCallbacksAndMessages(null)
         unregisterReceiver(noisyReceiver)

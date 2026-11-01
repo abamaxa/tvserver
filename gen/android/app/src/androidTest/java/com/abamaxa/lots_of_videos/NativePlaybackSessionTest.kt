@@ -33,6 +33,7 @@ import org.junit.Before
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.videolan.libvlc.util.VLCVideoLayout
 import java.io.File
 import java.io.FileInputStream
 
@@ -164,9 +165,9 @@ class NativePlaybackSessionTest {
             assertTrue("Replayed video started at the saved end", state().getDouble("currentTime") < duration / 2)
         }
     }
-    @Test fun videoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av-sync-test.mp4")
-    @Test fun downloadedAv1VideoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av1-sync-test.mp4")
-    @Test fun syncProbeRejectsDelayedAudio() {
+    @Test @ManualMediaTiming fun videoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av-sync-test.mp4")
+    @Test @ManualMediaTiming fun downloadedAv1VideoAndAudioStayTogetherAfterSeekingAndDisplayChanges() = verifyAudioVideoSync("native-av1-sync-test.mp4")
+    @Test @ManualMediaTiming fun syncProbeRejectsDelayedAudio() {
         val preferences = context.getSharedPreferences("native-playback", android.content.Context.MODE_PRIVATE)
         val previous = preferences.getLong("audio-delay-ms", 0L)
         try {
@@ -339,6 +340,24 @@ class NativePlaybackSessionTest {
                 awaitState("Player did not reconnect") { it.optBoolean("uiVisible") && it.optBoolean("playing") }
                 assertEquals(session, state().getString("sessionId"))
                 assertTrue(state().getDouble("currentTime") > position)
+            }
+        }
+    }
+    @Test fun retiringPlayerWindowDoesNotHideItsReplacement() {
+        open(audioOnly = true).use { original ->
+            val session = state().getString("sessionId")
+            original.onActivity { retiring ->
+                val playback = NativeBridge.playback!!
+                // A replacement window attaches a different surface before the
+                // retiring window's delayed onStop. Replay that callback order.
+                val replacement = VLCVideoLayout(retiring)
+                playback.attachSurface(replacement)
+                playback.setUiVisible(true, replacement)
+                try {
+                    instrumentation.callActivityOnStop(retiring)
+                    assertTrue("Retiring window hid the replacement player: ${state()}", state().getBoolean("uiVisible"))
+                    assertEquals(session, state().getString("sessionId"))
+                } finally { instrumentation.callActivityOnResume(retiring) }
             }
         }
     }
