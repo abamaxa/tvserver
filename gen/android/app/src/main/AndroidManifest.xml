@@ -47,7 +47,7 @@
             android:process=":settings"
             android:exported="false"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode"
-            android:theme="@style/Theme.tvserver" />
+            android:theme="@style/Theme.LotsOfVideos.Settings" />
 
         <activity
             android:name=".NativePlayerActivity"
