@@ -33,11 +33,13 @@ import org.videolan.libvlc.interfaces.IVLCVout
 import org.videolan.libvlc.util.VLCVideoLayout
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
 
 /** Sole owner of the decoder, sound, media session and progress, independent of any window. */
 class NativePlaybackService : Service() {
     inner class LocalBinder : Binder() { val service get() = this@NativePlaybackService }
     private val handler = Handler(Looper.getMainLooper())
+    private val decoderReleases = Executors.newSingleThreadExecutor { task -> Thread(task, "native-player-release") }
     private val listeners = mutableSetOf<(JSONObject) -> Unit>()
     private lateinit var audioManager: AudioManager
     private lateinit var session: MediaSession
@@ -625,13 +627,27 @@ class NativePlaybackService : Service() {
         pendingResumePosition = null
         if (playback == null && engine == null) return
         abandonFocus()
-        playback?.run { vlcVout.removeCallback(videoCallback); setEventListener(null); stop(); detachViews(); release() }
+        val retiredPlayer = playback
+        val retiredMedia = media
+        val retiredEngine = engine
         playback = null
         videoOutputEnabled = false
-        media?.release()
         media = null
-        engine?.release()
         engine = null
+        // Views belong to the UI thread, but native stop/release can wait on the
+        // codec. Retire these instances before releasing them off the UI thread.
+        retiredPlayer?.run {
+            vlcVout.removeCallback(videoCallback)
+            setEventListener(null)
+            pause()
+            detachViews()
+        }
+        decoderReleases.execute {
+            retiredPlayer?.stop()
+            retiredPlayer?.release()
+            retiredMedia?.release()
+            retiredEngine?.release()
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -641,6 +657,7 @@ class NativePlaybackService : Service() {
 
     override fun onDestroy() {
         if (!closing) stopPlayback()
+        decoderReleases.shutdown()
         outputTiming.close()
         handler.removeCallbacksAndMessages(null)
         unregisterReceiver(noisyReceiver)
