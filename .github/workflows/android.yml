@@ -113,6 +113,9 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_5
+          # Match the ANGLE/SwiftShader path used by local native media tests.
+          # The action's legacy SwiftShader default uses a different GLES path on Linux.
+          emulator-options: -no-window -gpu swangle -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
           working-directory: gen/android
           script: |
