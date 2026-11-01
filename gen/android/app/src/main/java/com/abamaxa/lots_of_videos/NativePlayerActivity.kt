@@ -60,7 +60,7 @@ class NativePlayerActivity : Activity() {
             service = playback
             if (resumed) {
                 playback.attachSurface(surface)
-                playback.setUiVisible(true)
+                playback.setUiVisible(true, surface)
             }
             request?.let { playback.open(it) }
             request = null
@@ -337,7 +337,7 @@ class NativePlayerActivity : Activity() {
         super.onResume()
         resumed = true
         service?.attachSurface(surface)
-        service?.setUiVisible(true)
+        service?.setUiVisible(true, surface)
         service?.snapshot()?.let { update(it) }
         showControls()
     }
@@ -345,12 +345,12 @@ class NativePlayerActivity : Activity() {
     override fun onPause() {
         resumed = false
         visualizer?.setPlayback(false, state.optInt("audioSessionId"))
-        if (!requestingAnalysisPermission) service?.setUiVisible(false)
+        if (!requestingAnalysisPermission) service?.setUiVisible(false, surface)
         super.onPause()
     }
 
     override fun onStop() {
-        service?.setUiVisible(false)
+        service?.setUiVisible(false, surface)
         service?.detachSurface(surface)
         super.onStop()
     }

@@ -318,7 +318,9 @@ class NativePlaybackService : Service() {
         surface = null
     }
 
-    fun setUiVisible(visible: Boolean) {
+    fun setUiVisible(visible: Boolean, expected: VLCVideoLayout) {
+        // A retiring Activity can stop after its replacement has already attached.
+        if (surface !== expected) return
         uiVisible = visible
         if (!visible && !backgroundAudio) pause() else publish()
         updateVideoOutput()
